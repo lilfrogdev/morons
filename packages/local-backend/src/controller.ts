@@ -7,6 +7,7 @@ import {
   section,
   type Conversation,
   type Submission,
+  type Storage,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import {
@@ -42,6 +43,7 @@ export class Controller {
   private gate: Promise<unknown> = Promise.resolve();
   private harness!: Harness;
   private root!: Conversation;
+  private storage!: Storage;
   private closing = false;
   readonly approvals: ApprovalStore;
   constructor(
@@ -120,8 +122,9 @@ export class Controller {
         return provider.streamSimple(m, i, o);
       },
     });
+    this.storage = await openNodeSqliteStorage(this.piPath);
     this.harness = await Harness.open(
-      await openNodeSqliteStorage(this.piPath),
+      this.storage,
       {
         models,
         registry,
@@ -145,26 +148,36 @@ export class Controller {
     this.harness.resume();
   }
   private async drive(row: Row) {
-    if (row.stopRequested && !row.submissionId) {
-      this.db
-        .prepare("UPDATE morons_tasks SET status='stopped' WHERE id=?")
-        .run(row.id);
-      return;
-    }
-    const submission = row.submissionId
+    const existing = row.submissionId
       ? await this.harness.submission(
           Number(row.submissionId) as Submission["id"],
           context,
         )
-      : await this.root.submit(
-          {
-            type: "input",
-            content: row.input,
-            requestId: row.id,
-            whenBusy: "reject",
-          },
-          context,
-        );
+      : await this.storage
+          .submissionByRequest(this.root.id, row.id, context)
+          .then((record) =>
+            record ? this.harness.submission(record.id, context) : undefined,
+          );
+    if (row.stopRequested && !existing) {
+      this.approvals.cancelTask(row.id);
+      this.db
+        .prepare(
+          "UPDATE morons_tasks SET status='stopped',updatedAt=? WHERE id=?",
+        )
+        .run(Date.now(), row.id);
+      return;
+    }
+    const submission =
+      existing ??
+      (await this.root.submit(
+        {
+          type: "input",
+          content: row.input,
+          requestId: row.id,
+          whenBusy: "reject",
+        },
+        context,
+      ));
     if (!submission) throw new Error("Missing submission");
     this.db
       .prepare(

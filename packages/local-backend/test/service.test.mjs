@@ -276,10 +276,14 @@ test("Pi admission survives missing projection and durable Stop survives restart
   service = await launch(dir);
   assert.equal((await terminal(service.connection, id)).status, "completed");
   let pi = new DatabaseSync(join(dir, "pi.sqlite"));
-  const tables = pi
-    .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-    .all();
-  assert.ok(tables.length > 0);
+  const submissions = pi
+    .prepare("SELECT record FROM submissions")
+    .all()
+    .map((row) => JSON.parse(row.record));
+  assert.equal(
+    submissions.filter((record) => record.requestId === id).length,
+    1,
+  );
   pi.close();
   const stop = randomUUID();
   await request(service.connection, "/v1/root/tasks", {
@@ -289,7 +293,9 @@ test("Pi admission survives missing projection and durable Stop survives restart
   service.child.kill("SIGKILL");
   await service.exited;
   const c = new DatabaseSync(join(dir, "control.sqlite"));
-  c.prepare("UPDATE morons_tasks SET stopRequested=1 WHERE id=?").run(stop);
+  c.prepare(
+    "UPDATE morons_tasks SET stopRequested=1,submissionId=NULL WHERE id=?",
+  ).run(stop);
   c.close();
   service = await launch(dir);
   assert.equal((await terminal(service.connection, stop)).status, "stopped");
@@ -324,4 +330,43 @@ test("unsafe directory and symlink state fail closed before discovery", async ()
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+test("large bounded SSE snapshot drains completely and keeps observation connected", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "morons-sse-"));
+  let service;
+  t.after(async () => {
+    service?.child.kill("SIGKILL");
+    if (service) await service.exited;
+    await rm(dir, { recursive: true, force: true });
+  });
+  service = await launch(dir);
+  service.child.kill("SIGTERM");
+  await service.exited;
+  const db = new DatabaseSync(join(dir, "control.sqlite"));
+  for (let n = 0; n < 8; n++) {
+    const id = randomUUID();
+    db.prepare(
+      "INSERT INTO morons_tasks(id,status,input,createdAt,updatedAt,hash,answer) VALUES(?,'completed',?,?,?,'fixture-seeded',?)",
+    ).run(id, "x".repeat(8192), n, n, "y".repeat(8192));
+  }
+  db.close();
+  service = await launch(dir);
+  const c = service.connection,
+    response = await fetch(c.baseUrl + "/v1/root/events", {
+      headers: { Authorization: `Bearer ${c.authToken}` },
+    }),
+    reader = response.body.getReader();
+  let text = "";
+  while (!text.includes("\n\n")) {
+    const part = await reader.read();
+    assert.equal(part.done, false);
+    text += new TextDecoder().decode(part.value);
+  }
+  const frame = text.split("\n\n")[0];
+  assert.ok(Buffer.byteLength(frame) > 65536);
+  const snapshot = JSON.parse(frame.split("data: ")[1]);
+  assert.equal(snapshot.tasks.length, 8);
+  assert.equal(snapshot.messages.length, 16);
+  assert.equal((await request(c, "/v1/root/status")).status, 200);
+  await reader.cancel();
 });

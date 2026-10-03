@@ -77,6 +77,20 @@ async function main() {
   );
   await controller.start();
   const subscribers = new Set<ServerResponse>();
+  const draining = new Map<ServerResponse, ReturnType<typeof setTimeout>>();
+  const writeFrame = (res: ServerResponse, frame: string) => {
+    if (draining.has(res) || res.destroyed) return;
+    if (!res.write(frame)) {
+      // Keep at most ONE protocol-bounded frame until drain; coalesce subsequent state.
+      // Backpressure is normal for a healthy reader consuming a large snapshot.
+      const timer = setTimeout(() => res.destroy(), 5000);
+      draining.set(res, timer);
+      res.once("drain", () => {
+        clearTimeout(timer);
+        draining.delete(res);
+      });
+    }
+  };
   let authority = "";
   const server = createServer(async (req, res) => {
     const send = async (response: Response) => {
@@ -129,13 +143,15 @@ async function main() {
           "X-Content-Type-Options": "nosniff",
         });
         subscribers.add(res);
-        res.once("close", () => subscribers.delete(res));
-        if (
-          !res.write(
-            `event: snapshot\ndata: ${JSON.stringify(controller!.snapshot())}\n\n`,
-          )
-        )
-          res.destroy();
+        res.once("close", () => {
+          subscribers.delete(res);
+          clearTimeout(draining.get(res));
+          draining.delete(res);
+        });
+        writeFrame(
+          res,
+          `event: snapshot\ndata: ${JSON.stringify(controller!.snapshot())}\n\n`,
+        );
         return;
       }
       await send(await controller!.request(request));
@@ -191,19 +207,19 @@ async function main() {
   } finally {
     closeSync(directory);
   }
-  let last = "";
+  const delivered = new WeakMap<ServerResponse, string>();
   const refresh = setInterval(() => {
     if (!subscribers.size) return;
     const frame = `event: snapshot\ndata: ${JSON.stringify(controller!.snapshot())}\n\n`;
-    if (frame === last) return;
-    last = frame;
-    for (const res of subscribers)
-      if (res.writableLength > 0 || !res.write(frame)) res.destroy();
+    for (const res of subscribers) {
+      if (!draining.has(res) && delivered.get(res) !== frame) {
+        writeFrame(res, frame);
+        delivered.set(res, frame);
+      }
+    }
   }, 250);
   const heartbeat = setInterval(() => {
-    for (const res of subscribers)
-      if (res.writableLength > 0 || !res.write(": heartbeat\n\n"))
-        res.destroy();
+    for (const res of subscribers) writeFrame(res, ": heartbeat\n\n");
   }, 5000);
   let shuttingDown = false;
   const shutdown = async () => {
