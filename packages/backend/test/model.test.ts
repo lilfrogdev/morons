@@ -38,3 +38,37 @@ it("caps real provider payloads and disables provider retries with a mock HTTP t
   expect(requests[0].auth).toBe("Bearer sk-fixture-server-key");
   expect(requests[0].url).toBe("https://api.openai.com/v1/responses");
 });
+
+it("propagates exact task cancellation to real provider HTTP requests", async () => {
+  const models = productionModels("sk-fixture-server-key");
+  const model = models.getModel("openai", "gpt-5-mini")!;
+  const controller = new AbortController();
+  let started: (signal: AbortSignal) => void;
+  const dispatched = new Promise<AbortSignal>((resolve) => {
+    started = resolve;
+  });
+  const stream = models.streamSimple(
+    model,
+    { messages: [{ role: "user", content: "slow", timestamp: Date.now() }] },
+    {
+      signal: controller.signal,
+      transport: "sse",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        started(request.signal);
+        return new Promise((_, reject) =>
+          request.signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("Cancelled", "AbortError")),
+            { once: true },
+          ),
+        );
+      },
+    },
+  );
+  const signal = await dispatched;
+  expect(signal.aborted).toBe(false);
+  controller.abort();
+  expect((await stream.result()).stopReason).toBe("aborted");
+  expect(signal.aborted).toBe(true);
+});

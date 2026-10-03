@@ -143,10 +143,10 @@ describe("local SQLite/Pi backend", () => {
     const mf = await start();
     await api(mf, "tasks", "POST", { requestId: id, text: "slow: stop" });
     expect(
-      ((await (await api(mf, `tasks/${id}/stop`, "POST")).json()) as any).task
-        .status,
+      ((await (await api(mf, `tasks/${id}/stop`, "POST", {})).json()) as any)
+        .task.status,
     ).toBe("stopped");
-    expect((await api(mf, `tasks/${id}/stop`, "POST")).status).toBe(200);
+    expect((await api(mf, `tasks/${id}/stop`, "POST", {})).status).toBe(200);
     const failId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     await api(mf, "tasks", "POST", { requestId: failId, text: "fail" });
     expect((await wait(mf, failId)).error).toBe(

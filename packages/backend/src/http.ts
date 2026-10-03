@@ -44,13 +44,12 @@ export async function authorized(
   for (let i = 0; i < x.length; i++) different |= x[i] ^ y[i];
   return different === 0;
 }
-export async function submitBody(request: Request): Promise<Submit> {
-  if (
-    request.headers.get("Content-Type")?.split(";")[0].trim() !==
-    "application/json"
-  )
-    throw new HttpError(415, "content_type", "Expected application/json.");
+async function readJsonBody(
+  request: Request,
+  allowEmpty = false,
+): Promise<unknown> {
   const reader = request.body?.getReader();
+  if (!reader && allowEmpty) return undefined;
   if (!reader)
     throw new HttpError(400, "invalid_request", "A JSON body is required.");
   let timeout: ReturnType<typeof setTimeout>;
@@ -91,10 +90,21 @@ export async function submitBody(request: Request): Promise<Submit> {
       bytes.set(part, offset);
       offset += part.length;
     }
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    if (allowEmpty && !text.trim()) return undefined;
+    body = JSON.parse(text);
   } catch {
     throw new HttpError(400, "invalid_request", "Invalid JSON.");
   }
+  return body;
+}
+export async function submitBody(request: Request): Promise<Submit> {
+  if (
+    request.headers.get("Content-Type")?.split(";")[0].trim() !==
+    "application/json"
+  )
+    throw new HttpError(415, "content_type", "Expected application/json.");
+  const body = await readJsonBody(request);
   if (!body || typeof body !== "object" || Array.isArray(body))
     throw new HttpError(400, "invalid_request", "Invalid submission.");
   const data = body as Record<string, unknown>;
@@ -116,4 +126,20 @@ export async function submitBody(request: Request): Promise<Submit> {
   if (new TextEncoder().encode(data.text).byteLength > LIMITS.maxInputBytes)
     throw new HttpError(413, "input_limit", "Input exceeds 8192 UTF-8 bytes.");
   return { requestId: data.requestId, text: data.text };
+}
+
+export async function stopBody(request: Request): Promise<void> {
+  const body = await readJsonBody(request, true);
+  if (
+    body !== undefined &&
+    (!body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      Object.keys(body).length !== 0)
+  )
+    throw new HttpError(
+      400,
+      "invalid_request",
+      "Stop accepts an empty body or empty JSON object.",
+    );
 }

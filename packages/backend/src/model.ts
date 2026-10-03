@@ -15,6 +15,10 @@ export function productionModels(key?: string) {
     },
   });
   const provider = openaiProvider();
+  const deadline = (signal?: AbortSignal) =>
+    signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(120000)])
+      : AbortSignal.timeout(120000);
   const bounded: Provider = {
     ...provider,
     // Curated API-key model; this OpenAI Responses model supports max_output_tokens.
@@ -23,6 +27,7 @@ export function productionModels(key?: string) {
     stream: (model, context, options) =>
       provider.stream(model as never, context, {
         ...options,
+        signal: deadline(options?.signal),
         maxTokens: LIMITS.maxOutputTokens,
         maxRetries: 0,
         timeoutMs: 120000,
@@ -30,6 +35,7 @@ export function productionModels(key?: string) {
     streamSimple: (model, context, options) =>
       provider.streamSimple(model as never, context, {
         ...options,
+        signal: deadline(options?.signal),
         maxTokens: LIMITS.maxOutputTokens,
         maxRetries: 0,
         timeoutMs: 120000,

@@ -14,7 +14,14 @@ import {
   type Task,
   type Snapshot,
 } from "../../protocol/index";
-import { authorized, failure, HttpError, json, submitBody } from "./http";
+import {
+  authorized,
+  failure,
+  HttpError,
+  json,
+  submitBody,
+  stopBody,
+} from "./http";
 import { productionModels, validApiKey } from "./model";
 import type { Env } from "./worker";
 interface Row extends Record<string, SqlStorageValue> {
@@ -456,6 +463,7 @@ export class RootChat extends DurableObject<Env> {
         ((request.method === "GET" && !match[2]) ||
           (request.method === "POST" && match[2]))
       ) {
+        if (match[2]) await stopBody(request);
         const row = this.row(match[1]);
         if (!row) throw new HttpError(404, "not_found", "Task not found.");
         if (match[2])
