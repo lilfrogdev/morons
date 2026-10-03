@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import crypto, { createHash, randomUUID } from "node:crypto";
 
 export type Account = Readonly<{ id: string; name: string }>;
 export type Stage =
@@ -333,27 +333,32 @@ export class Provisioner {
   }
   async prepareDeployment(input: {
     accountId: string;
+    // Friendly stem only. Exact deployable names are generated here, never by
+    // callers; 128 random bits make a preflight/upload race unlikely without
+    // pretending Cloudflare's unconditional PUT is atomic create-if-absent.
     workerName: string;
     bundle: WorkerBundle;
   }): Promise<DeploymentPreview> {
     if (
       !input ||
       typeof input.workerName !== "string" ||
+      input.workerName.length > 30 ||
       !namePattern.test(input.workerName)
     )
       invalid("preview");
     const bundle = snapshotBundle(input.bundle);
+    const workerName = `${input.workerName}-${crypto.randomBytes(16).toString("hex")}`;
     const { account, subdomain } = await this.#inspect(
       input.accountId,
-      input.workerName,
+      workerName,
       "preview",
     );
     const preview: DeploymentPreview = freeze({
       id: randomUUID(),
       expiresAt: this.#now() + 5 * 60_000,
       account,
-      workerName: input.workerName,
-      endpoint: `https://${input.workerName}.${subdomain}.workers.dev`,
+      workerName,
+      endpoint: `https://${workerName}.${subdomain}.workers.dev`,
       bundleSha256: createHash("sha256")
         .update(JSON.stringify(bundle))
         .digest("hex"),

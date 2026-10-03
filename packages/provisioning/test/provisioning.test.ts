@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { Provisioner, ProvisioningError } from "../src/index.js";
 import type {
   BootstrapSource,
@@ -124,9 +125,10 @@ test("preview contains exact resources and truthful billing; reads only", async 
   const { provisioner, requests } = fixture();
   const preview = await prepare(provisioner);
   assert.equal(preview.account.id, accountId);
+  assert.match(preview.workerName, /^morons-owner-[a-f0-9]{32}$/);
   assert.equal(
     preview.endpoint,
-    "https://morons-owner.fixture-owner.workers.dev",
+    `https://${preview.workerName}.fixture-owner.workers.dev`,
   );
   assert.equal(preview.bundleSha256.length, 64);
   assert.deepEqual(preview.secretBindings, ["AUTH_TOKEN", "OPENAI_API_KEY"]);
@@ -459,4 +461,64 @@ test("network exceptions never leak their raw messages", async () => {
       error.code === "network_error" &&
       !error.stack?.includes(token),
   );
+});
+
+test("provisioner generates exactly one 128-bit suffix and binds all writes to it", async (context) => {
+  let calls = 0;
+  context.mock.method(crypto, "randomBytes", (size: number) => {
+    assert.equal(size, 16);
+    calls++;
+    return Buffer.alloc(16, 0x42);
+  });
+  const f = fixture();
+  const preview = await prepare(f.provisioner);
+  const exactName = `morons-owner-${"42".repeat(16)}`;
+  assert.equal(preview.workerName, exactName);
+  assert.equal(calls, 1);
+  await assert.rejects(
+    f.provisioner.deploy(
+      { ...approval(preview), workerName: "morons-owner" },
+      bootstrap,
+    ),
+    rejects("approval_required"),
+  );
+  assert.ok(f.requests.every(({ init }) => !init.method));
+  await f.provisioner.deploy(approval(preview), bootstrap);
+  assert.equal(calls, 1);
+  assert.ok(
+    f.requests
+      .filter(({ init }) => init.method)
+      .every(({ path }) => path.includes(`/scripts/${exactName}`)),
+  );
+});
+
+test("concurrent previews from the same stem have distinct generated names", async () => {
+  const f = fixture();
+  const [first, second] = await Promise.all([
+    prepare(f.provisioner),
+    prepare(f.provisioner),
+  ]);
+  assert.notEqual(first.workerName, second.workerName);
+  assert.match(first.workerName, /^morons-owner-[a-f0-9]{32}$/);
+  assert.match(second.workerName, /^morons-owner-[a-f0-9]{32}$/);
+  assert.notEqual(first.id, second.id);
+});
+
+test("caller-supplied exact generated names cannot be used as prepare stems", async () => {
+  const f = fixture();
+  await assert.rejects(
+    f.provisioner.prepareDeployment({
+      accountId,
+      workerName: `morons-owner-${"42".repeat(16)}`,
+      bundle,
+    }),
+    rejects("invalid_input"),
+  );
+  assert.equal(f.requests.length, 0);
+  const longest = await f.provisioner.prepareDeployment({
+    accountId,
+    workerName: "a".repeat(30),
+    bundle,
+  });
+  assert.equal(longest.workerName.length, 63);
 });
