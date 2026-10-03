@@ -169,7 +169,7 @@ it("sanitizes thrown and streaming error chunks, including retained partial meta
       ),
     async () =>
       new Response(
-        `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { code: "fixture", message: key } } })}\n\n`,
+        `data: ${JSON.stringify({ type: "response.failed", response: { status: key, id: key, error: { code: "fixture", message: key } } })}\n\n`,
         { headers: { "Content-Type": "text/event-stream" } },
       ),
   ]) {
