@@ -210,6 +210,11 @@ pub mod native {
             });
             let (sender, receiver) = async_channel::bounded(1);
             match config {
+                Config::Local { .. } => {
+                    let _ = sender.try_send(Err(
+                        "Local service connection is managed by the chat window",
+                    ));
+                }
                 Config::Mock => {
                     let _ = sender.try_send(Ok(Readiness::Fixture));
                 }

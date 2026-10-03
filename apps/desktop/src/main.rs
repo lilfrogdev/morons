@@ -8,7 +8,10 @@ use morons_desktop::{
     transport::{Command, Config, State, Worker},
 };
 
-actions!(morons, [SendMessage, Quit]);
+actions!(morons, [SendMessage, CloseChat, Quit]);
+// In-memory selection only. Provider capabilities remain owned by the service.
+struct SelectedConnection(Config);
+impl Global for SelectedConnection {}
 struct Chat {
     input: Entity<input::TextInput>,
     worker: Worker,
@@ -22,17 +25,12 @@ struct Chat {
     _settings_close: Subscription,
     settings_windows: Vec<WindowId>,
     local_error: Option<&'static str>,
-    live_backend: Option<String>,
-    pending_paid: Option<(String, String)>,
+    pending_paid: Option<(String, String, morons_desktop::model::Status)>,
     last_ack: Option<String>,
     scroll: ScrollHandle,
 }
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
-        let live_backend = match &config {
-            Config::Http { url, .. } if url.scheme() == "https" => Some(url.to_string()),
-            _ => None,
-        };
         let input = cx.new(input::TextInput::new);
         let setup =
             cx.new(|cx| morons_desktop::provider_setup::native::ProviderSetup::new(&config, cx));
@@ -67,13 +65,16 @@ impl Chat {
                         bearer: Some(event.bearer.to_string()),
                     }
                 });
+                cx.set_global(SelectedConnection(if event.fixture {
+                    Config::Mock
+                } else {
+                    Config::Http {
+                        url: reqwest::Url::parse(&event.endpoint).expect("validated endpoint"),
+                        bearer: Some(event.bearer.to_string()),
+                    }
+                }));
                 view.worker = worker;
                 view._updates = Self::listen(updates, cx);
-                view.live_backend = if event.fixture {
-                    None
-                } else {
-                    Some(event.endpoint.clone())
-                };
                 view.pending_paid = None;
                 view.state = State::default();
                 view.last_ack = None;
@@ -104,11 +105,49 @@ impl Chat {
             _settings_close: settings_close,
             settings_windows: vec![],
             local_error: None,
-            live_backend,
             pending_paid: None,
             last_ack: None,
             scroll: ScrollHandle::new(),
         }
+    }
+    fn connect_local(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select the private local service directory".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(directory) = paths.into_iter().next() else {
+                return;
+            };
+            let path = directory.join("connection.json");
+            let valid = morons_desktop::local_service::discover(&path).map(|_| ());
+            let _ = view.update(cx, |view, cx| {
+                if view.state.pending {
+                    view.local_error = Some("Resolve the pending request before changing services");
+                } else if let Err(error) = valid {
+                    view.local_error = Some(error);
+                } else {
+                    let config = Config::Local { discovery: path };
+                    cx.set_global(SelectedConnection(config.clone()));
+                    let (worker, updates) = Worker::start(config);
+                    view.worker = worker;
+                    view._updates = Self::listen(updates, cx);
+                    view.state = State::default();
+                    view.pending_paid = None;
+                    view.last_ack = None;
+                    view.local_error = None;
+                    view.approvals
+                        .update(cx, |approval, cx| approval.set_records(vec![], cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn listen(updates: async_channel::Receiver<State>, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |view, cx| {
@@ -167,19 +206,39 @@ impl Chat {
             cx.notify();
             return;
         }
-        if let Some(endpoint) = &self.live_backend {
-            self.pending_paid = Some((text, endpoint.clone()));
-            cx.notify();
-            return;
+        if let Some(endpoint) = &self.state.endpoint {
+            let Some(action) = &self.state.action else {
+                self.local_error = Some("Provider metadata unavailable; reconnect before sending");
+                cx.notify();
+                return;
+            };
+            if !action.fixture_only() {
+                if action.provider.is_none()
+                    || action.paid.is_none()
+                    || action.configuration_revision.is_none()
+                    || action.provider_endpoint.is_none()
+                    || action.execution_host.is_none()
+                {
+                    self.local_error = Some(
+                        "Provider action metadata is incomplete; configure the service before sending",
+                    );
+                    cx.notify();
+                    return;
+                }
+                self.pending_paid = Some((text, endpoint.clone(), action.clone()));
+                cx.notify();
+                return;
+            }
         }
         self.submit(text, cx);
     }
     fn confirm_paid(&mut self, cx: &mut Context<Self>) {
-        let Some((text, endpoint)) = self.pending_paid.take() else {
+        let Some((text, endpoint, action)) = self.pending_paid.take() else {
             return;
         };
         if self.input.read(cx).text() != text
-            || self.live_backend.as_ref() != Some(&endpoint)
+            || self.state.endpoint.as_ref() != Some(&endpoint)
+            || self.state.action.as_ref() != Some(&action)
             || !self.state.ready
             || self.state.pending
             || self.state.snapshot.active_task_id.is_some()
@@ -191,7 +250,12 @@ impl Chat {
         self.submit(text, cx);
     }
     fn submit(&mut self, text: String, cx: &mut Context<Self>) {
-        match self.worker.send(Command::Submit(text)) {
+        let command = if let Some(action) = self.state.action.clone() {
+            Command::SubmitReviewed { text, action }
+        } else {
+            Command::Submit(text)
+        };
+        match self.worker.send(command) {
             Ok(()) => {
                 self.state.pending = true;
                 self.local_error = None;
@@ -235,10 +299,16 @@ impl Render for Chat {
             .approvals
             .iter()
             .any(|a| a.state == morons_desktop::model::ApprovalState::Pending);
-        let status = if waiting {
+        let status = if !self.state.ready {
+            self.state.status
+        } else if waiting {
             "Waiting for your confirmation"
         } else if active.is_some() {
             "Working…"
+        } else if self.state.action.as_ref().is_some_and(|action| {
+            action.execution_host.as_deref() == Some("local") && action.fixture_only()
+        }) {
+            "Local service connected · fixture provider"
         } else {
             self.state.status
         };
@@ -332,6 +402,7 @@ impl Render for Chat {
             .text_color(rgb(0x243440))
             .font_family(".AppleSystemUIFont")
             .on_action(cx.listener(Self::send))
+            .on_action(|_: &CloseChat, window, _| window.remove_window())
             .child(
                 div()
                     .flex()
@@ -354,13 +425,14 @@ impl Render for Chat {
                             )
                             .child(div().text_sm().text_color(rgb(0x667786)).child(status)),
                     )
+                    .child(button("connect-local-service", "Connect local service").on_click(cx.listener(|view, _, _, cx| view.connect_local(cx))))
                     .child(button("model-setup", "Model setup").on_click(cx.listener(|view, _, _, cx| {
                         if !view.settings_windows.is_empty() { return; }
                         let setup = view.setup.clone();
                         let bounds = Bounds::centered(None, size(px(640.), px(620.)), cx);
                         if let Ok(window) = cx.open_window(WindowOptions { titlebar: Some(TitlebarOptions { title: Some("Morons model connection".into()), ..Default::default() }), window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |_, _| setup) { view.settings_windows.push(window.window_id()); }
                     })))
-                    .child(button("reconnect", "Reconnect").on_click(
+                    .child(button("reconnect", "Reconnect service").on_click(
                         cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
                     )),
             )
@@ -387,18 +459,18 @@ impl Render for Chat {
                                     div()
                                         .py_8()
                                         .text_color(rgb(0x667786))
-                                        .child("One Moron. A conversation that stays with you."),
+                                        .child("Connect your local service to recover saved conversations. Accepted service tasks continue when this window closes; Stop cancels only the selected task."),
                                 )
                             })
                             .children(messages)
                             .child(self.approvals.clone()),
                     ),
             )
-            .when_some(self.pending_paid.clone(), |d, (text, endpoint)| d.child(
+            .when_some(self.pending_paid.clone(), |d, (text, endpoint, action)| d.child(
                 div().mx_6().p_4().flex().flex_col().gap_2().bg(rgb(0xFFF4DD))
-                    .child("Review paid model send")
-                    .child(format!("Backend: {endpoint} · Provider: OpenAI · Model: gpt-5-mini · Provider endpoint: https://api.openai.com/v1/responses"))
-                    .child("This sends the backend’s saved conversation history and the message below to OpenAI. API usage may be billed; no spend cap is configured. The backend bounds context/output and disables provider retries.")
+                    .child("Review provider action")
+                    .child(format!("Service: {endpoint} · Host: {} · Provider: {} · Model: {} · Provider endpoint: {} · Configuration: {}", action.execution_host.as_deref().unwrap_or("Unknown"), action.provider.as_deref().unwrap_or("Unknown"), action.model, action.provider_endpoint.as_deref().unwrap_or("Unknown"), action.configuration_revision.as_deref().unwrap_or("Unknown")))
+                    .child("This sends the saved conversation and message to the selected provider. Account usage or API charges may apply even when the service runs locally.")
                     .child(text)
                     .child(button("confirm-paid-send", "Confirm paid send").on_click(cx.listener(|view, _, _, cx| view.confirm_paid(cx))))
                     .child(button("cancel-paid-send", "Cancel send").on_click(cx.listener(|view, _, _, cx| { view.pending_paid = None; cx.notify(); })))
@@ -474,40 +546,49 @@ fn main() {
             return;
         }
     };
-    gpui_platform::application().run(move |cx: &mut App| {
+    let app = gpui_platform::application();
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty()
+            && let Some(selection) = cx.try_global::<SelectedConnection>()
+        {
+            open_chat(selection.0.clone(), cx);
+        }
+        cx.activate(true);
+    });
+    app.run(move |cx: &mut App| {
+        cx.set_global(SelectedConnection(config.clone()));
         input::bind_keys(cx);
         morons_desktop::provider_setup::native::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("enter", SendMessage, Some("TextInput")),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseChat, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        let bounds = Bounds::centered(None, size(px(900.), px(720.)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(640.), px(480.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Morons".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|cx| Chat::new(config, cx)),
-            )
-            .expect("open Morons window");
-        window
-            .update(cx, |view, window, cx| {
-                window.focus(&view.input.focus_handle(cx), cx);
-                cx.activate(true);
-            })
-            .expect("focus composer");
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
+        open_chat(config.clone(), cx);
     });
+}
+
+fn open_chat(config: Config, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(900.), px(720.)), cx);
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(640.), px(480.))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Morons".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |_, cx| cx.new(|cx| Chat::new(config, cx)),
+        )
+        .expect("open Morons window");
+    window
+        .update(cx, |view, window, cx| {
+            window.focus(&view.input.focus_handle(cx), cx);
+            cx.activate(true);
+        })
+        .expect("focus composer");
 }
