@@ -9,6 +9,9 @@ use morons_desktop::{
 };
 
 actions!(morons, [SendMessage, Quit]);
+// In-memory selection only. Provider capabilities remain owned by the service.
+struct SelectedConnection(Config);
+impl Global for SelectedConnection {}
 struct Chat {
     input: Entity<input::TextInput>,
     worker: Worker,
@@ -62,6 +65,14 @@ impl Chat {
                         bearer: Some(event.bearer.to_string()),
                     }
                 });
+                cx.set_global(SelectedConnection(if event.fixture {
+                    Config::Mock
+                } else {
+                    Config::Http {
+                        url: reqwest::Url::parse(&event.endpoint).expect("validated endpoint"),
+                        bearer: Some(event.bearer.to_string()),
+                    }
+                }));
                 view.worker = worker;
                 view._updates = Self::listen(updates, cx);
                 view.pending_paid = None;
@@ -98,6 +109,44 @@ impl Chat {
             last_ack: None,
             scroll: ScrollHandle::new(),
         }
+    }
+    fn connect_local(&mut self, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select the local service connection.json".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let valid = morons_desktop::local_service::discover(&path).map(|_| ());
+            let _ = view.update(cx, |view, cx| {
+                if view.state.pending {
+                    view.local_error = Some("Resolve the pending request before changing services");
+                } else if let Err(error) = valid {
+                    view.local_error = Some(error);
+                } else {
+                    let config = Config::Local { discovery: path };
+                    cx.set_global(SelectedConnection(config.clone()));
+                    let (worker, updates) = Worker::start(config);
+                    view.worker = worker;
+                    view._updates = Self::listen(updates, cx);
+                    view.state = State::default();
+                    view.pending_paid = None;
+                    view.last_ack = None;
+                    view.local_error = None;
+                    view.approvals
+                        .update(cx, |approval, cx| approval.set_records(vec![], cx));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
     fn listen(updates: async_channel::Receiver<State>, cx: &mut Context<Self>) -> Task<()> {
         cx.spawn(async move |view, cx| {
@@ -374,6 +423,7 @@ impl Render for Chat {
                             )
                             .child(div().text_sm().text_color(rgb(0x667786)).child(status)),
                     )
+                    .child(button("connect-local-service", "Connect local service").on_click(cx.listener(|view, _, _, cx| view.connect_local(cx))))
                     .child(button("model-setup", "Model setup").on_click(cx.listener(|view, _, _, cx| {
                         if !view.settings_windows.is_empty() { return; }
                         let setup = view.setup.clone();
@@ -495,14 +545,16 @@ fn main() {
         }
     };
     let app = gpui_platform::application();
-    let reconnect_config = config.clone();
     app.on_reopen(move |cx| {
-        if cx.windows().is_empty() {
-            open_chat(reconnect_config.clone(), cx);
+        if cx.windows().is_empty()
+            && let Some(selection) = cx.try_global::<SelectedConnection>()
+        {
+            open_chat(selection.0.clone(), cx);
         }
         cx.activate(true);
     });
     app.run(move |cx: &mut App| {
+        cx.set_global(SelectedConnection(config.clone()));
         input::bind_keys(cx);
         morons_desktop::provider_setup::native::bind_keys(cx);
         cx.bind_keys([
