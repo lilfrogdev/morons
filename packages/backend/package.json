@@ -9,7 +9,7 @@
     "dev": "wrangler dev --env local --ip 127.0.0.1",
     "build": "wrangler deploy --env=\"\" --dry-run --outdir /tmp/morons-worker-build",
     "build:local": "wrangler deploy --env local --dry-run --outdir /tmp/morons-worker-local",
-    "format:check": "prettier --check src test ../protocol/index.ts package.json tsconfig.json wrangler.jsonc"
+    "format:check": "prettier --check src test ../protocol/*.ts package.json tsconfig.json wrangler.jsonc"
   },
   "dependencies": {
     "agents": "0.26.0",

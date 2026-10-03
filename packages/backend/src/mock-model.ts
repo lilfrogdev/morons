@@ -61,8 +61,59 @@ export function mockModels() {
         answer.stopReason = "error";
         answer.errorMessage = "Mock failure";
         events.push({ type: "error", reason: "error", error: answer });
+      } else if (
+        (input === "tool:time" || input.startsWith("tool:confirm:")) &&
+        !context.messages
+          .slice(
+            context.messages
+              .map((message) => message.role)
+              .lastIndexOf("user") + 1,
+          )
+          .some(
+            (message) =>
+              message.role === "toolResult" &&
+              (message.toolName === "get_current_time" ||
+                message.toolName === "request_user_confirmation"),
+          )
+      ) {
+        answer.stopReason = "toolUse";
+        answer.content = [
+          {
+            type: "toolCall",
+            id: "fixture-call",
+            name:
+              input === "tool:time"
+                ? "get_current_time"
+                : "request_user_confirmation",
+            arguments:
+              input === "tool:time"
+                ? {}
+                : { message: input.slice("tool:confirm:".length) },
+          },
+        ];
+        events.push({ type: "done", reason: "toolUse", message: answer });
       } else {
-        answer.content = [{ type: "text", text: `Mock: ${input}` }];
+        const result = [
+          ...context.messages.slice(
+            context.messages
+              .map((message) => message.role)
+              .lastIndexOf("user") + 1,
+          ),
+        ]
+          .reverse()
+          .find((message) => message.role === "toolResult");
+        answer.content = [
+          {
+            type: "text",
+            text:
+              result?.role === "toolResult"
+                ? result.content
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text)
+                    .join("")
+                : `Mock: ${input}`,
+          },
+        ];
         events.push({ type: "done", reason: "stop", message: answer });
       }
     })();

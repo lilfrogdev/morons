@@ -1,5 +1,5 @@
 use crate::{
-    model::{Message, Role, Snapshot, Status, Task, TaskStatus},
+    model::{ApprovalDecision, Message, Role, Snapshot, Status, Task, TaskStatus},
     sse::Decoder,
 };
 use futures_util::StreamExt;
@@ -34,6 +34,7 @@ impl Default for State {
 pub enum Command {
     Submit(String),
     Stop(String),
+    DecideApproval(ApprovalDecision),
     Reconnect,
     Retry,
 }
@@ -390,6 +391,18 @@ async fn handle(
             } else {
                 api.mutate(&format!("tasks/{id}/stop"), serde_json::json!({}))
                     .await
+            }
+        }
+        Command::DecideApproval(decision) => {
+            if !state
+                .snapshot
+                .approvals
+                .iter()
+                .any(|record| decision.matches(record))
+            {
+                Err("Approval is no longer pending or its intent changed")
+            } else {
+                api.mutate(&format!("approvals/{}/decision", decision.id), serde_json::json!({"taskId":decision.task_id,"digest":decision.digest,"decision":decision.decision})).await
             }
         }
         Command::Reconnect => Ok(()),

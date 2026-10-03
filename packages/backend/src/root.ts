@@ -1,3 +1,6 @@
+import { ApprovalStore } from "./approvals/store";
+import { approvalRoute } from "./approvals/routes";
+import { safeTools } from "./tools/safe";
 import { DurableObject } from "cloudflare:workers";
 import { Lifecycle } from "agents/lifecycle";
 import { PiHarness } from "agents/harness/pi";
@@ -46,6 +49,7 @@ function dto(row: Row): Task {
   };
 }
 export class RootChat extends DurableObject<Env> {
+  private readonly approvals: ApprovalStore;
   private gate: Promise<unknown> = Promise.resolve();
   private observers = new Set<string>();
   private subscribers = new Map<
@@ -66,6 +70,14 @@ export class RootChat extends DurableObject<Env> {
       id TEXT PRIMARY KEY, status TEXT NOT NULL, input TEXT NOT NULL, createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL, error TEXT, answer TEXT, attempts INTEGER NOT NULL DEFAULT 0,
       stopRequested INTEGER NOT NULL DEFAULT 0)`);
+    this.approvals = new ApprovalStore(
+      ctx.storage.sql,
+      (id) => {
+        const row = this.row(id);
+        return Boolean(row && !terminal(row.status) && !row.stopRequested);
+      },
+      () => this.scheduleRefresh(),
+    );
     this.piHarness = new PiHarness({
       defaults: {
         model: { provider: "openai", id: env.MODEL_ID ?? "gpt-5-mini" },
@@ -76,12 +88,12 @@ export class RootChat extends DurableObject<Env> {
         registry.install(
           defineExtension({
             name: "morons.safe",
-            tools: [],
+            tools: safeTools(this.approvals, () => this.active()?.id),
             sections: [
               section(
                 "preamble",
                 () =>
-                  "You are Morons, a concise assistant. External tools are unavailable.",
+                  "You are Morons, a concise assistant. You may read UTC time or request explicit confirmation. Confirmation performs no external action and does not authorize other tools.",
                 { tag: false },
               ),
             ],
@@ -202,12 +214,11 @@ export class RootChat extends DurableObject<Env> {
       const result = await this.piHarness.wait(id);
       const row = this.row(id);
       if (!row) return;
-      const status =
-        result.status === "done"
+      const status = row.stopRequested
+        ? "stopped"
+        : result.status === "done"
           ? "completed"
-          : row.stopRequested
-            ? "stopped"
-            : "failed";
+          : "failed";
       // Provider error text may contain credentials. Only fixed messages cross our boundary.
       const error =
         status === "failed"
@@ -268,6 +279,7 @@ export class RootChat extends DurableObject<Env> {
       tasks: rows.map(dto),
       messages,
       activeTaskId: active?.id ?? null,
+      approvals: this.approvals.list(),
     };
   }
   private scheduleRefresh() {
@@ -379,6 +391,8 @@ export class RootChat extends DurableObject<Env> {
         "Valid bearer authentication is required.",
       );
     try {
+      const approval = await approvalRoute(request, this.approvals);
+      if (approval) return approval;
       const path = new URL(request.url).pathname;
       if (request.method === "GET" && path === "/v1/root/status")
         return json({
@@ -473,6 +487,7 @@ export class RootChat extends DurableObject<Env> {
                 "UPDATE morons_tasks SET stopRequested = 1 WHERE id = ?",
                 row.id,
               );
+              this.approvals.cancelTask(row.id);
               await this.piHarness.abort({ operationId: row.id });
               if (!terminal(this.row(row.id)!.status)) {
                 this.ctx.storage.sql.exec(
