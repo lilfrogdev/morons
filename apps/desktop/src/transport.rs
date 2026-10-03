@@ -179,26 +179,70 @@ impl Api {
             .map_err(|_| "Request outcome uncertain; reconnect or retry same request")?;
         if response.status().is_success() {
             Ok(())
-        } else if response.status().as_u16() == 409 {
-            Err("Backend has an active task or conflicting request")
-        } else if response.status().as_u16() == 401 {
-            Err("Backend authentication failed")
         } else {
-            Err("Backend rejected request")
+            let status = response.status().as_u16();
+            let bytes = bounded_body_with_limit(response, 16 * 1024)
+                .await
+                .unwrap_or_default();
+            Err(rejection_message(status, &bytes))
         }
     }
 }
 async fn bounded_body(response: reqwest::Response) -> Result<Vec<u8>, &'static str> {
+    bounded_body_with_limit(response, 8 * 1024 * 1024).await
+}
+async fn bounded_body_with_limit(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, &'static str> {
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| "Backend connection interrupted")?;
-        if bytes.len() + chunk.len() > 8 * 1024 * 1024 {
+        if bytes.len() + chunk.len() > limit {
             return Err("Server snapshot exceeds client limit");
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+// Only versioned, known codes select static UI text. Never display an arbitrary
+// backend error message, which could contain provider or application secrets.
+#[derive(serde::Deserialize)]
+struct Rejection {
+    version: u32,
+    error: RejectionCode,
+}
+#[derive(serde::Deserialize)]
+struct RejectionCode {
+    code: String,
+}
+fn rejection_message(status: u16, bytes: &[u8]) -> &'static str {
+    let code = serde_json::from_slice::<Rejection>(bytes)
+        .ok()
+        .filter(|value| value.version == 1);
+    match (status, code.as_ref().map(|value| value.error.code.as_str())) {
+        (401, _) => "Backend authentication failed",
+        (429, Some("task_limit")) => {
+            "Backend task limit reached. Use a new backend instance; existing history is retained."
+        }
+        (429, Some("history_limit")) => {
+            "Backend history limit reached. Use a new backend instance; existing history is retained."
+        }
+        (409, Some("busy")) => "Another task is active. Wait for it to finish or stop it.",
+        (409, Some("request_conflict")) => {
+            "Request ID conflicts with existing input. Reconnect before sending a new message."
+        }
+        (413, Some("input_limit")) => {
+            "Message exceeds the backend input limit. Shorten it and try again."
+        }
+        (503, Some("not_configured")) => {
+            "Backend model is not configured. Check the backend configuration."
+        }
+        (409, _) => "Backend has an active task or conflicting request",
+        _ => "Backend rejected request",
+    }
 }
 
 async fn http(
@@ -416,6 +460,48 @@ async fn mock(mut commands: mpsc::Receiver<Command>, publisher: Publisher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn known_rejections_are_actionable_without_echoing_server_text() {
+        for (status, code, expected) in [
+            (429, "task_limit", "Backend task limit reached."),
+            (429, "history_limit", "Backend history limit reached."),
+            (409, "busy", "Another task is active."),
+            (
+                409,
+                "request_conflict",
+                "Request ID conflicts with existing input.",
+            ),
+            (
+                413,
+                "input_limit",
+                "Message exceeds the backend input limit.",
+            ),
+            (503, "not_configured", "Backend model is not configured."),
+        ] {
+            let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"error":{"code":code,"message":"secret-provider-token","extra":"secret"}})).unwrap();
+            let message = rejection_message(status, &bytes);
+            assert!(message.starts_with(expected));
+            assert!(!message.contains("secret"));
+        }
+    }
+    #[test]
+    fn unknown_invalid_or_mismatched_errors_never_echo_server_text() {
+        for bytes in [
+            br#"{"version":1,"error":{"code":"secret-provider-token","message":"secret"}}"#
+                .as_slice(),
+            br#"{"version":2,"error":{"code":"history_limit","message":"secret"}}"#.as_slice(),
+            b"secret invalid JSON".as_slice(),
+        ] {
+            assert_eq!(rejection_message(429, bytes), "Backend rejected request");
+        }
+        let bytes = br#"{"version":1,"error":{"code":"history_limit","message":"secret"}}"#;
+        assert_eq!(rejection_message(500, bytes), "Backend rejected request");
+        assert_eq!(
+            rejection_message(401, b"secret"),
+            "Backend authentication failed"
+        );
+    }
+
     #[test]
     fn mock_stream_and_stop_are_authoritative() {
         let (worker, updates) = Worker::start(Config::Mock);
