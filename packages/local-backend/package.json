@@ -1,0 +1,25 @@
+{
+  "name": "@morons/local-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "format:check": "prettier --check src test package.json tsconfig.json"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "25.5.0",
+    "prettier": "3.6.2"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "npm": ">=11.14.1"
+  },
+  "packageManager": "npm@11.14.1"
+}

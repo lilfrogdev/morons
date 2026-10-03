@@ -1,0 +1,9 @@
+Morons local backend
+
+HTTP validation, deterministic fixture provider, safe tools and approval semantics
+are adapted from lilfrogdev/morons commit a9ce8f24c72f3d5163481cf43ff291f3dd17c5ad.
+These sources remain under the repository's Apache License 2.0 (../../LICENSE).
+
+The service uses @earendil-works/pi-ai and @earendil-works/pi-durable version 1.0.0
+as pinned dependencies; their distribution licenses and notices apply. Pi owns
+its scheduler, submission journal, SQLite schema and recovery implementation.
