@@ -1,0 +1,21 @@
+{
+  "name": "morons-backend",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-02",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "workers_dev": false,
+  "durable_objects": {
+    "bindings": [{ "name": "ROOT", "class_name": "RootChat" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RootChat"] }],
+  "vars": { "MODEL_ID": "gpt-5-mini" },
+  "env": {
+    "local": {
+      "main": "src/local.ts",
+      "vars": { "MODEL_ID": "mock" },
+      "durable_objects": {
+        "bindings": [{ "name": "ROOT", "class_name": "RootChat" }],
+      },
+    },
+  },
+}
