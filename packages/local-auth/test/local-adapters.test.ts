@@ -520,3 +520,93 @@ it("configuration changes cancel captured provider capabilities", async () => {
   expect(binding.signal.aborted).toBe(true);
   expect(binding.isCurrent()).toBe(false);
 });
+it("cancelled sign-in cannot perform a delayed approved protected write", async () => {
+  const f = adapterFixture();
+  let ready!: () => void, allow!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  f.approveStorage(async (intent) => {
+    if (intent.action === "write") {
+      ready();
+      await new Promise<void>((resolve) => {
+        allow = resolve;
+      });
+    }
+  });
+  const service = f.service();
+  const flow = service.begin();
+  const rejection = expect(flow).rejects.toMatchObject({ code: "cancelled" });
+  await pending;
+  service.cancel();
+  await rejection;
+  allow();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(f.values.size).toBe(0);
+  expect(f.writes).toHaveLength(0);
+  expect(service.status().phase).toBe("disconnected");
+});
+it("disconnect cancels a pending protected account read and prevents delayed restoration", async () => {
+  const f = adapterFixture();
+  await f.auth();
+  const service = f.service();
+  let ready!: () => void, allow!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  f.approveStorage(async (intent) => {
+    if (intent.action === "read") {
+      ready();
+      await new Promise<void>((resolve) => {
+        allow = resolve;
+      });
+    }
+  });
+  const load = service.load(identity);
+  const rejection = expect(load).rejects.toMatchObject({
+    code: "reauth_required",
+  });
+  await pending;
+  service.disconnect();
+  await rejection;
+  allow();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(service.status().phase).toBe("disconnected");
+  expect(service.status().identity).toBeUndefined();
+});
+it("cancels a stalled rotation-intent approval without a grant or later credential write", async () => {
+  const f = adapterFixture();
+  f.expires(120);
+  const auth = await f.auth();
+  let ready!: () => void, allow!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  f.approveStorage(async (intent) => {
+    if (intent.action === "write") {
+      ready();
+      await new Promise<void>((resolve) => {
+        allow = resolve;
+      });
+    }
+  });
+  const controller = new AbortController();
+  const refresh = auth.refresh(controller.signal);
+  const rejection = expect(refresh).rejects.toMatchObject({
+    code: "cancelled",
+  });
+  await pending;
+  controller.abort();
+  await rejection;
+  allow();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(f.writes.map((row) => row.phase)).toEqual(["ready"]);
+  expect(
+    f.calls.filter(
+      (call) =>
+        call.init.body instanceof URLSearchParams &&
+        call.init.body.get("grant_type") === "refresh_token",
+    ),
+  ).toHaveLength(0);
+  expect(auth.needsReauthorization()).toBe(true);
+});

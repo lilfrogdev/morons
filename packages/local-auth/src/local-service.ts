@@ -55,20 +55,30 @@ export class LocalSessionStore implements ProtectedSessionStore {
     selected: Identity | undefined,
     create: () => LocalAuth,
     action: (session: LocalAuth) => Promise<T>,
+    signal?: AbortSignal,
   ) {
     let session = selected ? this.#sessions.get(slot(selected)) : undefined;
     if (!session) {
       session = create();
       session.attachProtectedIO(this.io);
-      if (selected) await session.restore({ ...selected });
+      if (selected) await session.restore({ ...selected }, signal);
     }
     const result = await action(session);
     const identity = session.identity();
     if (identity) this.#sessions.set(slot(identity), session);
     return result;
   }
-  async load(selected: Identity, create: () => LocalAuth) {
-    return this.withSession(selected, create, async (session) => session);
+  async load(
+    selected: Identity,
+    create: () => LocalAuth,
+    signal?: AbortSignal,
+  ) {
+    return this.withSession(
+      selected,
+      create,
+      async (session) => session,
+      signal,
+    );
   }
 }
 // This service is an injectable capability, not a route mount. Constructing it
@@ -158,6 +168,7 @@ export class LocalAuthService {
               completed = session;
               return value;
             },
+            controller.signal,
           ),
       };
       const identity = await authorizeLocally(
@@ -193,16 +204,20 @@ export class LocalAuthService {
   cancel() {
     this.#active?.abort();
   }
-  async load(identity: Identity) {
+  async load(identity: Identity, signal?: AbortSignal) {
     if (this.#active) throw new AuthError("invalid_attempt");
     const controller = new AbortController();
     this.#active = controller;
     this.#invalidate();
     const revision = this.#revision;
+    const cancel = () => controller.abort();
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) controller.abort();
     try {
       const session = await this.dependencies.store.load(
         { ...identity },
         this.#create,
+        controller.signal,
       );
       controller.signal.throwIfAborted();
       if (revision !== this.#revision) throw new AuthError("invalid_attempt");
@@ -220,6 +235,7 @@ export class LocalAuthService {
       }
       throw new AuthError("reauth_required");
     } finally {
+      signal?.removeEventListener("abort", cancel);
       if (this.#active === controller) this.#active = undefined;
     }
   }

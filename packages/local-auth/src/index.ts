@@ -11,8 +11,12 @@ export interface IssuerConfiguration {
   jwksUri: string;
 }
 export interface ProtectedSessionIO {
-  read(identity: Identity): Promise<string | undefined>;
-  write(identity: Identity, encoded: string): Promise<void>;
+  read(identity: Identity, signal?: AbortSignal): Promise<string | undefined>;
+  write(
+    identity: Identity,
+    encoded: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
 }
 export interface Identity {
   issuer: string;
@@ -399,7 +403,7 @@ export class LocalAuth {
         this.#tokens = record;
         this.#refreshBlocked = false;
         this.#revision++;
-        if (this.#protectedIO) await this.#persist("ready");
+        if (this.#protectedIO) await this.#persist("ready", signal);
         return this.identity()!;
       } catch {
         if (this.#protectedIO && this.#tokens) this.#refreshBlocked = true;
@@ -427,7 +431,7 @@ export class LocalAuth {
       )
         return this.identity()!;
       try {
-        if (this.#protectedIO) await this.#persist("refreshing");
+        if (this.#protectedIO) await this.#persist("refreshing", signal);
         signal?.throwIfAborted();
         const client = this.#client(previous.identity.clientId);
         const options = this.#options(signal);
@@ -457,12 +461,12 @@ export class LocalAuth {
           previous,
         );
         this.#revision++;
-        if (this.#protectedIO) await this.#persist("ready");
+        if (this.#protectedIO) await this.#persist("ready", signal);
         return this.identity()!;
       } catch {
         this.#refreshBlocked = true;
-        if (this.#protectedIO)
-          await this.#persist("reauth_required").catch(() => undefined);
+        if (this.#protectedIO && !signal?.aborted)
+          await this.#persist("reauth_required", signal).catch(() => undefined);
         throw new AuthError(signal?.aborted ? "cancelled" : "reauth_required");
       }
     });
@@ -481,10 +485,14 @@ export class LocalAuth {
       throw new AuthError("invalid_attempt");
     this.#protectedIO = io;
   }
-  async #persist(phase: "ready" | "refreshing" | "reauth_required") {
+  async #persist(
+    phase: "ready" | "refreshing" | "reauth_required",
+    signal?: AbortSignal,
+  ) {
     if (!this.#protectedIO || !this.#tokens)
       throw new AuthError("reauth_required");
     try {
+      signal?.throwIfAborted();
       const encoded = JSON.stringify({
         version: 1,
         hostId: this.#hostId,
@@ -495,18 +503,21 @@ export class LocalAuth {
       });
       if (new TextEncoder().encode(encoded).byteLength > 65536)
         throw new AuthError("validation_failed");
-      await this.#protectedIO.write(this.identity()!, encoded);
+      await this.#protectedIO.write(this.identity()!, encoded, signal);
+      signal?.throwIfAborted();
     } catch {
       this.#refreshBlocked = true;
       throw new AuthError("reauth_required");
     }
   }
-  restore(selected: Identity) {
+  restore(selected: Identity, signal?: AbortSignal) {
     return this.#serialize(async () => {
       if (!this.#protectedIO || this.#tokens)
         throw new AuthError("invalid_attempt");
       try {
-        const encoded = await this.#protectedIO.read(selected);
+        signal?.throwIfAborted();
+        const encoded = await this.#protectedIO.read(selected, signal);
+        signal?.throwIfAborted();
         if (!encoded || new TextEncoder().encode(encoded).byteLength > 65536)
           throw new AuthError("reauth_required");
         const saved = JSON.parse(encoded);

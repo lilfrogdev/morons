@@ -61,6 +61,22 @@ export function nativeBrokerRun(executable: string): BrokerRun {
     });
   };
 }
+async function bounded<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  signal.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(new AuthError("cancelled"));
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try {
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
 async function sha256(value: string) {
   return Buffer.from(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
@@ -84,9 +100,13 @@ export function keychainSessionIO(
     action: "read" | "write",
     identity: Identity,
     payload?: string,
+    callerSignal?: AbortSignal,
   ) => {
-    const signal = AbortSignal.timeout(30000);
+    const signal = callerSignal
+      ? AbortSignal.any([callerSignal, AbortSignal.timeout(30000)])
+      : AbortSignal.timeout(30000);
     try {
+      signal.throwIfAborted();
       if (
         identity.issuer !== "https://auth.openai.com" ||
         !/^[A-Za-z0-9_-]{1,256}$/.test(identity.clientId) ||
@@ -104,25 +124,31 @@ export function keychainSessionIO(
           frozen.clientId,
         ]),
       );
-      await approve(
-        {
-          action,
-          service: SERVICE,
-          slot,
-          identity: frozen,
-          ...(payload !== undefined ? { sha256: await sha256(payload) } : {}),
-        },
+      await bounded(
+        approve(
+          {
+            action,
+            service: SERVICE,
+            slot,
+            identity: frozen,
+            ...(payload !== undefined ? { sha256: await sha256(payload) } : {}),
+          },
+          signal,
+        ),
         signal,
       );
       signal.throwIfAborted();
       const response = JSON.parse(
-        await run(
-          JSON.stringify({
-            version: 1,
-            action,
-            slot,
-            ...(payload !== undefined ? { payload } : {}),
-          }),
+        await bounded(
+          run(
+            JSON.stringify({
+              version: 1,
+              action,
+              slot,
+              ...(payload !== undefined ? { payload } : {}),
+            }),
+            signal,
+          ),
           signal,
         ),
       );
@@ -153,9 +179,9 @@ export function keychainSessionIO(
     }
   };
   return {
-    read: (identity) => exchange("read", identity),
-    write: async (identity, payload) => {
-      await exchange("write", identity, payload);
+    read: (identity, signal) => exchange("read", identity, undefined, signal),
+    write: async (identity, payload, signal) => {
+      await exchange("write", identity, payload, signal);
     },
   };
 }
