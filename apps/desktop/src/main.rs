@@ -12,6 +12,8 @@ actions!(morons, [SendMessage, Quit]);
 struct Chat {
     input: Entity<input::TextInput>,
     worker: Worker,
+    approvals: Entity<morons_desktop::approval_view::ApprovalView>,
+    _approval_decisions: Subscription,
     setup: Entity<morons_desktop::provider_setup::native::ProviderSetup>,
     state: State,
     // Keep the foreground listener alive for exactly the view lifetime.
@@ -34,6 +36,21 @@ impl Chat {
         let input = cx.new(input::TextInput::new);
         let setup =
             cx.new(|cx| morons_desktop::provider_setup::native::ProviderSetup::new(&config, cx));
+        let approvals = cx.new(|_| morons_desktop::approval_view::ApprovalView::new());
+        let decisions = cx.subscribe(
+            &approvals,
+            |view, _, decision: &morons_desktop::model::ApprovalDecision, cx| {
+                view.local_error = view
+                    .worker
+                    .send(Command::DecideApproval(decision.clone()))
+                    .err();
+                if view.local_error.is_some() {
+                    view.approvals
+                        .update(cx, |view, cx| view.reset_submission(cx));
+                }
+                cx.notify();
+            },
+        );
         let (worker, updates) = Worker::start(config);
         let task = Self::listen(updates, cx);
         let connection = cx.subscribe(
@@ -78,6 +95,8 @@ impl Chat {
         Self {
             input,
             worker,
+            approvals,
+            _approval_decisions: decisions,
             setup,
             state: State::default(),
             _updates: task,
@@ -108,6 +127,12 @@ impl Chat {
                             });
                         }
                         let follow = view.scroll.max_offset().y + view.scroll.offset().y < px(60.);
+                        view.approvals.update(cx, |approval, cx| {
+                            approval.set_records(state.snapshot.approvals.clone(), cx);
+                            if state.request_error.is_some() {
+                                approval.reset_submission(cx);
+                            }
+                        });
                         view.state = state;
                         if follow {
                             view.scroll.scroll_to_bottom();
@@ -204,7 +229,15 @@ impl Render for Chat {
             .local_error
             .or(self.state.request_error)
             .or(self.state.error);
-        let status = if active.is_some() {
+        let waiting = self
+            .state
+            .snapshot
+            .approvals
+            .iter()
+            .any(|a| a.state == morons_desktop::model::ApprovalState::Pending);
+        let status = if waiting {
+            "Waiting for your confirmation"
+        } else if active.is_some() {
             "Working…"
         } else {
             self.state.status
@@ -357,7 +390,8 @@ impl Render for Chat {
                                         .child("One Moron. A conversation that stays with you."),
                                 )
                             })
-                            .children(messages),
+                            .children(messages)
+                            .child(self.approvals.clone()),
                     ),
             )
             .when_some(self.pending_paid.clone(), |d, (text, endpoint)| d.child(
