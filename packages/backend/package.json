@@ -1,0 +1,32 @@
+{
+  "name": "@morons/backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:desktop": "node test/desktop-transport.mjs",
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev --env local --ip 127.0.0.1",
+    "build": "wrangler deploy --env=\"\" --dry-run --outdir /tmp/morons-worker-build",
+    "build:local": "wrangler deploy --env local --dry-run --outdir /tmp/morons-worker-local",
+    "format:check": "prettier --check src test ../protocol/index.ts package.json tsconfig.json wrangler.jsonc"
+  },
+  "dependencies": {
+    "agents": "0.26.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-durable": "1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "@cloudflare/workers-types": "5.20261002.1",
+    "wrangler": "4.147.0",
+    "miniflare": "5.20261001.0-alpha",
+    "prettier": "3.6.2"
+  },
+  "engines": {
+    "node": ">=22.19.0",
+    "npm": ">=11.14.1"
+  },
+  "packageManager": "npm@11.14.1"
+}
