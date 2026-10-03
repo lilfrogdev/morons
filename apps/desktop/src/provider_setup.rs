@@ -364,7 +364,7 @@ pub mod native {
     }
     impl Render for ProviderSetup {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().p_6().flex().flex_col().gap_3().bg(rgb(0xF6F8FA)).text_color(rgb(0x243440))
+            div().id("provider-setup-scroll").size_full().overflow_y_scroll().p_6().flex().flex_col().gap_3().bg(rgb(0xF6F8FA)).text_color(rgb(0x243440))
                 .child(div().text_xl().child("Model connection"))
                 .child("OpenAI API key · gpt-5-mini")
                 .child(self.readiness.map(Readiness::label).unwrap_or("Checking server configuration…"))
