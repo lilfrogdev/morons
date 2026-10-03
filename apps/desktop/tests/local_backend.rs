@@ -24,13 +24,21 @@ async fn until(
 // Run against a disposable local Worker with the mock entry point. This test
 // writes history and must never target a shared demo or production backend.
 #[tokio::test]
-#[ignore = "requires a disposable mock Worker and MORONS_TEST_BACKEND_URL/TOKEN"]
+#[ignore = "requires disposable fixture: MORONS_TEST_LOCAL_CONNECTION or MORONS_TEST_BACKEND_URL/TOKEN"]
 async fn public_transport_against_local_worker() {
-    let url = Url::parse(&std::env::var("MORONS_TEST_BACKEND_URL").unwrap()).unwrap();
+    let discovery = std::env::var_os("MORONS_TEST_LOCAL_CONNECTION").map(std::path::PathBuf::from);
+    let (url, token) = if let Some(path) = &discovery {
+        let connection = morons_desktop::local_service::discover(path).unwrap();
+        (connection.url, connection.bearer)
+    } else {
+        (
+            Url::parse(&std::env::var("MORONS_TEST_BACKEND_URL").unwrap()).unwrap(),
+            std::env::var("MORONS_TEST_BACKEND_TOKEN").unwrap(),
+        )
+    };
     assert_eq!(url.scheme(), "http");
     assert_eq!(url.host_str(), Some("127.0.0.1"));
     assert_eq!(url.path(), "/");
-    let token = std::env::var("MORONS_TEST_BACKEND_TOKEN").unwrap();
     let api = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
@@ -73,9 +81,17 @@ async fn public_transport_against_local_worker() {
         api.get(route("snapshot")).send().await.unwrap().status(),
         401
     );
-    let config = || Config::Http {
-        url: url.clone(),
-        bearer: Some(token.clone()),
+    let config = || {
+        if let Some(path) = &discovery {
+            Config::Local {
+                discovery: path.clone(),
+            }
+        } else {
+            Config::Http {
+                url: url.clone(),
+                bearer: Some(token.clone()),
+            }
+        }
     };
     let (worker, updates) = Worker::start(config());
     until(&updates, |s| s.status == "Connected").await;

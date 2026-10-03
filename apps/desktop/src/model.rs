@@ -104,13 +104,36 @@ impl Snapshot {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub version: u32,
     pub ready: bool,
     pub model: String,
     pub auth_mode: String,
+    #[serde(default)]
+    pub execution_host: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub provider_endpoint: Option<String>,
+    #[serde(default)]
+    pub paid: Option<bool>,
+    #[serde(default)]
+    pub configuration_revision: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
+}
+
+// Only explicit fixture metadata authorizes a send without provider review.
+// Missing metadata never makes a local HTTP endpoint free inference.
+impl Status {
+    pub fn fixture_only(&self) -> bool {
+        self.provider.as_deref() == Some("fixture")
+            && self.model == "mock"
+            && self.paid == Some(false)
+            && self.configuration_revision.as_deref() == Some("fixture-v1")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

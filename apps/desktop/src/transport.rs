@@ -13,6 +13,8 @@ pub struct State {
     pub status: &'static str,
     pub error: Option<&'static str>,
     pub ready: bool,
+    pub action: Option<Status>,
+    pub endpoint: Option<String>,
     pub pending: bool,
     pub accepted: Option<(String, String)>,
     pub request_error: Option<&'static str>,
@@ -24,6 +26,8 @@ impl Default for State {
             status: "Connecting…",
             error: None,
             ready: false,
+            action: None,
+            endpoint: None,
             pending: false,
             accepted: None,
             request_error: None,
@@ -33,6 +37,7 @@ impl Default for State {
 
 pub enum Command {
     Submit(String),
+    SubmitReviewed { text: String, action: Status },
     Stop(String),
     DecideApproval(ApprovalDecision),
     Reconnect,
@@ -41,12 +46,21 @@ pub enum Command {
 
 // The only token accepted here is the backend application bearer, never a provider key.
 // Configuration deliberately has no Debug implementation or persistent storage.
+#[derive(Clone)]
 pub enum Config {
     Mock,
     Http { url: Url, bearer: Option<String> },
+    Local { discovery: std::path::PathBuf },
 }
 impl Config {
     pub fn from_env() -> Result<Self, &'static str> {
+        if let Some(path) = std::env::var_os("MORONS_LOCAL_CONNECTION") {
+            let discovery = std::path::PathBuf::from(path);
+            if !discovery.is_absolute() {
+                return Err("Local service connection path must be absolute");
+            }
+            return Ok(Self::Local { discovery });
+        }
         let Ok(value) = std::env::var("MORONS_BACKEND_URL") else {
             return Ok(Self::Mock);
         };
@@ -92,7 +106,12 @@ impl Worker {
                 let publisher = Publisher { updates, stale };
                 match config {
                     Config::Mock => mock(receiver, publisher).await,
-                    Config::Http { url, bearer } => http(url, bearer, receiver, publisher).await,
+                    Config::Local { discovery } => {
+                        http(None, Some(discovery), receiver, publisher).await
+                    }
+                    Config::Http { url, bearer } => {
+                        http(Some((url, bearer)), None, receiver, publisher).await
+                    }
                 }
             });
         });
@@ -123,6 +142,7 @@ struct Api {
     client: Client,
     url: Url,
     bearer: Option<String>,
+    revision: Option<String>,
 }
 impl Api {
     fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
@@ -137,7 +157,7 @@ impl Api {
             None => request,
         }
     }
-    async fn ready(&self) -> Result<bool, &'static str> {
+    async fn ready(&self) -> Result<Status, &'static str> {
         let response = self
             .request(reqwest::Method::GET, "status")
             .timeout(Duration::from_secs(15))
@@ -152,7 +172,7 @@ impl Api {
         if status.version != 1 || status.auth_mode != "bearer" || status.model.len() > 256 {
             return Err("Unsupported backend status");
         }
-        Ok(status.ready)
+        Ok(status)
     }
     async fn snapshot(&self) -> Result<Snapshot, &'static str> {
         let response = self
@@ -247,8 +267,8 @@ fn rejection_message(status: u16, bytes: &[u8]) -> &'static str {
 }
 
 async fn http(
-    url: Url,
-    bearer: Option<String>,
+    fixed: Option<(Url, Option<String>)>,
+    discovery: Option<std::path::PathBuf>,
     mut commands: mpsc::Receiver<Command>,
     publisher: Publisher,
 ) {
@@ -260,20 +280,74 @@ async fn http(
         Ok(client) => client,
         Err(_) => return,
     };
-    let api = Api {
-        client,
-        url,
-        bearer,
-    };
     let mut state = State::default();
-    let mut pending: Option<(String, String)> = None;
+    let mut pending: Option<(String, String, Option<String>)> = None;
+    let mut previous_instance = None;
     loop {
-        state.status = "Connecting…";
+        state.ready = false;
+        state.action = None;
+        state.status = if discovery.is_some() {
+            "Connecting to local service…"
+        } else {
+            "Connecting…"
+        };
         publisher.publish(&state);
+        let connection = if let Some(path) = &discovery {
+            crate::local_service::discover(path).map(|c| {
+                (
+                    c.url,
+                    Some(c.bearer),
+                    Some(c.instance_id),
+                    Some(c.configuration_revision),
+                )
+            })
+        } else {
+            let (url, bearer) = fixed.as_ref().expect("HTTP configuration");
+            Ok((url.clone(), bearer.clone(), None, None))
+        };
+        let (url, bearer, instance, revision) = match connection {
+            Ok(connection) => connection,
+            Err(error) => {
+                state.status = "Local service unavailable";
+                state.error = Some(error);
+                publisher.publish(&state);
+                tokio::select! {
+                    command = commands.recv() => { match command {
+                        None => return,
+                        Some(Command::Reconnect) => {},
+                        Some(_) => { state.request_error = Some("Reconnect to the local service before taking an action"); publisher.publish(&state); }
+                    } },
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                }
+                continue;
+            }
+        };
+        if previous_instance.is_some() && previous_instance != instance {
+            state.status = "Local service restarted · recovering snapshot…";
+            publisher.publish(&state);
+        }
+        previous_instance = instance.clone();
+        let mut api = Api {
+            client: client.clone(),
+            url,
+            bearer,
+            revision,
+        };
+        state.endpoint = Some(api.url.to_string());
         let result = match api.ready().await {
-            Ok(ready) => {
-                state.ready = ready;
-                api.snapshot().await
+            Ok(status) => {
+                if instance.is_some()
+                    && (status.instance_id != instance
+                        || status.configuration_revision != api.revision
+                        || status.execution_host.as_deref() != Some("local"))
+                {
+                    Err("Local service identity changed; reconnect")
+                } else {
+                    state.ready = status.ready;
+                    api.revision = status.configuration_revision.clone();
+                    state.action = Some(status);
+                    api.snapshot().await
+                }
             }
             Err(error) => Err(error),
         };
@@ -283,9 +357,9 @@ async fn http(
                 // snapshot is sufficient to acknowledge acceptance, across clients.
                 if pending
                     .as_ref()
-                    .is_some_and(|(id, _)| snapshot.tasks.iter().any(|task| &task.id == id))
+                    .is_some_and(|(id, _, _)| snapshot.tasks.iter().any(|task| &task.id == id))
                 {
-                    state.accepted = pending.take();
+                    state.accepted = pending.take().map(|(id, text, _)| (id, text));
                     state.request_error = None;
                 }
                 state.snapshot = snapshot;
@@ -294,9 +368,14 @@ async fn http(
             }
             Err(error) => {
                 state.error = Some(error);
-                state.status = "Disconnected";
+                state.ready = false;
+                state.status = if discovery.is_some() {
+                    "Local service disconnected · reconnecting…"
+                } else {
+                    "Disconnected"
+                };
                 publisher.publish(&state);
-                tokio::select! { command = commands.recv() => { match command { None => return, Some(command) => handle(command, &api, &mut pending, &mut state).await } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+                tokio::select! { command = commands.recv() => { match command { None => return, Some(command) => if discovery.is_none() { handle(command, &api, &mut pending, &mut state).await } } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
                 continue;
             }
         }
@@ -319,10 +398,15 @@ async fn http(
                 response
             }
             _ => {
-                state.status = "Disconnected";
+                state.ready = false;
+                state.status = if discovery.is_some() {
+                    "Local service disconnected · reconnecting…"
+                } else {
+                    "Disconnected"
+                };
                 state.error = Some("Cannot open backend stream");
                 publisher.publish(&state);
-                tokio::select! { command = commands.recv() => { if let Some(command) = command { handle(command, &api, &mut pending, &mut state).await; } else { return; } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+                tokio::select! { command = commands.recv() => { if let Some(command) = command { if discovery.is_none() { handle(command, &api, &mut pending, &mut state).await }; } else { return; } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
                 continue;
             }
         };
@@ -350,16 +434,21 @@ async fn http(
                     for bytes in events {
                         let snapshot = serde_json::from_slice::<Snapshot>(&bytes).ok().filter(|s| s.validate().is_ok());
                         let Some(snapshot) = snapshot else { state.error = Some("Invalid server snapshot"); break 'stream; };
-                        if pending.as_ref().is_some_and(|(id, _)| snapshot.tasks.iter().any(|task| &task.id == id)) { state.accepted = pending.take(); state.pending = false; state.request_error = None; }
+                        if pending.as_ref().is_some_and(|(id, _, _)| snapshot.tasks.iter().any(|task| &task.id == id)) { state.accepted = pending.take().map(|(id, text, _)| (id, text)); state.pending = false; state.request_error = None; }
                         state.snapshot = snapshot; publisher.publish(&state);
                     }
                 }
             }
         }
         if state.error.is_some() {
-            state.status = "Disconnected";
+            state.ready = false;
+            state.status = if discovery.is_some() {
+                "Local service disconnected · reconnecting…"
+            } else {
+                "Disconnected"
+            };
             publisher.publish(&state);
-            tokio::select! { command = commands.recv() => { if let Some(command) = command { handle(command, &api, &mut pending, &mut state).await; } else { return; } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+            tokio::select! { command = commands.recv() => { if let Some(command) = command { if discovery.is_none() { handle(command, &api, &mut pending, &mut state).await }; } else { return; } }, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
         }
     }
 }
@@ -367,9 +456,22 @@ async fn http(
 async fn handle(
     command: Command,
     api: &Api,
-    pending: &mut Option<(String, String)>,
+    pending: &mut Option<(String, String, Option<String>)>,
     state: &mut State,
 ) {
+    let command = match command {
+        Command::SubmitReviewed { text, action } => {
+            if state.action.as_ref() != Some(&action)
+                || !state.ready
+                || api.revision != action.configuration_revision
+            {
+                state.request_error = Some("Provider action changed; review the send again");
+                return;
+            }
+            Command::Submit(text)
+        }
+        command => command,
+    };
     let admission = matches!(&command, Command::Submit(_) | Command::Retry);
     let result = match command {
         Command::Submit(text) => {
@@ -380,7 +482,7 @@ async fn handle(
             if pending.is_some() {
                 return;
             }
-            *pending = Some((uuid::Uuid::new_v4().to_string(), text));
+            *pending = Some((uuid::Uuid::new_v4().to_string(), text, api.revision.clone()));
             submit_pending(api, pending.as_ref()).await
         }
         Command::Retry => submit_pending(api, pending.as_ref()).await,
@@ -406,6 +508,7 @@ async fn handle(
             }
         }
         Command::Reconnect => Ok(()),
+        Command::SubmitReviewed { .. } => unreachable!("normalized reviewed submit"),
     };
     state.request_error = result.err();
     // Only uncertain failures retain the idempotency key. Definite rejection
@@ -419,10 +522,16 @@ async fn handle(
     }
     state.pending = pending.is_some();
 }
-async fn submit_pending(api: &Api, pending: Option<&(String, String)>) -> Result<(), &'static str> {
-    if let Some((id, text)) = pending {
-        api.mutate("tasks", serde_json::json!({"requestId":id,"text":text}))
-            .await
+async fn submit_pending(
+    api: &Api,
+    pending: Option<&(String, String, Option<String>)>,
+) -> Result<(), &'static str> {
+    if let Some((id, text, revision)) = pending {
+        let mut body = serde_json::json!({"requestId":id,"text":text});
+        if let Some(revision) = revision {
+            body["configurationRevision"] = revision.clone().into();
+        }
+        api.mutate("tasks", body).await
     } else {
         Ok(())
     }
