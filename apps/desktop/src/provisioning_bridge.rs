@@ -233,6 +233,17 @@ impl Preview {
 pub fn account_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
+pub fn generated_worker_name(stem: &str, name: &str) -> bool {
+    if let Some(suffix) = name.strip_prefix(&format!("{stem}-")) {
+        suffix.len() == 32
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && worker_name(name)
+    } else {
+        false
+    }
+}
 pub fn worker_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
@@ -332,7 +343,7 @@ mod tests {
                 confirmation: Confirmation {
                     preview_id: &preview.id,
                     account_id: &account,
-                    worker_name: "morons-fixture",
+                    worker_name: &preview.worker_name,
                     accept_resource_creation: true,
                     acknowledge_usage_billing: true,
                     approve_secret_upload: true,
@@ -347,7 +358,7 @@ mod tests {
             confirmation: Confirmation {
                 preview_id: &preview.id,
                 account_id: &account,
-                worker_name: "morons-fixture",
+                worker_name: &preview.worker_name,
                 accept_resource_creation: true,
                 acknowledge_usage_billing: true,
                 approve_secret_upload: true,
@@ -364,6 +375,15 @@ mod tests {
         assert!(account_id(&"a".repeat(32)));
         assert!(!account_id("../../secret"));
         assert!(worker_name("morons-private"));
+        assert!(generated_worker_name(
+            "morons",
+            &format!("morons-{}", "a".repeat(32))
+        ));
+        assert!(!generated_worker_name("morons", "morons-user-chosen"));
+        assert!(!generated_worker_name(
+            "morons",
+            &format!("morons-{}", "G".repeat(32))
+        ));
         assert!(!worker_name("hello;printenv"));
     }
 }

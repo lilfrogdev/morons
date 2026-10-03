@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 pub struct CloudSetup {
-    generation: u64,
+    lifecycle: super::SetupLifecycle,
     token: Entity<SecretInput>,
     account: Entity<SecretInput>,
     worker: Entity<SecretInput>,
@@ -22,11 +22,11 @@ impl EventEmitter<super::ConnectionReady> for CloudSetup {}
 impl CloudSetup {
     pub fn new(model_key: Entity<SecretInput>, cx: &mut Context<Self>) -> Self {
         Self {
-            generation: 0,
+            lifecycle: super::SetupLifecycle::default(),
             token: cx.new(|cx| SecretInput::new_secret(cx, "Scoped Cloudflare API token")),
             account: cx
                 .new(|cx| SecretInput::new_public(cx, "Cloudflare account ID (32 hex characters)")),
-            worker: cx.new(|cx| SecretInput::new_public(cx, "New worker name")),
+            worker: cx.new(|cx| SecretInput::new_public(cx, "New worker prefix (e.g. morons)")),
             auth: cx.new(|cx| {
                 SecretInput::new_secret(cx, "Backend bearer (43–128 URL-safe characters)")
             }),
@@ -40,7 +40,8 @@ impl CloudSetup {
         }
     }
     pub fn clear_ephemeral(&mut self, cx: &mut Context<Self>) {
-        self.generation += 1;
+        self.lifecycle.reset();
+        self.busy = false;
         self.pending_connect = None;
         self.preview = None;
         self.bridge = None;
@@ -53,11 +54,16 @@ impl CloudSetup {
         cx.notify();
     }
     fn review(&mut self, cx: &mut Context<Self>) {
+        if self.lifecycle.deployment_pending() {
+            self.error = Some("An earlier approved deployment is still running; do not repeat it");
+            cx.notify();
+            return;
+        }
         let account = self.account.read(cx).secret();
         let worker = self.worker.read(cx).secret();
         let token = self.token.read(cx).secret();
         if !pb::account_id(&account)
-            || !pb::worker_name(&worker)
+            || (!pb::worker_name(&worker) || worker.len() > 30)
             || token.len() < 20
             || token.len() > 256
         {
@@ -83,7 +89,7 @@ impl CloudSetup {
             cx.notify();
             return;
         }
-        let generation = self.generation;
+        let generation = self.lifecycle.capture();
         self.busy = true;
         self.error = None;
         let (sender, receiver) = async_channel::bounded(1);
@@ -119,7 +125,9 @@ impl CloudSetup {
                 }
                 let preview: Preview = bridge.request(&serde_json::json!({"op":"prepare","accountId":account,"workerName":worker,"bundle":bundle}))?;
                 preview.validate()?;
-                if preview.account.id != account || preview.worker_name != worker {
+                if preview.account.id != account
+                    || !pb::generated_worker_name(&worker, &preview.worker_name)
+                {
                     return Err("Deployment preview identity mismatch");
                 }
                 Ok((Arc::new(Mutex::new(bridge)), preview))
@@ -130,11 +138,11 @@ impl CloudSetup {
         cx.spawn(async move |view, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = view.update(cx, |view, cx| {
-                    view.busy = false;
-                    if generation != view.generation {
+                    if !view.lifecycle.is_current(generation) {
                         cx.notify();
                         return;
                     }
+                    view.busy = false;
                     view.token.update(cx, |field, cx| {
                         field.reset();
                         cx.notify();
@@ -174,6 +182,9 @@ impl CloudSetup {
         let Some(bridge) = self.bridge.take() else {
             return;
         };
+        let generation = self.lifecycle.begin_deployment();
+        let auth_for_clear = self.auth.read(cx).secret();
+        let key_for_clear = self.model_key.read(cx).secret();
         self.busy = true;
         self.error = None;
         let (sender, receiver) = async_channel::bounded(1);
@@ -213,15 +224,23 @@ impl CloudSetup {
         cx.spawn(async move |view, cx| {
             if let Ok(result) = receiver.recv().await {
                 let _ = view.update(cx, |view, cx| {
+                    let Some(result) = view.lifecycle.finish_deployment(generation, result) else {
+                        cx.notify();
+                        return;
+                    };
                     view.busy = false;
-                    view.auth.update(cx, |field, cx| {
-                        field.reset();
-                        cx.notify();
-                    });
-                    view.model_key.update(cx, |field, cx| {
-                        field.reset();
-                        cx.notify();
-                    });
+                    if *view.auth.read(cx).secret() == *auth_for_clear {
+                        view.auth.update(cx, |field, cx| {
+                            field.reset();
+                            cx.notify();
+                        });
+                    }
+                    if *view.model_key.read(cx).secret() == *key_for_clear {
+                        view.model_key.update(cx, |field, cx| {
+                            field.reset();
+                            cx.notify();
+                        });
+                    }
                     match result {
                         Ok((endpoint, bearer)) => {
                             view.deployed = Some(endpoint.clone());
@@ -267,6 +286,11 @@ impl Render for CloudSetup {
                 .child("Confirmation creates the listed resources, uploads the backend bearer and OpenAI API key, and accepts usage billing with no spend cap. The desktop connects with this bearer kept in memory. No model call is made. The account must already have a workers.dev subdomain.")
                 .child(button("confirm-deploy", "Confirm resource creation, secret upload, and usage billing").on_click(cx.listener(|view, _, _, cx| view.deploy(cx))))
                 .child(button("cancel-deploy", "Cancel deployment").on_click(cx.listener(|view, _, _, cx| { view.preview = None; view.bridge = None; cx.notify(); }))))
+            .when(self.lifecycle.deployment_pending(), |d| d.child("An approved deployment is running; no automatic repeat is allowed."))
+            .when_some(self.lifecycle.recovered_deployment.as_ref(), |d, result| d.child(match result {
+                Ok(endpoint) => format!("An earlier approved worker deployed at {endpoint}. Desktop was not reconnected and your new fields were kept. Review connection separately; do not repeat resource creation."),
+                Err(_) => "An earlier approved deployment did not complete cleanly. Check Cloudflare status before any new write; no automatic retry was performed.".into(),
+            }))
             .when(self.busy, |d| d.child("Cloud setup in progress…"))
             .when_some(self.error, |d, error| d.child(div().text_color(rgb(0xA04438)).child(error)))
             .when_some(self.deployed.clone(), |d, endpoint| d.child(if pb::fixture_mode() { "Fixture deployment complete · no cloud resources, network or paid model call".to_owned() } else { format!("Worker deployed at {endpoint}. Model call not verified. Desktop connected using the in-memory backend bearer.") }))

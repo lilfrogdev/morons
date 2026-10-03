@@ -76,6 +76,50 @@ impl ProviderConfiguration {
         Ok(config.readiness)
     }
 }
+// Only the current setup session may change staged fields or connect chat.
+// A completed approved cloud write still leaves a secret-free recovery notice.
+#[derive(Default)]
+pub struct SetupLifecycle {
+    generation: u64,
+    pending_deployment: Option<u64>,
+    pub recovered_deployment: Option<Result<String, &'static str>>,
+}
+impl SetupLifecycle {
+    pub fn capture(&self) -> u64 {
+        self.generation
+    }
+    pub fn is_current(&self, ticket: u64) -> bool {
+        ticket == self.generation
+    }
+    pub fn reset(&mut self) {
+        self.generation += 1;
+    }
+    pub fn deployment_pending(&self) -> bool {
+        self.pending_deployment.is_some()
+    }
+    pub fn begin_deployment(&mut self) -> u64 {
+        self.pending_deployment = Some(self.generation);
+        self.generation
+    }
+    pub fn finish_deployment(
+        &mut self,
+        ticket: u64,
+        result: Result<(String, zeroize::Zeroizing<String>), &'static str>,
+    ) -> Option<Result<(String, zeroize::Zeroizing<String>), &'static str>> {
+        if self.pending_deployment == Some(ticket) {
+            self.pending_deployment = None;
+        }
+        if !self.is_current(ticket) {
+            self.recovered_deployment = Some(match &result {
+                Ok((endpoint, _)) => Ok(endpoint.clone()),
+                Err(error) => Err(*error),
+            });
+            return None;
+        }
+        Some(result)
+    }
+}
+
 // Ordinary settings contain only the curated model/auth mode; keys have their
 // own explicit Keychain operation and cannot be serialized into these settings.
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -367,6 +411,40 @@ mod tests {
         let approval = SaveApproval::prepare("sk-fixture-one").unwrap();
         let result = approval.execute("sk-fixture-one", |_| Err::<(), _>("fixture store failure"));
         assert!(result.unwrap().is_err());
+    }
+    #[test]
+    fn late_deployment_after_close_preserves_new_fields_and_records_recovery_without_reconnect() {
+        let mut lifecycle = SetupLifecycle::default();
+        let ticket = lifecycle.begin_deployment();
+        lifecycle.reset();
+        let mut new_fields = vec!["sk-fixture-new-key", "new-fixture-bearer"];
+        let mut connected = false;
+        if lifecycle
+            .finish_deployment(
+                ticket,
+                Ok((
+                    "https://fixture.workers.dev".into(),
+                    zeroize::Zeroizing::new("old-fixture-bearer".into()),
+                )),
+            )
+            .is_some()
+        {
+            new_fields.clear();
+            connected = true;
+        }
+        assert_eq!(new_fields, ["sk-fixture-new-key", "new-fixture-bearer"]);
+        assert!(!connected);
+        assert!(!lifecycle.deployment_pending());
+        assert_eq!(
+            lifecycle.recovered_deployment,
+            Some(Ok("https://fixture.workers.dev".into()))
+        );
+        let fresh = lifecycle.begin_deployment();
+        assert!(
+            lifecycle
+                .finish_deployment(fresh, Err("Fixture publish failed; state unknown"))
+                .is_some()
+        );
     }
     #[test]
     fn api_key_validation_rejects_subscription_and_secret_injection() {
