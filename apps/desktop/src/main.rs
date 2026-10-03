@@ -12,18 +12,87 @@ actions!(morons, [SendMessage, Quit]);
 struct Chat {
     input: Entity<input::TextInput>,
     worker: Worker,
+    setup: Entity<morons_desktop::provider_setup::native::ProviderSetup>,
     state: State,
     // Keep the foreground listener alive for exactly the view lifetime.
     _updates: Task<()>,
+    _connection: Subscription,
+    _settings_close: Subscription,
+    settings_windows: Vec<WindowId>,
     local_error: Option<&'static str>,
+    live_backend: Option<String>,
+    pending_paid: Option<(String, String)>,
     last_ack: Option<String>,
     scroll: ScrollHandle,
 }
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
+        let live_backend = match &config {
+            Config::Http { url, .. } if url.scheme() == "https" => Some(url.to_string()),
+            _ => None,
+        };
         let input = cx.new(input::TextInput::new);
+        let setup =
+            cx.new(|cx| morons_desktop::provider_setup::native::ProviderSetup::new(&config, cx));
         let (worker, updates) = Worker::start(config);
-        let task = cx.spawn(async move |view, cx| {
+        let task = Self::listen(updates, cx);
+        let connection = cx.subscribe(
+            &setup,
+            |view, _, event: &morons_desktop::provider_setup::ConnectionReady, cx| {
+                let Ok(url) = reqwest::Url::parse(&event.endpoint) else {
+                    return;
+                };
+                let (worker, updates) = Worker::start(if event.fixture {
+                    Config::Mock
+                } else {
+                    Config::Http {
+                        url,
+                        bearer: Some(event.bearer.to_string()),
+                    }
+                });
+                view.worker = worker;
+                view._updates = Self::listen(updates, cx);
+                view.live_backend = if event.fixture {
+                    None
+                } else {
+                    Some(event.endpoint.clone())
+                };
+                view.pending_paid = None;
+                view.state = State::default();
+                view.last_ack = None;
+                view.local_error = None;
+                cx.notify();
+            },
+        );
+        let weak_view = cx.entity().downgrade();
+        let settings_close = cx.on_window_closed(move |cx, id| {
+            if let Some(view) = weak_view.upgrade() {
+                view.update(cx, |view, cx| {
+                    if view.settings_windows.contains(&id) {
+                        view.settings_windows.retain(|window| *window != id);
+                        view.setup.update(cx, |setup, cx| setup.clear_ephemeral(cx));
+                    }
+                });
+            }
+        });
+        Self {
+            input,
+            worker,
+            setup,
+            state: State::default(),
+            _updates: task,
+            _connection: connection,
+            _settings_close: settings_close,
+            settings_windows: vec![],
+            local_error: None,
+            live_backend,
+            pending_paid: None,
+            last_ack: None,
+            scroll: ScrollHandle::new(),
+        }
+    }
+    fn listen(updates: async_channel::Receiver<State>, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |view, cx| {
             while let Ok(state) = updates.recv().await {
                 if view
                     .update(cx, |view, cx| {
@@ -50,16 +119,7 @@ impl Chat {
                     break;
                 }
             }
-        });
-        Self {
-            input,
-            worker,
-            state: State::default(),
-            _updates: task,
-            local_error: None,
-            last_ack: None,
-            scroll: ScrollHandle::new(),
-        }
+        })
     }
     fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
         if !self.state.ready {
@@ -82,6 +142,30 @@ impl Chat {
             cx.notify();
             return;
         }
+        if let Some(endpoint) = &self.live_backend {
+            self.pending_paid = Some((text, endpoint.clone()));
+            cx.notify();
+            return;
+        }
+        self.submit(text, cx);
+    }
+    fn confirm_paid(&mut self, cx: &mut Context<Self>) {
+        let Some((text, endpoint)) = self.pending_paid.take() else {
+            return;
+        };
+        if self.input.read(cx).text() != text
+            || self.live_backend.as_ref() != Some(&endpoint)
+            || !self.state.ready
+            || self.state.pending
+            || self.state.snapshot.active_task_id.is_some()
+        {
+            self.local_error = Some("Message or connection changed; review the send again");
+            cx.notify();
+            return;
+        }
+        self.submit(text, cx);
+    }
+    fn submit(&mut self, text: String, cx: &mut Context<Self>) {
         match self.worker.send(Command::Submit(text)) {
             Ok(()) => {
                 self.state.pending = true;
@@ -237,6 +321,12 @@ impl Render for Chat {
                             )
                             .child(div().text_sm().text_color(rgb(0x667786)).child(status)),
                     )
+                    .child(button("model-setup", "Model setup").on_click(cx.listener(|view, _, _, cx| {
+                        if !view.settings_windows.is_empty() { return; }
+                        let setup = view.setup.clone();
+                        let bounds = Bounds::centered(None, size(px(640.), px(620.)), cx);
+                        if let Ok(window) = cx.open_window(WindowOptions { titlebar: Some(TitlebarOptions { title: Some("Morons model connection".into()), ..Default::default() }), window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |_, _| setup) { view.settings_windows.push(window.window_id()); }
+                    })))
                     .child(button("reconnect", "Reconnect").on_click(
                         cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
                     )),
@@ -270,6 +360,15 @@ impl Render for Chat {
                             .children(messages),
                     ),
             )
+            .when_some(self.pending_paid.clone(), |d, (text, endpoint)| d.child(
+                div().mx_6().p_4().flex().flex_col().gap_2().bg(rgb(0xFFF4DD))
+                    .child("Review paid model send")
+                    .child(format!("Backend: {endpoint} · Provider: OpenAI · Model: gpt-5-mini · Provider endpoint: https://api.openai.com/v1/responses"))
+                    .child("This sends the backend’s saved conversation history and the message below to OpenAI. API usage may be billed; no spend cap is configured. The backend bounds context/output and disables provider retries.")
+                    .child(text)
+                    .child(button("confirm-paid-send", "Confirm paid send").on_click(cx.listener(|view, _, _, cx| view.confirm_paid(cx))))
+                    .child(button("cancel-paid-send", "Cancel send").on_click(cx.listener(|view, _, _, cx| { view.pending_paid = None; cx.notify(); })))
+            ))
             .when_some(error, |d, error| {
                 d.child(
                     div()
@@ -343,6 +442,7 @@ fn main() {
     };
     gpui_platform::application().run(move |cx: &mut App| {
         input::bind_keys(cx);
+        morons_desktop::provider_setup::native::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("enter", SendMessage, Some("TextInput")),
             KeyBinding::new("cmd-q", Quit, None),

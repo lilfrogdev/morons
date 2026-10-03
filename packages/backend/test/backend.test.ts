@@ -385,3 +385,24 @@ describe("local SQLite/Pi backend", () => {
     await replacement.body!.cancel();
   }, 10000);
 });
+
+it("public provider readiness authenticates and labels local fixture configuration", async () => {
+  const mf = await start();
+  const path = "http://localhost/v1/provider/configuration";
+  expect((await mf.dispatchFetch(path)).status).toBe(401);
+  const headers = { Authorization: `Bearer ${token}` };
+  expect(
+    (await mf.dispatchFetch(path, { method: "POST", headers })).status,
+  ).toBe(405);
+  const response = await mf.dispatchFetch(path, { headers });
+  expect(response.headers.get("Cache-Control")).toBe("no-store");
+  expect(await response.json()).toEqual({
+    version: 1,
+    provider: "openai",
+    modelId: "gpt-5-mini",
+    authMode: "api_key",
+    readiness: "fixture",
+    subscription: { openai: "unsupported", opencode: "unsupported" },
+    verification: "not_verified",
+  });
+});
