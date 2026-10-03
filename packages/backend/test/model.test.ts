@@ -124,3 +124,67 @@ it("rejects auth header overrides before Pi can dispatch a subscription bearer",
   }
   expect(calls).toBe(0);
 });
+
+it("sanitizes provider errors before events or internal transcript results retain a key", async () => {
+  const key = "sk-fixture-private-never-live";
+  const models = productionModels(key);
+  const stream = models.streamSimple(
+    models.getModel("openai", "gpt-5-mini")!,
+    {
+      messages: [{ role: "user", content: "fixture", timestamp: 1 }],
+    },
+    {
+      fetch: async () =>
+        Response.json(
+          {
+            error: {
+              message: `Provider diagnostic contains ${key}`,
+              type: "server_error",
+            },
+          },
+          { status: 503 },
+        ),
+    },
+  );
+  const events = [];
+  for await (const event of stream) events.push(event);
+  const result = await stream.result();
+  expect(result.stopReason).toBe("error");
+  expect(result.errorMessage).toBe("Provider request failed (HTTP 503).");
+  expect(JSON.stringify(events)).not.toContain(key);
+  expect(JSON.stringify(result)).not.toContain(key);
+  expect(JSON.stringify(events)).not.toContain("Provider diagnostic");
+});
+
+it("sanitizes thrown and streaming error chunks, including retained partial metadata", async () => {
+  const key = "sk-fixture-private-never-live";
+  for (const transport of [
+    async () => {
+      throw new Error(`Transport diagnostic ${key}`);
+    },
+    async () =>
+      new Response(
+        `data: ${JSON.stringify({ type: "error", code: "fixture", message: `Chunk diagnostic ${key}` })}\n\n`,
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+    async () =>
+      new Response(
+        `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { code: "fixture", message: key } } })}\n\n`,
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+  ]) {
+    const models = productionModels(key);
+    const stream = models.streamSimple(
+      models.getModel("openai", "gpt-5-mini")!,
+      { messages: [{ role: "user", content: "fixture", timestamp: 1 }] },
+      { fetch: transport },
+    );
+    const events = [];
+    for await (const event of stream) events.push(event);
+    const result = await stream.result();
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toBe("Provider request failed.");
+    expect(JSON.stringify(events)).not.toContain(key);
+    expect(JSON.stringify(result)).not.toContain(key);
+  }
+});
