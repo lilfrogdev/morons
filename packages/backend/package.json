@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:desktop": "node test/desktop-transport.mjs",
     "check": "tsc --noEmit",
     "dev": "wrangler dev --env local --ip 127.0.0.1",
     "build": "wrangler deploy --env=\"\" --dry-run --outdir /tmp/morons-worker-build",
