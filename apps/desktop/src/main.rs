@@ -8,7 +8,7 @@ use morons_desktop::{
     transport::{Command, Config, State, Worker},
 };
 
-actions!(morons, [SendMessage, Quit]);
+actions!(morons, [SendMessage, CloseChat, Quit]);
 // In-memory selection only. Provider capabilities remain owned by the service.
 struct SelectedConnection(Config);
 impl Global for SelectedConnection {}
@@ -112,18 +112,19 @@ impl Chat {
     }
     fn connect_local(&mut self, cx: &mut Context<Self>) {
         let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
+            files: false,
+            directories: true,
             multiple: false,
-            prompt: Some("Select the local service connection.json".into()),
+            prompt: Some("Select the private local service directory".into()),
         });
         cx.spawn(async move |view, cx| {
             let Ok(Ok(Some(paths))) = paths.await else {
                 return;
             };
-            let Some(path) = paths.into_iter().next() else {
+            let Some(directory) = paths.into_iter().next() else {
                 return;
             };
+            let path = directory.join("connection.json");
             let valid = morons_desktop::local_service::discover(&path).map(|_| ());
             let _ = view.update(cx, |view, cx| {
                 if view.state.pending {
@@ -401,6 +402,7 @@ impl Render for Chat {
             .text_color(rgb(0x243440))
             .font_family(".AppleSystemUIFont")
             .on_action(cx.listener(Self::send))
+            .on_action(|_: &CloseChat, window, _| window.remove_window())
             .child(
                 div()
                     .flex()
@@ -560,6 +562,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("enter", SendMessage, Some("TextInput")),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseChat, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         open_chat(config.clone(), cx);
