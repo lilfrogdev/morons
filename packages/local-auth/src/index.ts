@@ -198,7 +198,10 @@ export class LocalAuth {
       const state = oauth.generateRandomState();
       const nonce = oauth.generateRandomNonce();
       const verifier = oauth.generateRandomCodeVerifier();
-      const saved = this.#tokens?.identity;
+      // Snapshot account identity and generation before PKCE hashing yields.
+      // A concurrent registration must not lend its revision to this attempt.
+      const saved = this.#tokens ? { ...this.#tokens.identity } : undefined;
+      const revision = this.#revision;
       const url = new URL(this.#server.authorization_endpoint!);
       for (const [name, value] of Object.entries({
         client_id: saved?.clientId ?? "dynamic_agent_client",
@@ -226,7 +229,7 @@ export class LocalAuth {
         identity: saved ? { ...saved } : undefined,
         expiresAt: Date.now() + 300000,
         owner: this,
-        revision: this.#revision,
+        revision,
       });
       return { url: url.href, attempt };
     } catch {

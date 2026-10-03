@@ -1,4 +1,4 @@
-import { beforeAll, expect, it } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import {
   AuthError,
   DIRECT_SCOPE,
@@ -437,4 +437,37 @@ it("rejects oversized/redirected bodies and stale concurrent registrations", asy
     AuthError,
   );
   expect(f.requests).toHaveLength(before);
+});
+
+it("rejects an attempt whose PKCE hashing races a completed registration", async () => {
+  const f = fixture();
+  const first = await f.begin();
+  const digest = crypto.subtle.digest.bind(crypto.subtle);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const spy = vi
+    .spyOn(crypto.subtle, "digest")
+    .mockImplementation(async (...args) => {
+      await gate;
+      return digest(...args);
+    });
+  try {
+    const racingBegin = f.begin();
+    await f.auth.complete(first.attempt, first.callback);
+    expect(f.auth.identity()!.subject).toBe("fixture-account");
+    release();
+    const racing = await racingBegin;
+    f.setClaims({ sub: "different-account" });
+    const before = f.requests.length;
+    await expect(
+      f.auth.complete(racing.attempt, racing.callback),
+    ).rejects.toBeInstanceOf(AuthError);
+    expect(f.auth.identity()!.subject).toBe("fixture-account");
+    expect(f.requests).toHaveLength(before);
+  } finally {
+    release();
+    spy.mockRestore();
+  }
 });
