@@ -329,16 +329,23 @@ pub mod native {
                 }
             };
             self.saving = true;
+            let generation = self.generation;
             cx.spawn(async move |view, cx| {
                 let result = task.await;
                 let _ = view.update(cx, |view, cx| {
                     view.saving = false;
+                    if generation != view.generation {
+                        cx.notify();
+                        return;
+                    }
                     if result.is_ok() {
                         view.saved = true;
-                        view.key.update(cx, |key, cx| {
-                            key.reset();
-                            cx.notify();
-                        });
+                        if *view.key.read(cx).secret() == *current {
+                            view.key.update(cx, |key, cx| {
+                                key.reset();
+                                cx.notify();
+                            });
+                        }
                     } else {
                         view.error = Some("Keychain save failed; no provider call was made");
                     }
