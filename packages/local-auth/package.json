@@ -46,5 +46,10 @@
       "types": "./dist/openai.d.ts",
       "import": "./dist/openai.js"
     }
-  }
+  },
+  "files": [
+    "dist",
+    "NOTICE"
+  ],
+  "version": "0.1.0"
 }
