@@ -103,3 +103,24 @@ it("rejects subscription credentials, auth overrides, and custom endpoints befor
   }
   expect(calls).toBe(0);
 });
+
+it("rejects auth header overrides before Pi can dispatch a subscription bearer", async () => {
+  const models = productionModels("sk-fixture-server-key");
+  const model = models.getModel("openai", "gpt-5-mini")!;
+  let calls = 0;
+  for (const header of ["Authorization", "authorization", "AUTHORIZATION"]) {
+    const stream = models.streamSimple(
+      model,
+      { messages: [{ role: "user", content: "fixture", timestamp: 1 }] },
+      {
+        headers: { [header]: "Bearer fixture-subscription-token" },
+        fetch: async () => {
+          calls++;
+          return Response.json({});
+        },
+      },
+    );
+    expect((await stream.result()).stopReason).toBe("error");
+  }
+  expect(calls).toBe(0);
+});

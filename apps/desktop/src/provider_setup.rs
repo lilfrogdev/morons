@@ -106,7 +106,9 @@ impl Settings {
 #[cfg(feature = "native")]
 mod cloud_setup;
 // Review binds the exact staged key; consuming the approval prevents replay.
+#[cfg(any(feature = "native", test))]
 struct SaveApproval(zeroize::Zeroizing<String>);
+#[cfg(any(feature = "native", test))]
 impl SaveApproval {
     fn prepare(key: &str) -> Result<Self, &'static str> {
         if !valid_api_key(key) {

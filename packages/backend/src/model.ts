@@ -17,8 +17,14 @@ export function productionModels(key?: string) {
       ? AbortSignal.any([signal, AbortSignal.timeout(120000)])
       : AbortSignal.timeout(120000);
   const requireApiKey = (
-    model: { id: string; provider: string; baseUrl: string },
+    model: {
+      id: string;
+      provider: string;
+      baseUrl: string;
+      headers?: Record<string, string | null>;
+    },
     apiKey?: string,
+    headers?: Record<string, string | null>,
   ) => {
     if (
       model.id !== MODEL_ID ||
@@ -26,6 +32,14 @@ export function productionModels(key?: string) {
       model.baseUrl !== "https://api.openai.com/v1"
     )
       throw new Error("Unsupported model configuration");
+    if (
+      [model.headers, headers].some((value) =>
+        Object.keys(value ?? {}).some(
+          (name) => name.toLowerCase() === "authorization",
+        ),
+      )
+    )
+      throw new Error("Authentication header overrides are unsupported");
     if (!validApiKey(key) || apiKey !== key)
       throw new Error("Valid server API-key binding required");
   };
@@ -36,7 +50,7 @@ export function productionModels(key?: string) {
     getModels: () =>
       provider.getModels().filter((model) => model.id === MODEL_ID),
     stream: (model, context, options) => {
-      requireApiKey(model, options?.apiKey);
+      requireApiKey(model, options?.apiKey, options?.headers);
       return provider.stream(model as never, context, {
         ...options,
         signal: deadline(options?.signal),
@@ -46,7 +60,7 @@ export function productionModels(key?: string) {
       } as never);
     },
     streamSimple: (model, context, options) => {
-      requireApiKey(model, options?.apiKey);
+      requireApiKey(model, options?.apiKey, options?.headers);
       return provider.streamSimple(model as never, context, {
         ...options,
         signal: deadline(options?.signal),
