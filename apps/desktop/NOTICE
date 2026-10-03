@@ -1,0 +1,9 @@
+Morons desktop uses GPUI and gpui_platform from Zed Industries, Inc.
+https://github.com/zed-industries/zed
+Pinned revision: 7ea5428f0c1dcca54722d90c9af1f3df584bfd3e
+Copyright 2022 - 2025 Zed Industries, Inc.
+Licensed under Apache-2.0; see LICENSE-GPUI.
+
+src/input.rs is derived from crates/gpui/examples/input.rs in that revision.
+It is modified for a reusable Morons composer, input focus, IME range fixes,
+and presentation. No GPL-licensed Zed editor code is incorporated.
