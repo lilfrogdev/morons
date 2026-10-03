@@ -215,3 +215,27 @@ fn uncertain_retry_reuses_identity_and_quit_never_stops_task() {
     assert!(requests.iter().all(|(route, _)| !route.ends_with("/stop")));
     assert!(requests.iter().all(|(route, _)| !route.contains("cursor")));
 }
+
+#[test]
+fn approval_command_sends_exact_owner_decision_and_rejects_changed_intent() {
+    let fixture = Fixture::start();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let record: crate::model::Approval = serde_json::from_value(serde_json::json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","taskId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","toolCallId":"pi:fixture","toolName":"request_user_confirmation","args":{"message":"Confirm this message"},"digest":"a".repeat(64),"state":"pending","createdAt":1,"expiresAt":300001})).unwrap();
+        let api = Api { client: Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap(), url: fixture.url.clone(), bearer: Some("fixture-only".into()) };
+        let mut state = State::default(); state.snapshot.approvals.push(record.clone());
+        let mut pending = None;
+        let mut tampered = record.decision(true); tampered.digest = "b".repeat(64);
+        handle(Command::DecideApproval(tampered), &api, &mut pending, &mut state).await;
+        assert!(state.request_error.is_some()); assert!(fixture.requests.lock().unwrap().is_empty());
+        handle(Command::DecideApproval(record.decision(false)), &api, &mut pending, &mut state).await;
+        assert!(state.request_error.is_none());
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, format!("/v1/root/approvals/{}/decision", record.id));
+        assert_eq!(requests[0].1, serde_json::json!({"taskId":record.task_id,"digest":record.digest,"decision":"deny"}));
+    });
+}

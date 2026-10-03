@@ -338,7 +338,7 @@ async fn http(
             tokio::select! {
                 command = commands.recv() => {
                     let Some(command) = command else { return; };
-                    state.status = "Sending…"; publisher.publish(&state);
+                    state.status = "Sending…"; state.request_error = None; publisher.publish(&state);
                     handle(command, &api, &mut pending, &mut state).await;
                     publisher.publish(&state);
                     // Discard this connection, fetch a fresh snapshot, then subscribe.
