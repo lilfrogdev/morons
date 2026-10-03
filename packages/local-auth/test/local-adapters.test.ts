@@ -610,3 +610,23 @@ it("cancels a stalled rotation-intent approval without a grant or later credenti
   ).toHaveLength(0);
   expect(auth.needsReauthorization()).toBe(true);
 });
+it("a gate that cancels and rejects synchronously leaves no unhandled secret-bearing rejection", async () => {
+  const controller = new AbortController();
+  let runs = 0;
+  const io = keychainSessionIO(
+    hostId,
+    async () => {
+      controller.abort();
+      throw new Error(secret);
+    },
+    async () => {
+      runs++;
+      return '{"status":"missing"}';
+    },
+  );
+  await expect(io.read(identity, controller.signal)).rejects.toThrow(
+    "ChatGPT sign-in reauth required.",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  expect(runs).toBe(0);
+});

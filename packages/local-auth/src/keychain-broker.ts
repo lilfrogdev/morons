@@ -65,11 +65,11 @@ async function bounded<T>(
   operation: Promise<T>,
   signal: AbortSignal,
 ): Promise<T> {
-  signal.throwIfAborted();
   let abort!: () => void;
   const cancelled = new Promise<never>((_, reject) => {
     abort = () => reject(new AuthError("cancelled"));
-    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
   });
   try {
     return await Promise.race([operation, cancelled]);
