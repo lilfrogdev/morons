@@ -7,3 +7,6 @@ Licensed under Apache-2.0; see LICENSE-GPUI.
 src/input.rs is derived from crates/gpui/examples/input.rs in that revision.
 It is modified for a reusable Morons composer, input focus, IME range fixes,
 and presentation. No GPL-licensed Zed editor code is incorporated.
+
+src/provider_setup/secret_input.rs also derives from that GPUI input example;
+it adds masked rendering/accessibility, zeroized storage, and disables copying.

@@ -72,3 +72,34 @@ it("propagates exact task cancellation to real provider HTTP requests", async ()
   expect((await stream.result()).stopReason).toBe("aborted");
   expect(signal.aborted).toBe(true);
 });
+
+it("rejects subscription credentials, auth overrides, and custom endpoints before HTTP", async () => {
+  let calls = 0;
+  for (const [binding, override, custom] of [
+    ["oauth-fixture", undefined, false],
+    ["sk-fixture-server-key", "oauth-fixture", false],
+    ["sk-fixture-server-key", "sk-other-fixture", false],
+    ["sk-fixture-server-key", undefined, true],
+  ] as const) {
+    const models = productionModels(binding);
+    expect(models.getProvider("openai")!.auth!.oauth).toBeUndefined();
+    expect(models.getModel("openai", "gpt-5")).toBeUndefined();
+    const allowed = models.getModel("openai", "gpt-5-mini")!;
+    const model = custom
+      ? { ...allowed, baseUrl: "https://fixture.invalid" }
+      : allowed;
+    const stream = models.streamSimple(
+      model,
+      { messages: [{ role: "user", content: "fixture", timestamp: 1 }] },
+      {
+        ...(override ? { apiKey: override } : {}),
+        fetch: async () => {
+          calls++;
+          return Response.json({});
+        },
+      },
+    );
+    expect((await stream.result()).stopReason).toBe("error");
+  }
+  expect(calls).toBe(0);
+});

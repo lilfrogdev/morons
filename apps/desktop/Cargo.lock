@@ -3053,6 +3053,7 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

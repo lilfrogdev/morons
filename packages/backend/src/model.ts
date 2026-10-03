@@ -1,11 +1,8 @@
 import { createModels, type Provider } from "@earendil-works/pi-ai/models";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { LIMITS } from "../../protocol/index";
-export function validApiKey(key?: string): boolean {
-  return Boolean(
-    key?.startsWith("sk-") && key.length <= 4096 && !/\s/.test(key),
-  );
-}
+import { MODEL_ID, validApiKey } from "./provider-configuration";
+export { validApiKey } from "./provider-configuration";
 export function productionModels(key?: string) {
   const models = createModels({
     authContext: {
@@ -19,27 +16,45 @@ export function productionModels(key?: string) {
     signal
       ? AbortSignal.any([signal, AbortSignal.timeout(120000)])
       : AbortSignal.timeout(120000);
+  const requireApiKey = (
+    model: { id: string; provider: string; baseUrl: string },
+    apiKey?: string,
+  ) => {
+    if (
+      model.id !== MODEL_ID ||
+      model.provider !== "openai" ||
+      model.baseUrl !== "https://api.openai.com/v1"
+    )
+      throw new Error("Unsupported model configuration");
+    if (!validApiKey(key) || apiKey !== key)
+      throw new Error("Valid server API-key binding required");
+  };
   const bounded: Provider = {
     ...provider,
+    auth: { apiKey: provider.auth!.apiKey },
     // Curated API-key model; this OpenAI Responses model supports max_output_tokens.
     getModels: () =>
-      provider.getModels().filter((model) => model.id === "gpt-5-mini"),
-    stream: (model, context, options) =>
-      provider.stream(model as never, context, {
+      provider.getModels().filter((model) => model.id === MODEL_ID),
+    stream: (model, context, options) => {
+      requireApiKey(model, options?.apiKey);
+      return provider.stream(model as never, context, {
         ...options,
         signal: deadline(options?.signal),
         maxTokens: LIMITS.maxOutputTokens,
         maxRetries: 0,
         timeoutMs: 120000,
-      } as never),
-    streamSimple: (model, context, options) =>
-      provider.streamSimple(model as never, context, {
+      } as never);
+    },
+    streamSimple: (model, context, options) => {
+      requireApiKey(model, options?.apiKey);
+      return provider.streamSimple(model as never, context, {
         ...options,
         signal: deadline(options?.signal),
         maxTokens: LIMITS.maxOutputTokens,
         maxRetries: 0,
         timeoutMs: 120000,
-      }),
+      });
+    },
   };
   models.setProvider(bounded);
   return models;

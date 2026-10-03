@@ -18,6 +18,7 @@ path = "src/main.rs"
 required-features = ["native"]
 
 [dependencies]
+zeroize = "=1.9.0"
 async-channel = "=2.5.0"
 futures-util = "=0.3.34"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "7ea5428f0c1dcca54722d90c9af1f3df584bfd3e", default-features = false, optional = true }

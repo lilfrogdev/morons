@@ -1,5 +1,6 @@
 import { RootChat } from "./root";
-import { authorized, failure } from "./http";
+import { publicConfiguration } from "./provider-configuration";
+import { authorized, failure, json } from "./http";
 export { RootChat };
 export interface Env {
   ROOT: DurableObjectNamespace;
@@ -15,6 +16,15 @@ export const worker = {
         "unauthorized",
         "Valid bearer authentication is required.",
       );
+    if (new URL(request.url).pathname === "/v1/provider/configuration") {
+      if (request.method !== "GET")
+        return failure(
+          405,
+          "method_not_allowed",
+          "Use GET for provider configuration.",
+        );
+      return json(publicConfiguration(env));
+    }
     if (!new URL(request.url).pathname.startsWith("/v1/root/"))
       return failure(404, "not_found", "Unknown endpoint.");
     const response = await env.ROOT.get(env.ROOT.idFromName("root")).fetch(
