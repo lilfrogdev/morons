@@ -1,3 +1,5 @@
+export type { Approval, ApprovalDecision, ApprovalState } from "./approvals";
+import type { Approval } from "./approvals";
 export const VERSION = 1 as const;
 export const LIMITS = {
   maxInputBytes: 8192,
@@ -32,6 +34,7 @@ export interface Snapshot {
   tasks: Task[];
   messages: Message[];
   activeTaskId: string | null;
+  approvals?: Approval[];
 }
 export interface Submit {
   requestId: string;
