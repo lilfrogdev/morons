@@ -1,4 +1,4 @@
-import { LocalAuth, type Transport } from "./index";
+import { LocalAuth, type Transport } from "./index.js";
 
 // Official OpenAI OIDC metadata. Native settings and saved account records cannot
 // replace these trust anchors. Generic metadata injection remains a test boundary.

@@ -10,6 +10,14 @@ export interface IssuerConfiguration {
   tokenEndpoint: string;
   jwksUri: string;
 }
+export interface ProtectedSessionIO {
+  read(identity: Identity, signal?: AbortSignal): Promise<string | undefined>;
+  write(
+    identity: Identity,
+    encoded: string,
+    signal?: AbortSignal,
+  ): Promise<void>;
+}
 export interface Identity {
   issuer: string;
   subject: string;
@@ -20,6 +28,8 @@ interface Tokens {
   refreshToken: string;
   idToken: string;
   expiresAt: number;
+  refreshExpiresAt: number;
+  earliestRefreshAt: number;
   scopes: string[];
   identity: Identity;
   nonce: string;
@@ -82,8 +92,8 @@ export interface Attempt {
 }
 const attempts = new WeakMap<Attempt, Pending>();
 
-// Local-only, memory-only auth foundation. Transport is mandatory and injected;
-// no ambient credential lookup, browser launch, listener, persistence or inference.
+// Local-only auth capability. Transport and optional protected IO are injected;
+// construction performs no credential, browser, listener or inference operation.
 export class LocalAuth {
   #server: oauth.AuthorizationServer;
   #transport: Transport;
@@ -92,6 +102,7 @@ export class LocalAuth {
   #queue: Promise<unknown> = Promise.resolve();
   #refreshBlocked = false;
   #revision = 0;
+  #protectedIO?: ProtectedSessionIO;
   constructor(
     configuration: IssuerConfiguration,
     hostId: string,
@@ -281,7 +292,7 @@ export class LocalAuth {
     requireValue(result.access_token);
     const idToken = result.id_token ?? previous?.idToken;
     requireValue(idToken);
-    const refresh = result.refresh_token ?? previous?.refreshToken;
+    const refresh = result.refresh_token;
     requireValue(refresh);
     if (
       typeof result.expires_in !== "number" ||
@@ -290,8 +301,31 @@ export class LocalAuth {
       result.expires_in > 86400
     )
       throw new AuthError("validation_failed");
+    const earliest = result.earliest_refresh_at;
+    let earliestRefreshAt = Date.now();
+    if (earliest !== undefined) {
+      if (
+        typeof earliest === "number" &&
+        Number.isSafeInteger(earliest) &&
+        earliest >= 0
+      )
+        earliestRefreshAt = earliest * 1000;
+      else if (
+        typeof earliest === "string" &&
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(earliest)
+      )
+        earliestRefreshAt = Date.parse(earliest);
+      else throw new AuthError("validation_failed");
+      if (
+        !Number.isFinite(earliestRefreshAt) ||
+        earliestRefreshAt > Date.now() + result.expires_in * 1000
+      )
+        throw new AuthError("validation_failed");
+    }
     return {
       identity,
+      refreshExpiresAt: Date.now() + 30 * 86400000,
+      earliestRefreshAt,
       accessToken: result.access_token,
       refreshToken: refresh,
       idToken,
@@ -369,24 +403,36 @@ export class LocalAuth {
         this.#tokens = record;
         this.#refreshBlocked = false;
         this.#revision++;
+        if (this.#protectedIO) await this.#persist("ready", signal);
         return this.identity()!;
       } catch {
+        if (this.#protectedIO && this.#tokens) this.#refreshBlocked = true;
         throw new AuthError(
           signal?.aborted ? "cancelled" : "validation_failed",
         );
       }
     });
   }
-  // One session owns the rotation lock; persistence/multi-process locks are not
-  // implemented here. A failed/uncertain refresh requires explicit reauthorization.
+  // One daemon owns the session and rotation queue. Attached IO atomically writes
+  // a rotation intent before the grant; uncertain refresh requires reauthorization.
   refresh(signal?: AbortSignal) {
     return this.#serialize(async () => {
       const previous = this.#tokens;
-      if (!previous || this.#refreshBlocked)
+      if (
+        !previous ||
+        this.#refreshBlocked ||
+        previous.refreshExpiresAt <= Date.now()
+      )
         throw new AuthError("reauth_required");
       if (signal?.aborted) throw new AuthError("cancelled");
-      if (previous.expiresAt > Date.now() + 180000) return this.identity()!;
+      if (
+        previous.expiresAt > Date.now() + 180000 ||
+        previous.earliestRefreshAt > Date.now()
+      )
+        return this.identity()!;
       try {
+        if (this.#protectedIO) await this.#persist("refreshing", signal);
+        signal?.throwIfAborted();
         const client = this.#client(previous.identity.clientId);
         const options = this.#options(signal);
         const response = await oauth.refreshTokenGrantRequest(
@@ -414,11 +460,143 @@ export class LocalAuth {
           previous.nonce,
           previous,
         );
+        this.#revision++;
+        if (this.#protectedIO) await this.#persist("ready", signal);
         return this.identity()!;
       } catch {
         this.#refreshBlocked = true;
+        if (this.#protectedIO && !signal?.aborted)
+          await this.#persist("reauth_required", signal).catch(() => undefined);
         throw new AuthError(signal?.aborted ? "cancelled" : "reauth_required");
       }
     });
+  }
+  needsReauthorization() {
+    return (
+      !this.#tokens ||
+      this.#refreshBlocked ||
+      this.#tokens.refreshExpiresAt <= Date.now()
+    );
+  }
+  // Trusted daemon-only capability: never put these callbacks behind a public
+  // credential-import/export route. A native protected broker supplies the IO.
+  attachProtectedIO(io: ProtectedSessionIO) {
+    if (this.#protectedIO || this.#tokens)
+      throw new AuthError("invalid_attempt");
+    this.#protectedIO = io;
+  }
+  async #persist(
+    phase: "ready" | "refreshing" | "reauth_required",
+    signal?: AbortSignal,
+  ) {
+    if (!this.#protectedIO || !this.#tokens)
+      throw new AuthError("reauth_required");
+    try {
+      signal?.throwIfAborted();
+      const encoded = JSON.stringify({
+        version: 1,
+        hostId: this.#hostId,
+        issuer: this.#server.issuer,
+        revision: this.#revision,
+        phase,
+        tokens: this.#tokens,
+      });
+      if (new TextEncoder().encode(encoded).byteLength > 65536)
+        throw new AuthError("validation_failed");
+      await this.#protectedIO.write(this.identity()!, encoded, signal);
+      signal?.throwIfAborted();
+    } catch {
+      this.#refreshBlocked = true;
+      throw new AuthError("reauth_required");
+    }
+  }
+  restore(selected: Identity, signal?: AbortSignal) {
+    return this.#serialize(async () => {
+      if (!this.#protectedIO || this.#tokens)
+        throw new AuthError("invalid_attempt");
+      try {
+        signal?.throwIfAborted();
+        const encoded = await this.#protectedIO.read(selected, signal);
+        signal?.throwIfAborted();
+        if (!encoded || new TextEncoder().encode(encoded).byteLength > 65536)
+          throw new AuthError("reauth_required");
+        const saved = JSON.parse(encoded);
+        if (
+          Object.keys(saved).sort().join(",") !==
+            "hostId,issuer,phase,revision,tokens,version" ||
+          saved.version !== 1 ||
+          saved.hostId !== this.#hostId ||
+          saved.issuer !== this.#server.issuer ||
+          !Number.isSafeInteger(saved.revision) ||
+          saved.revision < 1
+        )
+          throw new AuthError("validation_failed");
+        const t = saved.tokens;
+        if (
+          !t ||
+          Object.keys(t).sort().join(",") !==
+            "accessToken,earliestRefreshAt,expiresAt,idToken,identity,nonce,refreshExpiresAt,refreshToken,scopes"
+        )
+          throw new AuthError("validation_failed");
+        for (const value of [t.accessToken, t.refreshToken, t.idToken, t.nonce])
+          requireValue(value);
+        clientId(t.identity?.clientId);
+        requireValue(t.identity?.subject);
+        if (
+          Object.keys(t.identity).sort().join(",") !==
+            "clientId,issuer,subject" ||
+          t.identity.issuer !== selected.issuer ||
+          selected.issuer !== this.#server.issuer ||
+          t.identity.subject !== selected.subject ||
+          t.identity.clientId !== selected.clientId ||
+          !Array.isArray(t.scopes) ||
+          t.scopes.length > 32 ||
+          t.scopes.some(
+            (scope: unknown) =>
+              typeof scope !== "string" ||
+              !/^[A-Za-z0-9._:-]{1,128}$/.test(scope as string),
+          ) ||
+          !t.scopes.includes(DIRECT_SCOPE)
+        )
+          throw new AuthError("validation_failed");
+        if (
+          ![t.expiresAt, t.refreshExpiresAt, t.earliestRefreshAt].every(
+            Number.isFinite,
+          ) ||
+          t.refreshExpiresAt <= Date.now() ||
+          t.refreshExpiresAt > Date.now() + 30 * 86400000 ||
+          t.expiresAt > Date.now() + 86400000 ||
+          t.earliestRefreshAt > t.expiresAt
+        )
+          throw new AuthError("validation_failed");
+        // Keychain provenance protects the previously verified identity. A saved
+        // ID token may be expired: rechecking its expiry would break valid refresh.
+        // Only "ready" survives restart; an interrupted rotation never retries.
+        if (saved.phase !== "ready") throw new AuthError("reauth_required");
+        this.#tokens = t;
+        this.#revision = saved.revision;
+        return this.identity()!;
+      } catch {
+        this.#refreshBlocked = true;
+        throw new AuthError("reauth_required");
+      }
+    });
+  }
+  // Captured bearer stays inside a trusted provider capability. Caller approval
+  // must precede this method; no credential is returned in an auth status DTO.
+  async withAccessToken<T>(
+    action: (token: string, identity: Identity) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    await this.refresh(signal);
+    const record = this.#tokens;
+    if (
+      !record ||
+      this.#refreshBlocked ||
+      record.expiresAt <= Date.now() ||
+      signal?.aborted
+    )
+      throw new AuthError("reauth_required");
+    return action(record.accessToken, { ...record.identity });
   }
 }

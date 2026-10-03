@@ -1,4 +1,4 @@
-import type { Identity } from "./index";
+import type { Identity } from "./index.js";
 export class RequestError extends Error {
   constructor() {
     super("Subscription request validation failed.");
