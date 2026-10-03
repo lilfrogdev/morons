@@ -10,8 +10,8 @@ import type {
   BoundListener,
   CallbackRequest,
   LoopbackListenerFactory,
-} from "./loopback";
-import { FlowError, LOOPBACK_LIMITS } from "./loopback";
+} from "./loopback.js";
+import { FlowError, LOOPBACK_LIMITS } from "./loopback.js";
 
 const FAILURE =
   "<!doctype html><title>Morons</title><p>Sign-in was not completed.</p>";

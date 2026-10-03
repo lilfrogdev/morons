@@ -6,11 +6,11 @@ import type {
 } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import type { LocalAuthService } from "./local-service";
-import { subscriptionPayload } from "./pi-payload";
-import { buildSubscriptionRequest } from "./subscription-request";
-import { privateErrors } from "./pi-events";
-import { AuthError, type Transport } from "./index";
+import type { LocalAuthService } from "./local-service.js";
+import { subscriptionPayload } from "./pi-payload.js";
+import { buildSubscriptionRequest } from "./subscription-request.js";
+import { privateErrors } from "./pi-events.js";
+import { AuthError, type Transport } from "./index.js";
 const ENDPOINT = "https://api.openai.com/v1/responses";
 // Pi uses this non-secret adapter credential internally; it is NEVER transmitted.
 // An sk- prefix explicitly avoids Pi's credential-shape subscription heuristic.

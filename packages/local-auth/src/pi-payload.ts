@@ -1,4 +1,4 @@
-import { RequestError } from "./subscription-request";
+import { RequestError } from "./subscription-request.js";
 const TYPES = new Set([
   "message",
   "function_call",

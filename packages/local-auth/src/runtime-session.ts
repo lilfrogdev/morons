@@ -1,4 +1,4 @@
-import type { Identity } from "./index";
+import type { Identity } from "./index.js";
 
 // This boundary carries protected, already verified material. It is not a token
 // import endpoint: signature/grant validation and exact transfer approval belong

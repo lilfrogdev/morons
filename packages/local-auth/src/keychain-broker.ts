@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
-import type { Identity, ProtectedSessionIO } from "./index";
-import { AuthError } from "./index";
+import type { Identity, ProtectedSessionIO } from "./index.js";
+import { AuthError } from "./index.js";
 const SERVICE = "morons://local/chatgpt-session/v1";
 export interface StorageIntent {
   action: "read" | "write";

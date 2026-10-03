@@ -1,5 +1,10 @@
-import { AuthError, LocalAuth, type Identity, type Transport } from "./index";
-import { createOpenAILocalAuth, isOpenAILocalAuth } from "./openai";
+import {
+  AuthError,
+  LocalAuth,
+  type Identity,
+  type Transport,
+} from "./index.js";
+import { createOpenAILocalAuth, isOpenAILocalAuth } from "./openai.js";
 
 export const LOOPBACK_LIMITS = Object.freeze({
   timeoutMs: 300000,

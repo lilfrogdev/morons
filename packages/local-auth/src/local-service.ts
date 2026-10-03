@@ -4,19 +4,19 @@ import {
   type ProtectedSessionIO,
   type Transport,
   AuthError,
-} from "./index";
+} from "./index.js";
 import {
   authorizeLocally,
   type BrowserOpener,
   type LoopbackListenerFactory,
   type ProtectedSessionStore,
-} from "./loopback";
-import { createOpenAILocalAuth } from "./openai";
+} from "./loopback.js";
+import { createOpenAILocalAuth } from "./openai.js";
 import {
   parseCatalog,
   buildSubscriptionRequest,
   type Catalog,
-} from "./subscription-request";
+} from "./subscription-request.js";
 
 export interface AuthStatus {
   version: 1;
