@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import { createHash } from "node:crypto";
 import { Provisioner, ProvisioningError } from "../src/index.js";
 import type {
   BootstrapSource,
@@ -12,7 +13,7 @@ const otherAccount = "b".repeat(32);
 const token = "fixture-scoped-token-".padEnd(40, "x");
 const secrets = {
   AUTH_TOKEN: "fixture-bearer-".padEnd(43, "x"),
-  OPENAI_API_KEY: "sk-fixture-openai-api-key-xxxx",
+  providerKey: "sk-fixture-openai-api-key-xxxx",
 };
 const bundle: WorkerBundle = {
   mainModule: "worker.js",
@@ -26,6 +27,7 @@ const bundle: WorkerBundle = {
 const bootstrap: BootstrapSource = { withSecrets: async (use) => use(secrets) };
 const approval = (preview: DeploymentPreview) => ({
   previewId: preview.id,
+  configurationSha256: preview.configurationSha256,
   accountId,
   workerName: preview.workerName,
   acceptResourceCreation: true as const,
@@ -111,6 +113,12 @@ const prepare = (provisioner: Provisioner, value = bundle) =>
   provisioner.prepareDeployment({
     accountId,
     workerName: "morons-owner",
+    selection: {
+      host: "cloud",
+      provider: "openai",
+      auth: "api_key",
+      modelId: "gpt-5-mini",
+    },
     bundle: value,
   });
 function rejects(code: string, stage?: string, writeState?: string) {
@@ -173,7 +181,7 @@ test("deployment uploads exact immutable bundle and secrets atomically then publ
       metadata.bindings.find(
         (binding: { name: string }) => binding.name === name,
       ).text,
-      secrets[name],
+      name === "AUTH_TOKEN" ? secrets.AUTH_TOKEN : secrets.providerKey,
     );
   assert.equal(metadata.observability.enabled, false);
   assert.equal(metadata.limits, undefined);
@@ -251,6 +259,12 @@ test("unknown account, broad visible accounts, permissions and ambiguous 404 all
     f.provisioner.prepareDeployment({
       accountId: otherAccount,
       workerName: "morons",
+      selection: {
+        host: "cloud",
+        provider: "openai",
+        auth: "api_key",
+        modelId: "gpt-5-mini",
+      },
       bundle,
     }),
     rejects("credential_scope"),
@@ -294,7 +308,7 @@ test("API failures return only safe status/codes and do not retry writes", async
               errors: [
                 {
                   code: 10000,
-                  message: `${token} ${secrets.AUTH_TOKEN} ${secrets.OPENAI_API_KEY}`,
+                  message: `${token} ${secrets.AUTH_TOKEN} ${secrets.providerKey}`,
                 },
               ],
             },
@@ -310,7 +324,7 @@ test("API failures return only safe status/codes and do not retry writes", async
       assert.equal(error.writeState, "unknown");
       assert.equal(error.httpStatus, 403);
       assert.deepEqual(error.providerCodes, [10000]);
-      for (const secret of [token, secrets.AUTH_TOKEN, secrets.OPENAI_API_KEY])
+      for (const secret of [token, secrets.AUTH_TOKEN, secrets.providerKey])
         assert.ok(
           !JSON.stringify(error).includes(secret) &&
             !error.stack?.includes(secret),
@@ -408,6 +422,12 @@ test("invalid bundle names, sizes, duplicate modules and worker names are refuse
     f.provisioner.prepareDeployment({
       accountId,
       workerName: 123 as unknown as string,
+      selection: {
+        host: "cloud",
+        provider: "openai",
+        auth: "api_key",
+        modelId: "gpt-5-mini",
+      },
       bundle,
     }),
     rejects("invalid_input"),
@@ -510,6 +530,12 @@ test("caller-supplied exact generated names cannot be used as prepare stems", as
     f.provisioner.prepareDeployment({
       accountId,
       workerName: `morons-owner-${"42".repeat(16)}`,
+      selection: {
+        host: "cloud",
+        provider: "openai",
+        auth: "api_key",
+        modelId: "gpt-5-mini",
+      },
       bundle,
     }),
     rejects("invalid_input"),
@@ -518,7 +544,193 @@ test("caller-supplied exact generated names cannot be used as prepare stems", as
   const longest = await f.provisioner.prepareDeployment({
     accountId,
     workerName: "a".repeat(30),
+    selection: {
+      host: "cloud",
+      provider: "openai",
+      auth: "api_key",
+      modelId: "gpt-5-mini",
+    },
     bundle,
   });
   assert.equal(longest.workerName.length, 63);
+});
+
+test("Zen model choice binds endpoint, secret slot and provider metadata into preview hash", async () => {
+  for (const modelId of ["gpt-6.1-sol", "kimi-k3", "minimax-m3"]) {
+    const f = fixture();
+    const selection = {
+      host: "cloud",
+      provider: "opencode",
+      auth: "api_key",
+      modelId,
+    };
+    const preview = await f.provisioner.prepareDeployment({
+      accountId,
+      workerName: "morons",
+      bundle,
+      selection,
+    });
+    assert.deepEqual(preview.selection, selection);
+    assert.equal(preview.providerSecretBinding, "OPENCODE_API_KEY");
+    assert.equal(
+      preview.providerEndpoint,
+      modelId === "gpt-6.1-sol"
+        ? "https://opencode.ai/zen/v1/responses"
+        : "https://opencode.ai/zen/v1/chat/completions",
+    );
+    assert.equal(
+      preview.configurationSha256,
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            selection: preview.selection,
+            endpoint: preview.providerEndpoint,
+            secretBinding: preview.providerSecretBinding,
+            bundleSha256: preview.bundleSha256,
+          }),
+        )
+        .digest("hex"),
+    );
+    await f.provisioner.deploy(approval(preview), {
+      withSecrets: async (use) =>
+        use({ ...secrets, providerKey: "fixture-zen-paid-api-key" }),
+    });
+    const form = f.requests.find(({ init }) => init.method === "PUT")!.init
+      .body as FormData;
+    const metadata = JSON.parse(form.get("metadata") as string);
+    assert.equal(
+      metadata.bindings.find((b: { name: string }) => b.name === "PROVIDER_ID")
+        .text,
+      "opencode",
+    );
+    assert.equal(
+      metadata.bindings.find((b: { name: string }) => b.name === "MODEL_ID")
+        .text,
+      modelId,
+    );
+    assert.equal(
+      metadata.bindings.find((b: { name: string }) => b.name === "AUTH_MODE")
+        .text,
+      "api_key",
+    );
+    assert.equal(
+      metadata.bindings.find(
+        (b: { name: string }) => b.name === "OPENCODE_API_KEY",
+      ).text,
+      "fixture-zen-paid-api-key",
+    );
+    assert.equal(
+      metadata.bindings.some(
+        (b: { name: string }) => b.name === "OPENAI_API_KEY",
+      ),
+      false,
+    );
+  }
+});
+
+test("provider/model change requires the new configuration hash; credentials never infer selection", async () => {
+  const f = fixture();
+  const openai = await prepare(f.provisioner);
+  const zen = await f.provisioner.prepareDeployment({
+    accountId,
+    workerName: "morons",
+    bundle,
+    selection: {
+      host: "cloud",
+      provider: "opencode",
+      auth: "api_key",
+      modelId: "kimi-k3",
+    },
+  });
+  assert.notEqual(openai.configurationSha256, zen.configurationSha256);
+  await assert.rejects(
+    f.provisioner.deploy(approval(openai), bootstrap),
+    rejects("approval_required"),
+  );
+  await assert.rejects(
+    f.provisioner.deploy(
+      { ...approval(zen), configurationSha256: openai.configurationSha256 },
+      bootstrap,
+    ),
+    rejects("approval_required"),
+  );
+  assert.ok(f.requests.every(({ init }) => !init.method));
+  // Even an sk-shaped fixture key remains explicitly Zen: no OpenAI heuristic.
+  await f.provisioner.deploy(approval(zen), bootstrap);
+  const form = f.requests.find(({ init }) => init.method === "PUT")!.init
+    .body as FormData;
+  const metadata = JSON.parse(form.get("metadata") as string);
+  assert.ok(
+    metadata.bindings.some(
+      (b: { name: string }) => b.name === "OPENCODE_API_KEY",
+    ),
+  );
+  assert.ok(
+    !metadata.bindings.some(
+      (b: { name: string }) => b.name === "OPENAI_API_KEY",
+    ),
+  );
+});
+
+test("missing model choice, arbitrary endpoints, subscription and Go selections fail before reads", async () => {
+  for (const selection of [
+    undefined,
+    { host: "cloud", provider: "opencode", auth: "api_key" },
+    {
+      host: "cloud",
+      provider: "opencode",
+      auth: "api_key",
+      modelId: "kimi-k3",
+      endpoint: "https://evil.example",
+    },
+    {
+      host: "cloud",
+      provider: "opencode-go",
+      auth: "api_key",
+      modelId: "kimi-k3",
+    },
+    {
+      host: "local",
+      provider: "openai",
+      auth: "chatgpt_subscription",
+      modelId: "gpt-6.1-sol",
+    },
+  ]) {
+    const f = fixture();
+    await assert.rejects(
+      f.provisioner.prepareDeployment({
+        accountId,
+        workerName: "morons",
+        bundle,
+        selection,
+      }),
+      rejects("invalid_input"),
+    );
+    assert.equal(f.requests.length, 0);
+  }
+});
+
+test("changing selection during approved secret acquisition prevents the write", async () => {
+  const f = fixture();
+  const old = await prepare(f.provisioner);
+  await assert.rejects(
+    f.provisioner.deploy(approval(old), {
+      withSecrets: async (use) => {
+        await f.provisioner.prepareDeployment({
+          accountId,
+          workerName: "morons",
+          bundle,
+          selection: {
+            host: "cloud",
+            provider: "opencode",
+            auth: "api_key",
+            modelId: "kimi-k3",
+          },
+        });
+        return use(secrets);
+      },
+    }),
+    rejects("approval_required", "confirmation"),
+  );
+  assert.ok(f.requests.every(({ init }) => !init.method));
 });

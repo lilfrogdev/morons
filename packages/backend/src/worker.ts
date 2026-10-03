@@ -7,6 +7,9 @@ export interface Env {
   AUTH_TOKEN?: string;
   OPENAI_API_KEY?: string;
   MODEL_ID?: string;
+  PROVIDER_ID?: string;
+  AUTH_MODE?: string;
+  OPENCODE_API_KEY?: string;
 }
 export const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {

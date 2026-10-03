@@ -126,6 +126,7 @@ export class BridgeSession {
             accountId: request.accountId as string,
             workerName: request.workerName as string,
             bundle: request.bundle as WorkerBundle,
+            selection: request.selection,
           });
           break;
         case "deploy": {
@@ -138,7 +139,7 @@ export class BridgeSession {
             throw new ProvisioningError("invalid_input", "bootstrap");
           const secrets = bootstrap as {
             AUTH_TOKEN: string;
-            OPENAI_API_KEY: string;
+            providerKey: string;
           };
           result = await this.#connected().deploy(
             request.confirmation as DeploymentConfirmation,

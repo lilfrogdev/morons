@@ -123,7 +123,7 @@ test("oversized and unterminated frames are refused, then credentials are dispos
   }
 });
 test("executable defaults to no actions and writes no diagnostics containing arguments", async () => {
-  const script = new URL("../src/bridge.js", import.meta.url).pathname;
+  const script = new URL("../../src/bridge.js", import.meta.url).pathname;
   const run = (args: string[], stdin = "") =>
     new Promise<{ code: number | null; stdout: string; stderr: string }>(
       (resolve) => {
