@@ -33,9 +33,6 @@ async fn public_transport_against_local_worker() {
     let token = std::env::var("MORONS_TEST_BACKEND_TOKEN").unwrap();
     let api = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        // Keep direct assertions isolated from emulator keep-alive connections;
-        // the public transport still exercises its normal connection pool.
-        .pool_max_idle_per_host(0)
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap();
