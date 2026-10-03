@@ -1,0 +1,22 @@
+{
+  "name": "@morons/local-auth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit",
+    "format:check": "prettier --check src test package.json tsconfig.json"
+  },
+  "dependencies": {
+    "oauth4webapi": "3.8.8"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "prettier": "3.6.2",
+    "@types/node": "22.19.0"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
