@@ -1,0 +1,33 @@
+[package]
+name = "morons-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[features]
+default = ["native"]
+native = ["dep:gpui", "dep:gpui_platform", "dep:unicode-segmentation"]
+
+[[bin]]
+name = "morons-desktop"
+path = "src/main.rs"
+required-features = ["native"]
+
+[dependencies]
+async-channel = "=2.5.0"
+futures-util = "=0.3.34"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "7ea5428f0c1dcca54722d90c9af1f3df584bfd3e", default-features = false, optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "7ea5428f0c1dcca54722d90c9af1f3df584bfd3e", default-features = false, features = ["font-kit", "runtime_shaders"], optional = true }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["rt", "sync", "time", "macros"] }
+unicode-segmentation = { version = "=1.13.3", optional = true }
+uuid = { version = "=1.23.0", features = ["v4"] }
+
+[lints.rust]
+unsafe_code = "forbid"
