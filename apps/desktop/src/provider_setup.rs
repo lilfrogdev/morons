@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
+mod selection;
+pub use selection::Selection;
 
 #[cfg(feature = "native")]
 pub struct ConnectionReady {
     pub endpoint: String,
     pub bearer: zeroize::Zeroizing<String>,
     pub fixture: bool,
+    pub selection: Selection,
 }
 
 pub const MODEL_ID: &str = "gpt-5-mini";
@@ -57,8 +60,46 @@ struct Subscriptions {
 }
 impl ProviderConfiguration {
     pub fn decode(bytes: &[u8]) -> Result<Readiness, &'static str> {
+        Self::decode_with_selection(bytes).map(|(state, _)| state)
+    }
+    pub fn decode_with_selection(
+        bytes: &[u8],
+    ) -> Result<(Readiness, Option<Selection>), &'static str> {
         if bytes.len() > 8192 {
             return Err("Provider configuration exceeds limit");
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct V2 {
+            version: u8,
+            selection: Option<Selection>,
+            provider_endpoint: Option<String>,
+            secret_binding: Option<String>,
+            readiness: Readiness,
+            verification: String,
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| "Invalid provider configuration")?;
+        if value.get("version").and_then(|v| v.as_u64()) == Some(2) {
+            let config: V2 =
+                serde_json::from_slice(bytes).map_err(|_| "Invalid provider configuration")?;
+            if config.version != 2 || config.verification != "not_verified" {
+                return Err("Unsupported provider configuration");
+            }
+            if let Some(selection) = &config.selection {
+                if !selection.valid()
+                    || config.provider_endpoint.as_deref() != Some(selection.endpoint())
+                    || config.secret_binding.as_deref() != Some(selection.secret_slot())
+                {
+                    return Err("Unsupported provider configuration");
+                }
+            } else if config.provider_endpoint.is_some()
+                || config.secret_binding.is_some()
+                || matches!(config.readiness, Readiness::Ready)
+            {
+                return Err("Unsupported provider configuration");
+            }
+            return Ok((config.readiness, config.selection));
         }
         // Wire keys are camelCase; never surface remote parse errors or values.
         let config: Self =
@@ -73,7 +114,7 @@ impl ProviderConfiguration {
         {
             return Err("Unsupported provider configuration");
         }
-        Ok(config.readiness)
+        Ok((config.readiness, Some(Selection::legacy_openai())))
     }
 }
 // Only the current setup session may change staged fields or connect chat.
@@ -125,22 +166,41 @@ impl SetupLifecycle {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
-    pub model_id: String,
-    pub auth_mode: String,
+    pub version: u8,
+    pub selection: Option<Selection>,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            model_id: MODEL_ID.into(),
-            auth_mode: "api_key".into(),
+            version: 2,
+            selection: None,
         }
     }
 }
 impl Settings {
     pub fn decode(bytes: &[u8]) -> Result<Self, &'static str> {
+        let value: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| "Invalid saved provider settings")?;
+        if value.get("version").is_none() {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Legacy {
+                model_id: String,
+                auth_mode: String,
+            }
+            let old: Legacy =
+                serde_json::from_slice(bytes).map_err(|_| "Invalid saved provider settings")?;
+            if old.model_id != MODEL_ID || old.auth_mode != "api_key" {
+                return Err("Unsupported saved provider settings");
+            }
+            return Ok(Self {
+                version: 2,
+                selection: Some(Selection::legacy_openai()),
+            });
+        }
         let settings: Self =
             serde_json::from_slice(bytes).map_err(|_| "Invalid saved provider settings")?;
-        if settings != Self::default() {
+        if settings.version != 2 || settings.selection.as_ref().is_some_and(|s| !s.valid()) {
             return Err("Unsupported saved provider settings");
         }
         Ok(settings)
@@ -151,20 +211,39 @@ impl Settings {
 mod cloud_setup;
 // Review binds the exact staged key; consuming the approval prevents replay.
 #[cfg(any(feature = "native", test))]
-struct SaveApproval(zeroize::Zeroizing<String>);
+struct SaveApproval {
+    key: zeroize::Zeroizing<String>,
+    selection: Selection,
+}
 #[cfg(any(feature = "native", test))]
 impl SaveApproval {
+    #[cfg(test)]
     fn prepare(key: &str) -> Result<Self, &'static str> {
-        if !valid_api_key(key) {
-            return Err("Enter an OpenAI API key; subscription tokens are unsupported");
-        }
-        Ok(Self(zeroize::Zeroizing::new(key.to_owned())))
+        Self::prepare_for(&Selection::legacy_openai(), key)
     }
+    fn prepare_for(selection: &Selection, key: &str) -> Result<Self, &'static str> {
+        if !selection.valid_key(key) {
+            return Err("Choose a supported API-key provider/model and enter its key");
+        }
+        Ok(Self {
+            key: zeroize::Zeroizing::new(key.to_owned()),
+            selection: selection.clone(),
+        })
+    }
+    #[cfg(test)]
     fn execute<R>(self, current: &str, write: impl FnOnce(&[u8]) -> R) -> Result<R, &'static str> {
-        if self.0.as_str() != current {
+        self.execute_for(&Selection::legacy_openai(), current, write)
+    }
+    fn execute_for<R>(
+        self,
+        selection: &Selection,
+        current: &str,
+        write: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, &'static str> {
+        if self.selection != *selection || self.key.as_str() != current {
             return Err("Key changed; review the save again");
         }
-        Ok(write(self.0.as_bytes()))
+        Ok(write(self.key.as_bytes()))
     }
 }
 
@@ -179,6 +258,9 @@ pub mod native {
 
     pub struct ProviderSetup {
         generation: u64,
+        connection_generation: u64,
+        selection: Option<Selection>,
+        connected_selection: Option<Selection>,
         key: Entity<super::secret_input::SecretInput>,
         cloud: Entity<super::cloud_setup::CloudSetup>,
         readiness: Option<Readiness>,
@@ -196,6 +278,8 @@ pub mod native {
             let key = cx.new(super::secret_input::SecretInput::new);
             let cloud = cx.new(|cx| super::cloud_setup::CloudSetup::new(key.clone(), cx));
             let connection = cx.subscribe(&cloud, |view, _, event: &super::ConnectionReady, cx| {
+                view.connection_generation += 1;
+                view.connected_selection = Some(event.selection.clone());
                 view.readiness = Some(if event.fixture {
                     Readiness::Fixture
                 } else {
@@ -205,13 +289,14 @@ pub mod native {
                     endpoint: event.endpoint.clone(),
                     bearer: zeroize::Zeroizing::new(event.bearer.to_string()),
                     fixture: event.fixture,
+                    selection: event.selection.clone(),
                 });
                 cx.notify();
             });
             let (sender, receiver) = async_channel::bounded(1);
             match config {
                 Config::Mock => {
-                    let _ = sender.try_send(Ok(Readiness::Fixture));
+                    let _ = sender.try_send(Ok((Readiness::Fixture, None)));
                 }
                 Config::Http { url, bearer } => {
                     let url = url.join("/v1/provider/configuration").expect("fixed route");
@@ -231,7 +316,7 @@ pub mod native {
                                     if body.len() + chunk.len() > 8192 { return Err("Provider configuration exceeds limit"); }
                                     body.extend_from_slice(&chunk);
                                 }
-                                ProviderConfiguration::decode(&body)
+                                ProviderConfiguration::decode_with_selection(&body)
                             }));
                         let _ = sender.send_blocking(result);
                     });
@@ -240,8 +325,14 @@ pub mod native {
             let task = cx.spawn(async move |view, cx| {
                 if let Ok(result) = receiver.recv().await {
                     let _ = view.update(cx, |view, cx| {
+                        if view.connection_generation != 0 {
+                            return;
+                        }
                         match result {
-                            Ok(state) => view.readiness = Some(state),
+                            Ok((state, selection)) => {
+                                view.readiness = Some(state);
+                                view.connected_selection = selection;
+                            }
                             Err(error) => view.error = Some(error),
                         }
                         cx.notify();
@@ -250,6 +341,9 @@ pub mod native {
             });
             Self {
                 generation: 0,
+                connection_generation: 0,
+                selection: None,
+                connected_selection: None,
                 key,
                 cloud,
                 readiness: None,
@@ -261,6 +355,19 @@ pub mod native {
                 _readiness: task,
                 _cloud_connection: connection,
             }
+        }
+        pub fn connected_selection(&self) -> Option<Selection> {
+            self.connected_selection.clone()
+        }
+        fn choose(&mut self, selection: Selection, cx: &mut Context<Self>) {
+            self.clear_ephemeral(cx);
+            self.selection = Some(selection.clone());
+            self.key
+                .update(cx, |key, cx| key.set_label(selection.key_label(), cx));
+            self.cloud
+                .update(cx, |cloud, cx| cloud.set_selection(selection, cx));
+            self.saved = false;
+            cx.notify();
         }
         pub fn clear_ephemeral(&mut self, cx: &mut Context<Self>) {
             self.generation += 1;
@@ -278,8 +385,12 @@ pub mod native {
                 return;
             }
             self.pending_read = false;
+            let Some(selection) = self.selection.clone() else {
+                self.error = Some("Choose a provider and model first");
+                return;
+            };
             let generation = self.generation;
-            let task = cx.read_credentials(KEYCHAIN_SERVICE);
+            let task = cx.read_credentials(selection.keychain_service());
             cx.spawn(async move |view, cx| {
                 let result = task
                     .await
@@ -290,13 +401,13 @@ pub mod native {
                     }
                     match result {
                         Ok(Some((_, bytes))) => match std::str::from_utf8(&bytes) {
-                            Ok(secret) if valid_api_key(secret) => {
+                            Ok(secret) if selection.valid_key(secret) => {
                                 view.key.update(cx, |key, cx| key.load_secret(secret, cx));
                                 view.error = None;
                             }
                             _ => view.error = Some("Saved Keychain credential is invalid"),
                         },
-                        Ok(None) => view.error = Some("No OpenAI API key saved for Morons"),
+                        Ok(None) => view.error = Some("No key saved for this selected provider"),
                         Err(_) => view.error = Some("Keychain read failed"),
                     }
                     cx.notify();
@@ -305,10 +416,18 @@ pub mod native {
             .detach();
         }
         fn prepare_save(&mut self, cx: &mut Context<Self>) {
-            if !self.key.read(cx).valid() {
-                self.error = Some("Enter an OpenAI API key; subscription tokens are unsupported");
+            if !self
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.valid_key(&self.key.read(cx).secret()))
+            {
+                self.error = Some("Choose a supported API-key provider/model and enter its key");
             } else {
-                self.pending_save = SaveApproval::prepare(&self.key.read(cx).secret()).ok();
+                self.pending_save = SaveApproval::prepare_for(
+                    self.selection.as_ref().unwrap(),
+                    &self.key.read(cx).secret(),
+                )
+                .ok();
                 self.error = None;
             }
             cx.notify();
@@ -317,9 +436,12 @@ pub mod native {
             let Some(secret) = self.pending_save.take() else {
                 return;
             };
+            let Some(selection) = self.selection.clone() else {
+                return;
+            };
             let current = self.key.read(cx).secret();
-            let task = match secret.execute(&current, |secret| {
-                cx.write_credentials(KEYCHAIN_SERVICE, "openai-api-key", secret)
+            let task = match secret.execute_for(&selection, &current, |secret| {
+                cx.write_credentials(selection.keychain_service(), "provider-api-key", secret)
             }) {
                 Ok(task) => task,
                 Err(error) => {
@@ -373,20 +495,27 @@ pub mod native {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().id("provider-setup-scroll").size_full().overflow_y_scroll().p_6().flex().flex_col().gap_3().bg(rgb(0xF6F8FA)).text_color(rgb(0x243440))
                 .child(div().text_xl().child("Model connection"))
-                .child("OpenAI API key · gpt-5-mini")
+                 .child("ChatGPT sign-in · local host · authentication integration pending")
+                .child("ChatGPT sign-in is the priority path. No subscription tokens are sent to Cloudflare.")
+                .child("OpenCode Zen · paid API key · choose a model explicitly")
+                .child(button("zen-gpt", "Zen: GPT 6.1 Sol").on_click(cx.listener(|view,_,_,cx| view.choose(Selection::zen("gpt-6.1-sol"),cx))))
+                .child(button("zen-kimi", "Zen: Kimi K3").on_click(cx.listener(|view,_,_,cx| view.choose(Selection::zen("kimi-k3"),cx))))
+                .child(button("zen-minimax", "Zen: MiniMax M3").on_click(cx.listener(|view,_,_,cx| view.choose(Selection::zen("minimax-m3"),cx))))
+                .child(button("legacy-openai", "Legacy OpenAI: GPT-5 mini").on_click(cx.listener(|view,_,_,cx| view.choose(Selection::legacy_openai(),cx))))
+                .child(self.selection.as_ref().map(Selection::summary).unwrap_or("No provider/model selected".into()))
                 .child(self.readiness.map(Readiness::label).unwrap_or("Checking server configuration…"))
-                .child("OpenAI and OpenCode subscriptions: unsupported on this backend")
+                .child("OpenCode Go subscription: unavailable for this general assistant scope; Zen uses a separate paid API key")
                 .child(self.key.clone())
                 .child("The key stays in this form until you explicitly save it. Saving on this Mac does not configure the cloud worker.")
                 .when(!self.saving, |d| d.child(button("review-keychain", "Review Keychain save").on_click(cx.listener(|view, _, _, cx| view.prepare_save(cx)))))
                 .when(self.pending_save.is_some(), |d| d.child(div().p_3().flex().flex_col().gap_2()
-                    .child("Save this OpenAI API key in this Mac’s Keychain under Morons? This persists the key locally. No upload or paid model call.")
+                    .child("Save this selected provider API key in its separate Morons Keychain item? This persists the key locally. No upload or paid model call.")
                     .child(button("confirm-keychain", "Confirm save to Keychain").on_click(cx.listener(|view, _, _, cx| view.confirm_save(cx))))
                     .child(button("cancel-keychain", "Cancel save").on_click(cx.listener(|view, _, _, cx| { view.pending_save = None; cx.notify(); })))))
                 .when(self.saving, |d| d.child("Saving to Keychain…"))
                 .when(self.saved, |d| d.child("Saved on this Mac · cloud worker still needs an approved credential upload"))
                 .child(button("review-keychain-read", "Review loading saved key").on_click(cx.listener(|view, _, _, cx| { view.pending_read = true; cx.notify(); })))
-                .when(self.pending_read, |d| d.child("Load the OpenAI API key from this Mac’s Morons Keychain item into this masked form? This does not upload it or make a model call.")
+                .when(self.pending_read, |d| d.child("Load the selected provider API key from its separate Morons Keychain item into this masked form? This does not upload it or make a model call.")
                     .child(button("confirm-keychain-read", "Confirm Keychain read").on_click(cx.listener(|view, _, _, cx| view.confirm_read(cx))))
                     .child(button("cancel-keychain-read", "Cancel Keychain read").on_click(cx.listener(|view, _, _, cx| { view.pending_read = false; cx.notify(); }))))
                 .child(self.cloud.clone())
@@ -486,6 +615,47 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn legacy_settings_migrate_without_reinterpreting_credentials_and_new_settings_have_no_default_model()
+     {
+        assert!(Settings::default().selection.is_none());
+        let old = Settings::decode(br#"{"model_id":"gpt-5-mini","auth_mode":"api_key"}"#).unwrap();
+        assert_eq!(old.selection, Some(Selection::legacy_openai()));
+        let zen = Settings {
+            version: 2,
+            selection: Some(Selection::zen("kimi-k3")),
+        };
+        assert_eq!(
+            Settings::decode(&serde_json::to_vec(&zen).unwrap()).unwrap(),
+            zen
+        );
+        let mut called = false;
+        let approved =
+            SaveApproval::prepare_for(&Selection::zen("kimi-k3"), "fixture-zen-paid-key").unwrap();
+        assert!(
+            approved
+                .execute_for(
+                    &Selection::zen("minimax-m3"),
+                    "fixture-zen-paid-key",
+                    |_| called = true
+                )
+                .is_err()
+        );
+        assert!(!called);
+    }
+    #[test]
+    fn v2_public_metadata_never_infers_provider_from_key_or_accepts_remote_endpoint() {
+        let zen=br#"{"version":2,"selection":{"host":"cloud","provider":"opencode","auth":"api_key","modelId":"kimi-k3"},"providerEndpoint":"https://opencode.ai/zen/v1/chat/completions","secretBinding":"OPENCODE_API_KEY","readiness":"ready","verification":"not_verified"}"#;
+        assert_eq!(
+            ProviderConfiguration::decode_with_selection(zen).unwrap().1,
+            Some(Selection::zen("kimi-k3"))
+        );
+        let malicious = String::from_utf8(zen.to_vec()).unwrap().replace(
+            "https://opencode.ai/zen/v1/chat/completions",
+            "https://secret.example",
+        );
+        assert!(ProviderConfiguration::decode(malicious.as_bytes()).is_err());
     }
     #[test]
     fn readiness_never_renders_remote_values_or_errors() {

@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 
 pub struct CloudSetup {
     lifecycle: super::SetupLifecycle,
+    selection: Option<super::Selection>,
     token: Entity<SecretInput>,
     account: Entity<SecretInput>,
     worker: Entity<SecretInput>,
@@ -23,6 +24,7 @@ impl CloudSetup {
     pub fn new(model_key: Entity<SecretInput>, cx: &mut Context<Self>) -> Self {
         Self {
             lifecycle: super::SetupLifecycle::default(),
+            selection: None,
             token: cx.new(|cx| SecretInput::new_secret(cx, "Scoped Cloudflare API token")),
             account: cx
                 .new(|cx| SecretInput::new_public(cx, "Cloudflare account ID (32 hex characters)")),
@@ -38,6 +40,11 @@ impl CloudSetup {
             error: None,
             deployed: None,
         }
+    }
+    pub fn set_selection(&mut self, selection: super::Selection, cx: &mut Context<Self>) {
+        self.clear_ephemeral(cx);
+        self.selection = Some(selection);
+        cx.notify();
     }
     pub fn clear_ephemeral(&mut self, cx: &mut Context<Self>) {
         self.lifecycle.reset();
@@ -56,6 +63,11 @@ impl CloudSetup {
     fn review(&mut self, cx: &mut Context<Self>) {
         if self.lifecycle.deployment_pending() {
             self.error = Some("An earlier approved deployment is still running; do not repeat it");
+            cx.notify();
+            return;
+        }
+        if !self.selection.as_ref().is_some_and(super::Selection::valid) {
+            self.error = Some("Choose a supported cloud provider/model first");
             cx.notify();
             return;
         }
@@ -89,6 +101,9 @@ impl CloudSetup {
             cx.notify();
             return;
         }
+        let Some(selection) = self.selection.clone() else {
+            return;
+        };
         let generation = self.lifecycle.capture();
         self.busy = true;
         self.error = None;
@@ -123,9 +138,10 @@ impl CloudSetup {
                 if !accounts.iter().any(|a| a.id == account) {
                     return Err("Selected Cloudflare account unavailable");
                 }
-                let preview: Preview = bridge.request(&serde_json::json!({"op":"prepare","accountId":account,"workerName":worker,"bundle":bundle}))?;
+                let preview: Preview = bridge.request(&serde_json::json!({"op":"prepare","accountId":account,"workerName":worker,"selection":selection,"bundle":bundle}))?;
                 preview.validate()?;
-                if preview.account.id != account
+                if preview.selection != selection
+                    || preview.account.id != account
                     || !pb::generated_worker_name(&worker, &preview.worker_name)
                 {
                     return Err("Deployment preview identity mismatch");
@@ -164,16 +180,22 @@ impl CloudSetup {
         let Some(preview) = self.preview.take() else {
             return;
         };
+        if self.selection.as_ref() != Some(&preview.selection) {
+            self.error = Some("Provider/model changed; prepare a new preview");
+            cx.notify();
+            return;
+        }
+        let selection = preview.selection.clone();
         let auth = self.auth.read(cx).secret();
         let key = self.model_key.read(cx).secret();
         if !(43..=128).contains(&auth.len())
             || !auth
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            || !super::valid_api_key(&key)
+            || !selection.valid_key(&key)
         {
             self.error = Some(
-                "Enter a valid backend bearer and OpenAI API key before confirming secret upload",
+                "Enter a valid backend bearer and the selected provider API key before confirming secret upload",
             );
             self.preview = Some(preview);
             cx.notify();
@@ -197,6 +219,7 @@ impl CloudSetup {
                         op: "deploy",
                         confirmation: pb::Confirmation {
                             preview_id: &preview.id,
+                            configuration_sha256: &preview.configuration_sha256,
                             account_id: &preview.account.id,
                             worker_name: &preview.worker_name,
                             accept_resource_creation: true,
@@ -205,7 +228,7 @@ impl CloudSetup {
                         },
                         bootstrap: pb::Bootstrap {
                             auth_token: &auth,
-                            openai_api_key: &key,
+                            provider_key: &key,
                         },
                     })?;
                     if result.state != "deployed"
@@ -213,6 +236,7 @@ impl CloudSetup {
                         || result.worker_name != preview.worker_name
                         || result.endpoint != preview.endpoint
                         || result.bundle_sha256 != preview.bundle_sha256
+                        || result.configuration_sha256 != preview.configuration_sha256
                     {
                         return Err("Deployment result mismatch; check cloud status before retry");
                     }
@@ -248,6 +272,7 @@ impl CloudSetup {
                                 endpoint,
                                 bearer,
                                 fixture: pb::fixture_mode(),
+                                selection: selection.clone(),
                             });
                         }
                         Err(error) => view.error = Some(error),
@@ -273,7 +298,7 @@ fn button(id: &'static str, text: &'static str) -> Stateful<Div> {
 }
 impl Render for CloudSetup {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let preview_text = self.preview.as_ref().map(|p| format!("Account: {} ({})\nNew worker: {}\nEndpoint: {}\nBundle SHA-256: {}\nResources: {}\nSecrets uploaded directly to Cloudflare: {}\nModel: {}\nLimits: {}\nBilling: {}\nToken scope verified: {}\nPreview expires: {}", p.account.name,p.account.id,p.worker_name,p.endpoint,p.bundle_sha256,p.resources.join(", "),p.secret_bindings.join(", "),p.model_id,p.limits,p.billing,p.token_scope_verified,p.expires_at));
+        let preview_text = self.preview.as_ref().map(|p| format!("Account: {} ({})\nNew worker: {}\nEndpoint: {}\nBundle SHA-256: {}\nResources: {}\nSecrets uploaded directly to Cloudflare: {}\nModel: {}\nProvider: {}\nProvider endpoint: {}\nConfiguration SHA-256: {}\nLimits: {}\nBilling: {}\nToken scope verified: {}\nPreview expires: {}", p.account.name,p.account.id,p.worker_name,p.endpoint,p.bundle_sha256,p.resources.join(", "),p.secret_bindings.join(", "),p.model_id,p.selection.provider,p.provider_endpoint,p.configuration_sha256,p.limits,p.billing,p.token_scope_verified,p.expires_at));
         div().flex().flex_col().gap_2().child(div().text_lg().child(if pb::fixture_mode() { "Cloud setup · offline fixture" } else { "Cloud setup" }))
             .child("Requires the built provisioning sidecar and Node 22.19+. Account reads happen only after confirmation below.")
             .child(self.account.clone()).child(self.worker.clone()).child(self.token.clone())
@@ -283,7 +308,7 @@ impl Render for CloudSetup {
                 .child(button("cancel-read-cloud", "Cancel account access").on_click(cx.listener(|view, _, _, cx| { view.pending_connect = None; cx.notify(); }))))
             .when_some(preview_text, |d, text| d.child(div().text_sm().child(text))
                 .child(self.auth.clone())
-                .child("Confirmation creates the listed resources, uploads the backend bearer and OpenAI API key, and accepts usage billing with no spend cap. The desktop connects with this bearer kept in memory. No model call is made. The account must already have a workers.dev subdomain.")
+                .child("Confirmation creates the listed resources, uploads the backend bearer and the selected provider API key, and accepts usage billing with no spend cap. The desktop connects with this bearer kept in memory. No model call is made. The account must already have a workers.dev subdomain.")
                 .child(button("confirm-deploy", "Confirm resource creation, secret upload, and usage billing").on_click(cx.listener(|view, _, _, cx| view.deploy(cx))))
                 .child(button("cancel-deploy", "Cancel deployment").on_click(cx.listener(|view, _, _, cx| { view.preview = None; view.bridge = None; cx.notify(); }))))
             .when(self.lifecycle.deployment_pending(), |d| d.child("An approved deployment is running; no automatic repeat is allowed."))

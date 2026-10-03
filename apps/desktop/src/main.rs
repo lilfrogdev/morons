@@ -23,7 +23,7 @@ struct Chat {
     settings_windows: Vec<WindowId>,
     local_error: Option<&'static str>,
     live_backend: Option<String>,
-    pending_paid: Option<(String, String)>,
+    pending_paid: Option<(String, String, morons_desktop::provider_setup::Selection)>,
     last_ack: Option<String>,
     scroll: ScrollHandle,
 }
@@ -168,18 +168,25 @@ impl Chat {
             return;
         }
         if let Some(endpoint) = &self.live_backend {
-            self.pending_paid = Some((text, endpoint.clone()));
+            let Some(selection) = self.setup.read(cx).connected_selection() else {
+                self.local_error =
+                    Some("Provider metadata unavailable; review model setup before a paid send");
+                cx.notify();
+                return;
+            };
+            self.pending_paid = Some((text, endpoint.clone(), selection));
             cx.notify();
             return;
         }
         self.submit(text, cx);
     }
     fn confirm_paid(&mut self, cx: &mut Context<Self>) {
-        let Some((text, endpoint)) = self.pending_paid.take() else {
+        let Some((text, endpoint, selection)) = self.pending_paid.take() else {
             return;
         };
         if self.input.read(cx).text() != text
             || self.live_backend.as_ref() != Some(&endpoint)
+            || self.setup.read(cx).connected_selection().as_ref() != Some(&selection)
             || !self.state.ready
             || self.state.pending
             || self.state.snapshot.active_task_id.is_some()
@@ -394,11 +401,11 @@ impl Render for Chat {
                             .child(self.approvals.clone()),
                     ),
             )
-            .when_some(self.pending_paid.clone(), |d, (text, endpoint)| d.child(
+            .when_some(self.pending_paid.clone(), |d, (text, endpoint, selection)| d.child(
                 div().mx_6().p_4().flex().flex_col().gap_2().bg(rgb(0xFFF4DD))
                     .child("Review paid model send")
-                    .child(format!("Backend: {endpoint} · Provider: OpenAI · Model: gpt-5-mini · Provider endpoint: https://api.openai.com/v1/responses"))
-                    .child("This sends the backend’s saved conversation history and the message below to OpenAI. API usage may be billed; no spend cap is configured. The backend bounds context/output and disables provider retries.")
+                    .child(format!("Backend: {endpoint} · {}", selection.summary()))
+                    .child("This sends the backend’s saved conversation history and the message below to the selected provider. API usage may be billed; no spend cap is configured. The backend bounds context/output and disables provider retries.")
                     .child(text)
                     .child(button("confirm-paid-send", "Confirm paid send").on_click(cx.listener(|view, _, _, cx| view.confirm_paid(cx))))
                     .child(button("cancel-paid-send", "Cancel send").on_click(cx.listener(|view, _, _, cx| { view.pending_paid = None; cx.notify(); })))

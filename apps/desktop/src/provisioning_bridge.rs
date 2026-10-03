@@ -197,6 +197,10 @@ pub struct Preview {
     pub resources: Vec<String>,
     pub secret_bindings: Vec<String>,
     pub model_id: String,
+    pub selection: crate::provider_setup::Selection,
+    pub provider_endpoint: String,
+    pub provider_secret_binding: String,
+    pub configuration_sha256: String,
     pub limits: serde_json::Value,
     pub billing: serde_json::Value,
     pub token_scope_verified: bool,
@@ -206,8 +210,16 @@ impl Preview {
         if uuid::Uuid::parse_str(&self.id).is_err()
             || !account_id(&self.account.id)
             || !worker_name(&self.worker_name)
-            || self.model_id != "gpt-5-mini"
-            || self.secret_bindings != ["AUTH_TOKEN", "OPENAI_API_KEY"]
+            || !self.selection.valid()
+            || self.model_id != self.selection.model_id
+            || self.provider_endpoint != self.selection.endpoint()
+            || self.provider_secret_binding != self.selection.secret_slot()
+            || self.secret_bindings != ["AUTH_TOKEN", self.selection.secret_slot()]
+            || self.configuration_sha256.len() != 64
+            || !self
+                .configuration_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
             || self.bundle_sha256.len() != 64
             || !self.bundle_sha256.bytes().all(|b| b.is_ascii_hexdigit())
             || self.resources.len() > 20
@@ -264,6 +276,7 @@ pub struct Connect<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct Confirmation<'a> {
     pub preview_id: &'a str,
+    pub configuration_sha256: &'a str,
     pub account_id: &'a str,
     pub worker_name: &'a str,
     pub accept_resource_creation: bool,
@@ -274,8 +287,8 @@ pub struct Confirmation<'a> {
 pub struct Bootstrap<'a> {
     #[serde(rename = "AUTH_TOKEN")]
     pub auth_token: &'a str,
-    #[serde(rename = "OPENAI_API_KEY")]
-    pub openai_api_key: &'a str,
+    #[serde(rename = "providerKey")]
+    pub provider_key: &'a str,
 }
 #[derive(Serialize)]
 pub struct Deploy<'a> {
@@ -291,6 +304,7 @@ pub struct Deployed {
     pub worker_name: String,
     pub endpoint: String,
     pub bundle_sha256: String,
+    pub configuration_sha256: String,
 }
 
 #[cfg(test)]
@@ -331,17 +345,18 @@ mod tests {
             .request(&serde_json::json!({"op":"listAccounts"}))
             .unwrap();
         assert_eq!(accounts[0].id, account);
-        let preview: Preview = bridge.request(&serde_json::json!({"op":"prepare","accountId":account,"workerName":"morons-fixture","bundle":{"mainModule":"worker.js","modules":[]}})).unwrap();
+        let preview: Preview = bridge.request(&serde_json::json!({"op":"prepare","accountId":account,"workerName":"morons-fixture","selection":crate::provider_setup::Selection::legacy_openai(),"bundle":{"mainModule":"worker.js","modules":[]}})).unwrap();
         preview.validate().unwrap();
         let bootstrap = Bootstrap {
             auth_token: "fixture_bearer_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            openai_api_key: "sk-fixture-never-live",
+            provider_key: "sk-fixture-never-live",
         };
         let result: Deployed = bridge
             .request(&Deploy {
                 op: "deploy",
                 confirmation: Confirmation {
                     preview_id: &preview.id,
+                    configuration_sha256: &preview.configuration_sha256,
                     account_id: &account,
                     worker_name: &preview.worker_name,
                     accept_resource_creation: true,
@@ -357,6 +372,7 @@ mod tests {
             op: "deploy",
             confirmation: Confirmation {
                 preview_id: &preview.id,
+                configuration_sha256: &preview.configuration_sha256,
                 account_id: &account,
                 worker_name: &preview.worker_name,
                 accept_resource_creation: true,
@@ -365,7 +381,7 @@ mod tests {
             },
             bootstrap: Bootstrap {
                 auth_token: "fixture_bearer_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                openai_api_key: "sk-fixture-never-live",
+                provider_key: "sk-fixture-never-live",
             },
         });
         assert!(replay.is_err());

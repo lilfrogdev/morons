@@ -24,6 +24,9 @@ export default {
 };
 // Separate entry point: production configuration cannot enable the mock provider.
 export class RootChat extends BaseRoot {
+  protected modelIdentity() {
+    return { provider: "openai", id: "mock" };
+  }
   protected createModels() {
     return mockModels();
   }

@@ -96,7 +96,7 @@ impl SecretInput {
             focus_handle: cx.focus_handle(),
             content: Zeroizing::new(String::new()),
             mask: true,
-            placeholder: "OpenAI API key".into(),
+            placeholder: "Provider API key · choose a model first".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -123,8 +123,9 @@ impl SecretInput {
         self.selected_range = self.content.len()..self.content.len();
         cx.notify();
     }
-    pub fn valid(&self) -> bool {
-        super::valid_api_key(&self.content)
+    pub fn set_label(&mut self, label: &'static str, cx: &mut Context<Self>) {
+        self.placeholder = label.into();
+        cx.notify();
     }
     pub fn secret(&self) -> Zeroizing<String> {
         Zeroizing::new(self.content.to_string())

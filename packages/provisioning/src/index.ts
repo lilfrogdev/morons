@@ -1,4 +1,28 @@
 import crypto, { createHash, randomUUID } from "node:crypto";
+import {
+  parseSelection,
+  validZenKey,
+  zenModel,
+  type ProviderSelection,
+} from "../../backend/src/provider-selection.js";
+export type CloudSelection = Extract<ProviderSelection, { host: "cloud" }>;
+export function cloudSelection(value: unknown): CloudSelection {
+  const selection = parseSelection(value);
+  if (!selection || selection.host !== "cloud")
+    throw new ProvisioningError("invalid_input", "preview");
+  return freeze(selection);
+}
+export function providerRoute(selection: CloudSelection) {
+  return selection.provider === "opencode"
+    ? {
+        endpoint: zenModel(selection.modelId)!.endpoint,
+        secretBinding: "OPENCODE_API_KEY" as const,
+      }
+    : {
+        endpoint: "https://api.openai.com/v1/responses",
+        secretBinding: "OPENAI_API_KEY" as const,
+      };
+}
 
 export type Account = Readonly<{ id: string; name: string }>;
 export type Stage =
@@ -58,7 +82,7 @@ export interface ScopedTokenSource {
 export interface BootstrapSource {
   withSecrets<T>(
     use: (
-      secrets: Readonly<{ AUTH_TOKEN: string; OPENAI_API_KEY: string }>,
+      secrets: Readonly<{ AUTH_TOKEN: string; providerKey: string }>,
     ) => Promise<T>,
   ): Promise<T>;
 }
@@ -75,7 +99,11 @@ export interface DeploymentPreview {
   readonly bundleSha256: string;
   readonly resources: readonly string[];
   readonly secretBindings: readonly string[];
-  readonly modelId: "gpt-5-mini";
+  readonly modelId: string;
+  readonly selection: CloudSelection;
+  readonly providerEndpoint: string;
+  readonly providerSecretBinding: "OPENAI_API_KEY" | "OPENCODE_API_KEY";
+  readonly configurationSha256: string;
   readonly limits: Readonly<{
     workerCpuMs: null;
     policy: string;
@@ -93,6 +121,7 @@ export interface DeploymentPreview {
 }
 export interface DeploymentConfirmation {
   readonly previewId: string;
+  readonly configurationSha256: string;
   readonly accountId: string;
   readonly workerName: string;
   readonly acceptResourceCreation: true;
@@ -105,6 +134,7 @@ export type DeploymentResult = Readonly<{
   workerName: string;
   endpoint: string;
   bundleSha256: string;
+  configurationSha256: string;
 }>;
 type Envelope = {
   success: boolean;
@@ -172,6 +202,8 @@ export class Provisioner {
   #now: () => number;
   #accountIds: readonly string[];
   #plans = new Map<string, Plan>();
+  #configurationSha256: string | undefined;
+  #configurationGeneration = 0;
   constructor(
     source: ScopedTokenSource,
     options: { fetch?: typeof fetch; now?: () => number } = {},
@@ -338,6 +370,7 @@ export class Provisioner {
     // pretending Cloudflare's unconditional PUT is atomic create-if-absent.
     workerName: string;
     bundle: WorkerBundle;
+    selection: unknown;
   }): Promise<DeploymentPreview> {
     if (
       !input ||
@@ -346,29 +379,49 @@ export class Provisioner {
       !namePattern.test(input.workerName)
     )
       invalid("preview");
+    const selection = cloudSelection(input.selection);
+    const route = providerRoute(selection);
     const bundle = snapshotBundle(input.bundle);
+    const bundleSha256 = createHash("sha256")
+      .update(JSON.stringify(bundle))
+      .digest("hex");
+    const configurationSha256 = createHash("sha256")
+      .update(JSON.stringify({ selection, ...route, bundleSha256 }))
+      .digest("hex");
+    // A changed model/provider/bundle invalidates approvals for the prior choice.
+    // Concurrent preparations of the same choice can still have distinct names.
+    if (this.#configurationSha256 !== configurationSha256) {
+      this.#configurationSha256 = configurationSha256;
+      this.#configurationGeneration++;
+      this.#plans.clear();
+    }
+    const generation = this.#configurationGeneration;
     const workerName = `${input.workerName}-${crypto.randomBytes(16).toString("hex")}`;
     const { account, subdomain } = await this.#inspect(
       input.accountId,
       workerName,
       "preview",
     );
+    if (generation !== this.#configurationGeneration)
+      throw new ProvisioningError("approval_required", "preview");
     const preview: DeploymentPreview = freeze({
       id: randomUUID(),
       expiresAt: this.#now() + 5 * 60_000,
       account,
       workerName,
       endpoint: `https://${workerName}.${subdomain}.workers.dev`,
-      bundleSha256: createHash("sha256")
-        .update(JSON.stringify(bundle))
-        .digest("hex"),
+      bundleSha256,
+      configurationSha256,
+      selection,
+      providerEndpoint: route.endpoint,
+      providerSecretBinding: route.secretBinding,
       resources: [
         "New Worker (existing names refused)",
         "ROOT → RootChat SQLite Durable Object namespace; migration v1",
         "Enable Worker on existing account workers.dev subdomain; preview URLs disabled",
       ],
-      secretBindings: ["AUTH_TOKEN", "OPENAI_API_KEY"],
-      modelId: "gpt-5-mini",
+      secretBindings: ["AUTH_TOKEN", route.secretBinding],
+      modelId: selection.modelId,
       limits: {
         workerCpuMs: null,
         policy:
@@ -406,6 +459,7 @@ export class Provisioner {
       throw new ProvisioningError("preview_expired", "confirmation");
     }
     if (
+      confirmation.configurationSha256 !== preview.configurationSha256 ||
       confirmation.accountId !== preview.account.id ||
       confirmation.workerName !== preview.workerName ||
       confirmation.acceptResourceCreation !== true ||
@@ -413,6 +467,7 @@ export class Provisioner {
       confirmation.approveSecretUpload !== true
     )
       throw new ProvisioningError("approval_required", "confirmation");
+    const generation = this.#configurationGeneration;
     // Consume before awaits, preventing replay/concurrent writes even on uncertain failures.
     this.#plans.delete(preview.id);
     const current = await this.#inspect(
@@ -421,6 +476,7 @@ export class Provisioner {
       "confirmation",
     );
     if (
+      generation !== this.#configurationGeneration ||
       current.account.name !== preview.account.name ||
       preview.endpoint !==
         `https://${preview.workerName}.${current.subdomain}.workers.dev`
@@ -433,6 +489,8 @@ export class Provisioner {
     let uploaded = false;
     try {
       await bootstrap.withSecrets(async (secrets) => {
+        if (generation !== this.#configurationGeneration)
+          throw new ProvisioningError("approval_required", "confirmation");
         if (called)
           throw new ProvisioningError(
             "invalid_input",
@@ -444,9 +502,11 @@ export class Provisioner {
           !secrets ||
           typeof secrets.AUTH_TOKEN !== "string" ||
           !/^[A-Za-z0-9_-]{43,128}$/.test(secrets.AUTH_TOKEN) ||
-          typeof secrets.OPENAI_API_KEY !== "string" ||
-          !/^sk-[A-Za-z0-9_-]{16,512}$/.test(secrets.OPENAI_API_KEY) ||
-          secrets.AUTH_TOKEN === secrets.OPENAI_API_KEY
+          typeof secrets.providerKey !== "string" ||
+          !(preview.selection.provider === "opencode"
+            ? validZenKey(secrets.providerKey)
+            : /^sk-[A-Za-z0-9_-]{1,4093}$/.test(secrets.providerKey)) ||
+          secrets.AUTH_TOKEN === secrets.providerKey
         )
           invalid("bootstrap");
         const form = new FormData();
@@ -464,14 +524,24 @@ export class Provisioner {
               },
               { type: "plain_text", name: "MODEL_ID", text: preview.modelId },
               {
+                type: "plain_text",
+                name: "PROVIDER_ID",
+                text: preview.selection.provider,
+              },
+              {
+                type: "plain_text",
+                name: "AUTH_MODE",
+                text: preview.selection.auth,
+              },
+              {
                 type: "secret_text",
                 name: "AUTH_TOKEN",
                 text: secrets.AUTH_TOKEN,
               },
               {
                 type: "secret_text",
-                name: "OPENAI_API_KEY",
-                text: secrets.OPENAI_API_KEY,
+                name: preview.providerSecretBinding,
+                text: secrets.providerKey,
               },
             ],
             migrations: { new_tag: "v1", new_sqlite_classes: ["RootChat"] },
@@ -533,6 +603,7 @@ export class Provisioner {
       workerName: preview.workerName,
       endpoint: preview.endpoint,
       bundleSha256: preview.bundleSha256,
+      configurationSha256: preview.configurationSha256,
     });
   }
   async getDeploymentStatus(

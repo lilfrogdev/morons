@@ -25,7 +25,12 @@ import {
   submitBody,
   stopBody,
 } from "./http";
-import { productionModels, validApiKey } from "./model";
+import { productionModels } from "./model";
+import {
+  configuredSelection,
+  selectedReadiness,
+} from "./provider-configuration";
+import { zenModels } from "./zen-model";
 import type { Env } from "./worker";
 interface Row extends Record<string, SqlStorageValue> {
   id: string;
@@ -80,7 +85,7 @@ export class RootChat extends DurableObject<Env> {
     );
     this.piHarness = new PiHarness({
       defaults: {
-        model: { provider: "openai", id: env.MODEL_ID ?? "gpt-5-mini" },
+        model: this.modelIdentity(),
         thinkingLevel: "off",
       },
       harness: ({ storage, context }) => {
@@ -100,7 +105,7 @@ export class RootChat extends DurableObject<Env> {
           }),
         );
         const models = this.createModels();
-        const provider = models.getProvider("openai")!;
+        const provider = models.getProvider(this.modelIdentity().provider)!;
         const guard = (messages: readonly unknown[]) => {
           const active = this.active();
           if (!active || active.stopRequested) throw new Error("Task stopped");
@@ -120,11 +125,17 @@ export class RootChat extends DurableObject<Env> {
           ...provider,
           stream: (model, input, options) => {
             guard(input.messages);
-            return provider.stream(model, input, options);
+            return provider.stream(model, input, {
+              ...options,
+              sessionId: ctx.id.toString(),
+            } as never);
           },
           streamSimple: (model, input, options) => {
             guard(input.messages);
-            return provider.streamSimple(model, input, options);
+            return provider.streamSimple(model, input, {
+              ...options,
+              sessionId: ctx.id.toString(),
+            });
           },
         });
         return Harness.open(
@@ -144,19 +155,21 @@ export class RootChat extends DurableObject<Env> {
     });
     this.lifecycle = Lifecycle.install(this).use(this.piHarness);
   }
+  protected modelIdentity(): { provider: string; id: string } {
+    const selection = configuredSelection(this.env);
+    return {
+      provider: selection?.provider ?? "openai",
+      id: selection?.modelId ?? "gpt-5-mini",
+    };
+  }
   protected createModels() {
-    return productionModels(this.env.OPENAI_API_KEY);
+    const selection = configuredSelection(this.env);
+    return selection?.provider === "opencode"
+      ? zenModels(selection, this.env.OPENCODE_API_KEY)
+      : productionModels(this.env.OPENAI_API_KEY);
   }
   protected configured() {
-    return (
-      validApiKey(this.env.OPENAI_API_KEY) &&
-      Boolean(
-        this.createModels().getModel(
-          "openai",
-          this.env.MODEL_ID ?? "gpt-5-mini",
-        ),
-      )
-    );
+    return selectedReadiness(this.env) === "ready";
   }
   private rows() {
     return this.ctx.storage.sql
@@ -398,7 +411,10 @@ export class RootChat extends DurableObject<Env> {
         return json({
           version: VERSION,
           ready: this.configured(),
-          model: this.env.MODEL_ID ?? "gpt-5-mini",
+          model: this.configured() ? this.modelIdentity().id : "unconfigured",
+          provider: this.configured()
+            ? this.modelIdentity().provider
+            : "unconfigured",
           authMode: "bearer",
           limits: LIMITS,
         });
