@@ -15,6 +15,14 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS visualizations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), document TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);`);
   db.exec('CREATE TABLE IF NOT EXISTS model_favorites (provider TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider, model_id))');
+  db.exec(`CREATE TABLE IF NOT EXISTS memory_sync_cursors (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    last_entry_id INTEGER NOT NULL CHECK(last_entry_id > 0),
+    source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0)
+  );
+  CREATE INDEX IF NOT EXISTS replies_by_submitted_text ON replies(session_id, text);`);
+  if (!db.prepare('PRAGMA table_info(memory_sync_cursors)').all().some((column) => column.name === 'source_count'))
+    db.exec('ALTER TABLE memory_sync_cursors ADD COLUMN source_count INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(review_intents)').all().some((column) => column.name === 'base_revision'))
     db.exec('ALTER TABLE review_intents ADD COLUMN base_revision TEXT');
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
@@ -44,6 +52,25 @@ export function openCatalog(path) {
     },
     getReply: (sessionId, requestId) => db.prepare("SELECT text, display_text, answer FROM replies WHERE session_id = ? AND request_id = ?").get(sessionId, requestId),
     listReplies: (sessionId) => db.prepare("SELECT text, display_text FROM replies WHERE session_id = ?").all(sessionId),
+    displayTextForSubmitted: (sessionId, text) => db.prepare(
+      "SELECT display_text FROM replies WHERE session_id = ? AND text = ? LIMIT 1"
+    ).get(sessionId, text)?.display_text,
+    memoryCursor: (sessionId) => db.prepare(
+      "SELECT last_entry_id FROM memory_sync_cursors WHERE session_id = ?"
+    ).get(sessionId)?.last_entry_id ?? 0,
+    memorySourceCount: (sessionId) => db.prepare(
+      "SELECT source_count FROM memory_sync_cursors WHERE session_id = ?"
+    ).get(sessionId)?.source_count ?? 0,
+    advanceMemoryCursor(sessionId, entryId, sourceCount) {
+      if (!Number.isSafeInteger(entryId) || entryId <= 0 ||
+          !Number.isSafeInteger(sourceCount) || sourceCount < 0) throw new Error('invalid_memory_cursor');
+      db.prepare(`INSERT INTO memory_sync_cursors (session_id, last_entry_id, source_count) VALUES (?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET last_entry_id = excluded.last_entry_id,
+          source_count = excluded.source_count
+        WHERE excluded.last_entry_id > memory_sync_cursors.last_entry_id
+          AND excluded.source_count >= memory_sync_cursors.source_count`)
+        .run(sessionId, entryId, sourceCount);
+    },
     reserveReply: (sessionId, requestId, text, displayText) => db.prepare("INSERT OR IGNORE INTO replies VALUES (?, ?, ?, ?, NULL)").run(sessionId, requestId, text, displayText),
     saveReply: (sessionId, requestId, answer) => db.prepare("UPDATE replies SET answer = ? WHERE session_id = ? AND request_id = ?").run(answer, sessionId, requestId),
     memoryDate(entryId) {

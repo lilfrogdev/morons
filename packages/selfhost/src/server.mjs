@@ -157,7 +157,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const entries = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
         const entry = entries.find((item) => item.kind === 'pi.user' && String(item.id) === sourceUserEntryId);
         if (!entry) return null;
-        return catalog.listReplies(source.id).find((reply) => reply.text === entryText(entry))?.display_text ?? null;
+        return catalog.displayTextForSubmitted(source.id, entryText(entry)) ?? null;
       },
       authorizeTarget: async ({ source, target }) => source.moronId !== target.id,
       ensureTargetSession: async ({ id, target, source }) => {
@@ -318,12 +318,11 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const handoffs = catalog.listHandoffs(sessionId).filter((handoff) => handoff.answer !== null);
     const modelHandoffs = new Map(handoffStore.list(sessionId).filter((handoff) => handoff.answer !== null)
       .map((handoff) => [handoff.source_user_entry_id, handoff]));
-    const replies = catalog.listReplies(sessionId);
     return { sessionId, moronId, messages: items.reverse().filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")
       .map((entry) => {
         const role = entry.kind === "pi.user" ? "user" : "assistant";
         const raw = entryText(entry);
-        const display = role === "user" ? replies.find((reply) => reply.text === raw)?.display_text : undefined;
+        const display = role === "user" ? catalog.displayTextForSubmitted(sessionId, raw) : undefined;
         const handoff = role === "user" && handoffs.find((item) => display === `@${item.target_moron_id} ${item.question}`);
         const modelHandoff = role === "user" ? modelHandoffs.get(String(entry.id)) : null;
         return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : displayAnswer(raw)),

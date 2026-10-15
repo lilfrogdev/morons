@@ -24,6 +24,13 @@ const ICON_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox=
 const ICON_STAR: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#b77900" stroke-width="1.5" stroke-linejoin="round"><path d="m12 2 3.1 6.3 7 1-5 4.9 1.2 6.9L12 17.8l-6.3 3.3 1.2-6.9-5-4.9 7-1z"/></svg>"##;
 const ICON_CHEVRON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>"##;
 fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
+fn model_icon(model_id: &str) -> &'static [u8] {
+    let id = model_id.to_ascii_lowercase();
+    if id.starts_with("gpt-") || id.starts_with("chatgpt-") ||
+        id.starts_with("o1") || id.starts_with("o3") || id.starts_with("o4") {
+        ICON_OPENAI
+    } else { ICON_CPU }
+}
 fn provider_name(provider: &str) -> &str { if provider == "morons-fixture" { "Offline" } else if provider == "openai" { "OpenAI" } else { provider } }
 fn model_label(provider: &str, label: &str) -> String {
     if provider == "morons-fixture" { label.replace("Offline fixture", "Offline") } else { label.to_owned() }
@@ -626,7 +633,7 @@ impl Render for Chat {
                         .flex()
                         .flex_col()
                         .pt(px(14.)).px(px(14.)).pb(px(10.))
-                        .rounded(px(8.))
+                        .rounded(px(20.))
                         .border_1().border_color(rgb(0xE3E5E8))
                         .bg(rgb(0xFFFFFF))
                         .shadow(vec![
@@ -648,7 +655,7 @@ impl Render for Chat {
                                 .rounded(px(6.)).flex().items_center().gap_1()
                                 .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
                                 .text_size(px(12.))
-                                .child(svg().data(provider_icon(selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or("")))
+                                .child(svg().data(model_icon(selected_model.as_ref().map(|item| item.1.as_str()).unwrap_or("")))
                                     .w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                 .child(div().min_w_0().truncate().child(model_display.clone()))
                                 .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
@@ -670,12 +677,12 @@ impl Render for Chat {
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
                             .child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
-                                .w(px(32.)).h(px(32.)).rounded(px(6.))
+                                .w(px(32.)).h(px(32.)).rounded(px(16.))
                                 .flex().items_center().justify_center()
                                 .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
                             .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
-                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
+                                    .w(px(28.)).h(px(28.)).rounded(px(14.))
                                     .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
                                     .flex().items_center().justify_center()
                                     .child(svg().data(ICON_SEND).w(px(16.)).h(px(16.)).text_color(rgb(0xFFFFFF)))
@@ -729,14 +736,25 @@ impl Render for Chat {
                                             .bg(if self.model_section == "favorites" { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                                             .flex().items_center().justify_center()
                                             .child(svg().data(ICON_STAR).w(px(20.)).h(px(20.)).text_color(rgb(0xB77900)))
-                                            .on_click(cx.listener(|view, _, _, cx| {
+                                            .on_click(cx.listener(|view, _, window, cx| {
                                                 view.model_section = "favorites".into(); view.model_cursor = 0;
                                                 view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                window.focus(&view.model_search.focus_handle(cx), cx);
                                                 cx.stop_propagation(); cx.notify();
+                                            }))
+                                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                                                if !event.keystroke.modifiers.modified() &&
+                                                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                    view.model_section = "favorites".into(); view.model_cursor = 0;
+                                                    view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                    window.focus(&view.model_search.focus_handle(cx), cx);
+                                                    cx.stop_propagation(); cx.notify();
+                                                }
                                             })))
                                         .child(div().w(px(32.)).border_t_1().border_color(rgb(0xE3E5E8)))
                                         .children(providers.iter().map(|provider| {
                                             let chosen = provider.clone();
+                                            let keyboard_choice = provider.clone();
                                             div().id(SharedString::from(format!("model-provider-{provider}")))
                                                 .role(gpui::Role::Button)
                                                 .aria_label(SharedString::from(provider_name(provider).to_owned()))
@@ -746,10 +764,20 @@ impl Render for Chat {
                                                 .bg(if self.model_section == *provider { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                                                 .flex().items_center().justify_center()
                                                 .child(svg().data(provider_icon(provider)).w(px(20.)).h(px(20.)).text_color(rgb(0x626772)))
-                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                .on_click(cx.listener(move |view, _, window, cx| {
                                                     view.model_section = chosen.clone(); view.model_cursor = 0;
                                                     view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                    window.focus(&view.model_search.focus_handle(cx), cx);
                                                     cx.stop_propagation(); cx.notify();
+                                                }))
+                                                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                                                    if !event.keystroke.modifiers.modified() &&
+                                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                        view.model_section = keyboard_choice.clone(); view.model_cursor = 0;
+                                                        view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                        window.focus(&view.model_search.focus_handle(cx), cx);
+                                                        cx.stop_propagation(); cx.notify();
+                                                    }
                                                 }))
                                         })))
                                     .child(div().flex_1().min_w_0().pt(px(7.)).px(px(12.)).pb(px(9.)).flex().flex_col()

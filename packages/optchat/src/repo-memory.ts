@@ -20,7 +20,9 @@ export const REPO_MEMORY_LIMITS = {
   pageItems: 32,
   referenceLimit: 256,
   searchScan: 128,
-  authorizationScan: 4096,
+  // At most 32 authorized scopes with 4,096 raw sources each. This remains
+  // finite when a long Morons session rolls into another scope.
+  authorizationScan: 135168,
   storedScopes: 128,
   nodeAttempts: 2,
 };
@@ -385,6 +387,20 @@ export class RepoMemory {
       this.fit(scopeId);
       return { index: count, nodeId: leafId };
     });
+  }
+  /** Bounded inventory for migrating a legacy session without moving its immutable sources. */
+  sourceInventory(access: RepoMemoryAccess, authorize: RepoMemoryAuthorize) {
+    const scopes = this.scopes(access).slice(1);
+    const rows = this.rows<{ source_id: string; metadata: string; seq: number }>(
+      `SELECT source_id,metadata,seq FROM repo_memory_sources WHERE scope IN (${scopes.map(() => "?").join(",")}) LIMIT 131073`,
+      ...scopes,
+    );
+    if (rows.length > REPO_MEMORY_LIMITS.scopes * REPO_MEMORY_LIMITS.sourcesPerScope)
+      throw Error("memory_source_capacity");
+    for (const row of rows)
+      if (!authorize({ ...JSON.parse(row.metadata), sequence: row.seq }, access))
+        throw Error("memory_access_denied");
+    return { sourceIds: new Set(rows.map((row) => row.source_id)), count: rows.length };
   }
   private fit(scopeId: string) {
     let parts = this.rows<NodeRow>(

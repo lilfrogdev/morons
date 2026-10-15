@@ -27,6 +27,15 @@ membership. The SQLite database must have one storage owner. A single-owner
 Node adapter is provided; Durable Object SQLite can use the `MemorySql`
 interface directly.
 
+The self-host runtime checkpoints the last scanned Pi entry after committing
+each bounded page to OptChat. A restart replays an unfinished page through
+idempotent source append. For an existing session, it inventories authorized
+legacy sources once and leaves those immutable records in their original
+scope while backfilling missing user entries. Session sources roll to the next authorized scope
+after 4,096 entries; the 32-scope access bound permits up to 131,072 stored
+session sources, with separate scan room for moron-level decisions. The model
+prompt remains capped at 2,048 characters.
+
 For named-moron turns, the runtime freezes a history view before the
 current message, appends the current user message and assistant result with
 stable receipts, and disables ordinary Pi compaction for that named moron.
