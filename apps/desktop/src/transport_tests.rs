@@ -122,6 +122,12 @@ fn serve(
                 ]).unwrap_or_default();
                 serde_json::json!({"sessionId":"main","moronId":"repo","messages":messages})
             }
+            "/v1/sessions/main/reviews" => {
+                if named_submit.as_ref().is_some_and(|body| body["text"].as_str().is_some_and(|text| text.starts_with("/review"))) {
+                    serde_json::json!({"reviews":[{"id":"aaaaaaaaaaaaaaaa","branch":"morons-review/aaaaaaaaaaaaaaaa","baseRevision":"1111111111111111111111111111111111111111","checks":[{"ok":true}],"decision":"pending"}]})
+                } else { serde_json::json!({"reviews":[]}) }
+            }
+            "/v1/reviews/aaaaaaaaaaaaaaaa" => serde_json::json!({"review":{"id":"aaaaaaaaaaaaaaaa","branch":"morons-review/aaaaaaaaaaaaaaaa","baseRevision":"1111111111111111111111111111111111111111","diff":"+after","checks":[{"ok":true}],"decision":"pending"}}),
             "/v1/sessions/main/chat" => {
                 serde_json::json!({"requestId":body["requestId"],"answer":"Fixture answer"})
             }
@@ -302,4 +308,37 @@ fn named_session_chat_reconnects_with_server_history() {
             .count(),
         1
     );
+}
+
+#[test]
+fn named_review_arrives_with_diff_and_records_human_decision() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::Named {
+        url: fixture.url.clone(),
+        bearer: "fixture-only".into(),
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        async fn until(updates: &async_channel::Receiver<State>, predicate: impl Fn(&State) -> bool) -> State {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop { let state = updates.recv().await.unwrap(); if predicate(&state) { return state; } }
+            }).await.unwrap()
+        }
+        until(&updates, |state| state.ready).await;
+        worker.send(Command::Submit("/review\ndiff --git a/README.md b/README.md".into())).unwrap();
+        let review = until(&updates, |state| state.review.is_some()).await.review.unwrap();
+        assert_eq!(review.diff, "+after");
+        assert!(review.checks[0].ok);
+        worker.send(Command::ReviewDecision { id: review.id, decision: ReviewDecision::Approve }).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if fixture.requests.lock().unwrap().iter().any(|(route, body)|
+                    route == "/v1/reviews/aaaaaaaaaaaaaaaa/decision" && body["decision"] == "approve") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+    });
 }

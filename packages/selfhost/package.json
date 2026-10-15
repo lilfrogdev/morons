@@ -9,10 +9,12 @@
     "@earendil-works/chord": "1.0.0",
     "@earendil-works/pi-ai": "1.2.0",
     "@earendil-works/pi-durable": "1.2.0",
-    "@morons/optchat": "file:../optchat"
+    "@morons/optchat": "file:../optchat",
+    "typebox": "1.3.27"
   },
   "scripts": {
     "start": "node --experimental-strip-types src/server.mjs",
+    "start:account": "node --experimental-strip-types src/account-server.mjs",
     "test": "node --experimental-strip-types --test test/*.test.mjs"
   }
 }

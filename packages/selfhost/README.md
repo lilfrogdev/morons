@@ -1,8 +1,8 @@
-# Self-hosted Node fixture
+# Self-hosted local Morons server
 
-This is an offline Pi Durable integration slice, not the production Morons backend. It opens one SQLite database with one Node process, exposes authenticated named-moron chat, and persists each Pi transcript across restart. Its only model is a deterministic local fixture. It cannot contact an inference provider.
-
-Node 22.19+ is required. Pi AI and Durable are pinned at 1.2.0. Install local dependencies, then test:
+This Node 22.19+ application runs Pi AI and Pi Durable 1.2.0 with a
+**deterministic offline model**. It makes no provider inference calls. Install
+the locked dependencies and run the test suite from this isolated checkout:
 
 ```sh
 cd packages/selfhost
@@ -10,36 +10,61 @@ npm ci
 npm test
 ```
 
-To preview locally, use a private database path and a fresh random owner token of at least 32 characters:
+`npm run start:account` starts the account gateway on `127.0.0.1:8787`. Set
+`MORONS_DATA_DIR` to a private directory and `MORONS_BOOTSTRAP_TOKEN` to a
+fresh 32+ character secret. The server refuses a non-loopback bind. The first
+account is created through `POST /v1/accounts/bootstrap` with that secret in
+`X-Morons-Bootstrap`; bootstrap closes after the first account. That account
+can create others through authenticated `POST /v1/accounts`. Device login uses
+`POST /v1/session/login` with account name and password, returning a separate
+30-day bearer for each device. `GET /v1/session/me` verifies it and
+`POST /v1/session/logout` revokes only that device session. Store device
+tokens privately on each client. Passwords are scrypt-hashed and bearer hashes,
+not bearer values, are persisted. Each account has its own Pi Durable and
+OptChat database. A single gateway process owns them; a stale owner lock
+is reclaimed only when its recorded process ID is absent. An ambiguous lock
+or interrupted lock reclamation requires operator inspection.
 
-```sh
-MORONS_FIXTURE_DB=/private/path/morons.sqlite MORONS_OWNER_TOKEN='replace-with-random-32-plus-character-token' npm start
-```
+For the repository moron, supply the operator-controlled
+`MORONS_REPOSITORY` and comma-separated `MORONS_SOURCE_PATHS`. These paths
+are exact committed-file read and patch limits. Only the administrator account
+receives the repository tools. `/source PATH` reads an approved committed blob.
+`/review` followed by a unified diff commits on an isolated proposal branch,
+runs fixed `git diff --check`, and records the diff for human review. Pending
+review intents are retried after restart. The review decision
+endpoint records Approve or Reject; it does not apply or merge the patch.
+The worker is a separate process with no provider credentials and a macOS
+no-network sandbox. Filesystem confinement for untrusted repositories remains
+an operator/deployment requirement; the review operation is unavailable on
+other server platforms until a comparable sandbox is configured.
 
-The server binds `127.0.0.1:8787` by default. `PORT` changes the port. All routes require `Authorization: Bearer <owner token>`:
-
-In another local shell, the GPUI client can use the named fixture contract:
+The GPUI client currently receives a device bearer through its environment:
 
 ```sh
 cd apps/desktop
-MORONS_BACKEND_MODE=named MORONS_BACKEND_URL=http://127.0.0.1:8787 MORONS_BACKEND_TOKEN='same-owner-token' cargo run
+MORONS_BACKEND_MODE=named MORONS_BACKEND_URL=http://127.0.0.1:8787 MORONS_BACKEND_TOKEN='<device-session-bearer>' cargo run
 ```
 
-The first connection creates a `repo` moron and its first durable session if
-the catalog is empty. The client can select other named morons created through
-the API. This local bearer is not a multi-device account session.
+The first connection creates `repo` and its first session if the account's
+catalog is empty. GPUI can switch among named morons and shows review diff,
+check result, and human decision controls. The app needs its own account login
+and private token storage before an installed multi-device release. A separate
+TLS ingress and authorization policy are needed before remote access; never
+expose the loopback fixture directly to the Internet.
 
-* `GET /v1/fixture/status`
-* `GET /v1/fixture/history`
-* `POST /v1/fixture/chat` with JSON `{ "requestId": "UUID", "text": "Hello" }`
-* `GET /v1/models` with fixture model metadata
-* `GET /v1/morons`; `POST /v1/morons` with `{ "id": "repo", "name": "Repo", "rules": "...", "preferences": "..." }`
-* `POST /v1/morons/:id/memory` with `{ "id": "decision-one", "text": "Use isolated branches." }` to record an immutable named-moron decision visible in that moron's sessions
-* `GET /v1/morons/:id/sessions`; `POST /v1/morons/:id/sessions` with `{ "id": "repo-main" }`
-* `GET /v1/sessions/:id/history`; `POST /v1/sessions/:id/chat` with `{ "requestId": "UUID", "text": "Hello" }`
+`node --experimental-strip-types scripts/demo-server.mjs` starts a disposable
+account, repository, and proposed change for a local UI walkthrough. It prints
+a temporary backend URL and bearer and deletes the fixture after Ctrl-C. The
+screenshot used for QA came from this synthetic path.
 
-The named session routes use the local OptChat SQLite tree: assistant entries are ingested with stable Pi entry references, retrieved only within the same session, and supplied as bounded context on the next turn. Explicit named-moron decisions are visible across that moron's sessions while staying isolated from other morons. A deterministic fixture model echoes that context in its response; real provider integration still needs a full prompt and tool review. A leading `@moron-id question` creates a durable, isolated target session, sends only the bounded question, and records an attributed answer in the owning session. There is no general multi-agent planner or automatic sharing beyond this explicit syntax.
+Named sessions ingest assistant entries into the OptChat port and retrieve a
+bounded view of their own session plus explicit moron-level decisions. The
+`@moron-id question` syntax sends only that bounded question to an isolated
+target session, then attributes the answer to the owning session. Temporary
+implementation agents and real model-backed summarization are not part of
+this offline fixture.
 
-This fixture does not implement Morons account login, real model credentials, or a trusted code runner. Exposing it to other devices requires a separate authenticated TLS ingress and account/session design. Do not copy model credentials into this process or the runner.
-
-The server creates an exclusive `.owner.lock` file before opening Pi storage and removes it on clean shutdown. If a process crashes, the stale lock blocks restart; an operator must verify no process owns the database before manually removing that lock. Harness checkpoints can replay work on restart; side effects outside the harness need their own idempotency and reconciliation boundary. Chat request IDs and persisted text reservations reconcile the fixture's own crash window.
+The lower-level `npm start` command still runs the original single-owner
+fixture API for regression tests. It uses `MORONS_FIXTURE_DB` and
+`MORONS_OWNER_TOKEN` and must remain local. The account gateway is the public
+entry point for ongoing self-hosted development.

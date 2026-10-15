@@ -131,6 +131,7 @@ impl Render for Chat {
             self.state.status
         };
         let model = self.state.model.as_deref().unwrap_or("No model connected");
+        let review = self.state.review.clone();
         let messages = self
             .state
             .snapshot
@@ -316,6 +317,37 @@ impl Render for Chat {
                             .children(messages),
                     ),
             )
+            .when_some(review, |d, review| {
+                let approve_id = review.id.clone();
+                let reject_id = review.id.clone();
+                let check = if review.checks.iter().all(|item| item.ok) {
+                    "Checks passed"
+                } else { "Checks failed" };
+                d.child(
+                    div().id("review-panel").role(gpui::Role::Region)
+                        .aria_label("Repository change for human review")
+                        .mx_6().mb_3().p_3().rounded_sm().border_1()
+                        .border_color(rgb(0xBAC8D3)).bg(rgb(0xFFFFFF))
+                        .flex().flex_col().gap_2()
+                        .child(div().font_weight(FontWeight::BOLD).child("Review proposed change"))
+                        .child(div().text_xs().child(format!("{} · {} · base {}", review.branch, check, &review.base_revision[..8])))
+                        .child(div().text_xs().child(format!("Decision: {}", review.decision)))
+                        .child(div().id("review-diff").role(gpui::Role::Document)
+                            .aria_label("Proposed diff")
+                            .max_h(px(180.)).overflow_y_scroll().p_2()
+                            .bg(rgb(0xF3F6F8)).font_family("Menlo")
+                            .text_sm().child(review.diff))
+                        .when(review.decision == "pending", |d| d.child(
+                            div().flex().gap_2()
+                                .child(button("review-approve", "Approve review").on_click(cx.listener(move |view, _, _, cx| {
+                                    view.command(Command::ReviewDecision { id: approve_id.clone(), decision: morons_desktop::transport::ReviewDecision::Approve }, cx)
+                                })))
+                                .child(button("review-reject", "Reject review").on_click(cx.listener(move |view, _, _, cx| {
+                                    view.command(Command::ReviewDecision { id: reject_id.clone(), decision: morons_desktop::transport::ReviewDecision::Reject }, cx)
+                                })))
+                        )),
+                )
+            })
             .when_some(error, |d, error| {
                 d.child(
                     div()

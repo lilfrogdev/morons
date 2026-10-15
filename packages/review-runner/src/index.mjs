@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -71,12 +71,16 @@ export async function readSourceAtHead(repository, relativePath, allowedPaths) {
 /**
  * Trusted-caller boundary. The model may supply a patch, but branch name,
  * repository, and check commands must come from an operator-approved plan.
- * This never commits, pushes, merges, or changes the source checkout.
+ * This commits only on the isolated proposal branch. It never pushes, merges,
+ * or changes the source checkout.
  */
-export async function prepareReview({ repository, branch, patch, checks = [] }) {
+export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], reviewRoot = null }) {
   if (!validBranch(branch)) throw new Error('Invalid review branch');
   if (typeof patch !== 'string' || !patch || Buffer.byteLength(patch) > MAX_PATCH_BYTES)
     throw new Error('Invalid patch');
+  if (!Array.isArray(allowedPaths) || allowedPaths.length === 0 ||
+      allowedPaths.length > 128 || allowedPaths.some((path) => !validSourcePath(path)))
+    throw new Error('Approved patch paths required');
   if (!Array.isArray(checks) || checks.length > 8 || checks.some((c) =>
     !c || typeof c.file !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(c.file) ||
     !Array.isArray(c.args) || c.args.length > 24 || c.args.some((a) => typeof a !== 'string' || a.length > 256)))
@@ -90,19 +94,58 @@ export async function prepareReview({ repository, branch, patch, checks = [] }) 
   const revision = await command('git', ['rev-parse', 'HEAD'], root);
   if (!revision.ok) throw new Error('Cannot resolve base revision');
 
-  const directory = await mkdtemp(join(tmpdir(), 'morons-review-'));
+  if (reviewRoot !== null && (typeof reviewRoot !== 'string' || !reviewRoot.startsWith('/')))
+    throw new Error('Invalid review storage');
+  if (reviewRoot) await mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+  const directory = reviewRoot ? join(reviewRoot, branch.split('/')[1]) : await mkdtemp(join(tmpdir(), 'morons-review-'));
+  if (reviewRoot) await mkdir(directory, { recursive: true, mode: 0o700 });
   const worktree = join(directory, 'checkout');
   let created = false;
   try {
-    const add = await command('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, worktree, revision.stdout.trim()], root);
-    if (!add.ok) throw new Error(`Cannot create isolated branch: ${add.stderr}`);
-    created = true;
     const patchPath = join(directory, 'proposal.patch');
-    await writeFile(patchPath, patch, { mode: 0o600 });
-    const verify = await command('git', ['apply', '--check', patchPath], worktree);
-    if (!verify.ok) throw new Error(`Patch rejected: ${verify.stderr}`);
-    const apply = await command('git', ['apply', patchPath], worktree);
-    if (!apply.ok) throw new Error(`Patch failed: ${apply.stderr}`);
+    const previous = await readFile(patchPath, 'utf8').catch((error) => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (previous !== null && previous !== patch) throw new Error('Review id already used for another patch');
+    if (previous === null) await writeFile(patchPath, patch, { mode: 0o600, flag: 'wx' });
+    const present = await stat(worktree).then((item) => item.isDirectory()).catch(() => false);
+    if (!present) {
+      const add = await command('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, worktree, revision.stdout.trim()], root);
+      if (!add.ok) throw new Error(`Cannot create isolated branch: ${add.stderr}`);
+      created = true;
+    }
+    const checkedBranch = await command('git', ['symbolic-ref', '--short', 'HEAD'], worktree);
+    if (!checkedBranch.ok || checkedBranch.stdout.trim() !== branch) throw new Error('Review worktree branch mismatch');
+    const base = await command('git', ['rev-parse', `${branch}^`], worktree);
+    const finished = base.ok && base.stdout.trim() === revision.stdout.trim();
+    if (finished) {
+      const proposal = await command('git', ['rev-parse', 'HEAD'], worktree);
+      const diff = await command('git', ['--no-pager', 'diff', '--no-ext-diff', '--binary', revision.stdout.trim(), branch], worktree);
+      if (!proposal.ok || !diff.ok) throw new Error('Cannot recover committed proposal');
+      const results = [];
+      for (const check of checks) results.push({ file: check.file, args: check.args,
+        ...await command('git', ['diff', '--check', revision.stdout.trim(), branch], worktree) });
+      return { branch, baseRevision: revision.stdout.trim(), proposalRevision: proposal.stdout.trim(),
+        sourceDirty: Boolean(status.stdout.trim()), worktree, diff: diff.stdout, checks: results };
+    }
+    const head = await command('git', ['rev-parse', 'HEAD'], worktree);
+    if (!head.ok || head.stdout.trim() !== revision.stdout.trim()) throw new Error('Review branch has unexpected history');
+    const alreadyApplied = await command('git', ['apply', '--reverse', '--check', patchPath], worktree);
+    if (!alreadyApplied.ok) {
+      const verify = await command('git', ['apply', '--check', patchPath], worktree);
+      if (!verify.ok) throw new Error(`Patch rejected: ${verify.stderr}`);
+      const apply = await command('git', ['apply', patchPath], worktree);
+      if (!apply.ok) throw new Error(`Patch failed: ${apply.stderr}`);
+    }
+    // Intent-to-add makes new files visible to both path validation and diff.
+    const intent = await command('git', ['add', '-N', '--', '.'], worktree);
+    if (!intent.ok) throw new Error('Cannot inspect patch paths');
+    const changed = await command('git', ['diff', '--name-only', '-z', '--no-ext-diff', '--'], worktree);
+    if (!changed.ok) throw new Error('Cannot inspect patch paths');
+    const paths = changed.stdout.split('\0').filter(Boolean);
+    if (paths.length === 0 || paths.some((path) => !allowedPaths.includes(path)))
+      throw new Error('Patch touches an unapproved path');
     const results = [];
     for (const check of checks) {
       const result = await command(check.file, check.args, worktree, 120_000);
@@ -110,10 +153,20 @@ export async function prepareReview({ repository, branch, patch, checks = [] }) 
     }
     const diff = await command('git', ['--no-pager', 'diff', '--no-ext-diff', '--binary', '--'], worktree);
     if (!diff.ok) throw new Error('Cannot produce review diff');
-    return { branch, baseRevision: revision.stdout.trim(), sourceDirty: Boolean(status.stdout.trim()), worktree, diff: diff.stdout, checks: results };
+    const stage = await command('git', ['add', '--', ...paths], worktree);
+    if (!stage.ok) throw new Error('Cannot stage approved review paths');
+    const commit = await command('git', ['-c', 'user.name=Morons Review', '-c', 'user.email=review@morons.invalid',
+      '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '--no-verify', '-m', `Review proposal ${branch}`], worktree);
+    if (!commit.ok) throw new Error('Cannot commit isolated proposal');
+    const proposal = await command('git', ['rev-parse', 'HEAD'], worktree);
+    if (!proposal.ok) throw new Error('Cannot resolve proposal revision');
+    return { branch, baseRevision: revision.stdout.trim(), proposalRevision: proposal.stdout.trim(),
+      sourceDirty: Boolean(status.stdout.trim()), worktree, diff: diff.stdout, checks: results };
   } catch (error) {
-    if (created) await command('git', ['worktree', 'remove', '--force', worktree], root);
-    await rm(directory, { recursive: true, force: true });
+    if (!reviewRoot) {
+      if (created) await command('git', ['worktree', 'remove', '--force', worktree], root);
+      await rm(directory, { recursive: true, force: true });
+    }
     throw error;
   }
 }

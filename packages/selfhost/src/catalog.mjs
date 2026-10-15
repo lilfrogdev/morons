@@ -10,7 +10,9 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, moron_id TEXT NOT NULL REFERENCES morons(id), conversation_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, text TEXT NOT NULL, display_text TEXT NOT NULL, answer TEXT, PRIMARY KEY(session_id, request_id));
     CREATE TABLE IF NOT EXISTS memory_entry_dates (entry_id TEXT PRIMARY KEY, date TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS handoffs (source_session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, target_moron_id TEXT NOT NULL REFERENCES morons(id), question TEXT NOT NULL, target_session_id TEXT NOT NULL REFERENCES sessions(id), answer TEXT, PRIMARY KEY(source_session_id, request_id));`);
+    CREATE TABLE IF NOT EXISTS handoffs (source_session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, target_moron_id TEXT NOT NULL REFERENCES morons(id), question TEXT NOT NULL, target_session_id TEXT NOT NULL REFERENCES sessions(id), answer TEXT, PRIMARY KEY(source_session_id, request_id));
+    CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, base_revision TEXT NOT NULL, diff TEXT NOT NULL, checks TEXT NOT NULL, decision TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);`);
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
@@ -25,6 +27,7 @@ export function openCatalog(path) {
     },
     listSessions: (moronId) => db.prepare("SELECT id, moron_id, created_at FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
     getSession: (id) => session(getSession.get(id)),
+    getSessionByConversation: (id) => session(db.prepare("SELECT * FROM sessions WHERE conversation_id = ?").get(id)),
     createSession(id, moronId, conversationId) {
       if (!validId(id) || !getMoron.get(moronId)) throw new Error("invalid_session");
       db.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)").run(id, moronId, conversationId, Date.now());
@@ -42,9 +45,32 @@ export function openCatalog(path) {
     listHandoffs: (sourceSessionId) => db.prepare("SELECT * FROM handoffs WHERE source_session_id = ?").all(sourceSessionId),
     createHandoff: (sourceSessionId, requestId, targetMoronId, question, targetSessionId) => db.prepare("INSERT OR IGNORE INTO handoffs VALUES (?, ?, ?, ?, ?, NULL)").run(sourceSessionId, requestId, targetMoronId, question, targetSessionId),
     saveHandoffAnswer: (sourceSessionId, requestId, answer) => db.prepare("UPDATE handoffs SET answer = ? WHERE source_session_id = ? AND request_id = ?").run(answer, sourceSessionId, requestId),
+    saveReview({ id, sessionId, branch, baseRevision, diff, checks }) {
+      db.prepare("INSERT OR IGNORE INTO reviews VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
+        .run(id, sessionId, branch, baseRevision, diff, JSON.stringify(checks), Date.now());
+      db.prepare("DELETE FROM review_intents WHERE id = ?").run(id);
+      return this.getReview(id);
+    },
+    reserveReview({ id, sessionId, branch, patch }) {
+      db.prepare("INSERT OR IGNORE INTO review_intents VALUES (?, ?, ?, ?, ?)").run(id, sessionId, branch, patch, Date.now());
+      const intent = db.prepare("SELECT * FROM review_intents WHERE id = ?").get(id);
+      if (intent?.session_id !== sessionId || intent?.branch !== branch || intent?.patch !== patch)
+        throw new Error('review_intent_conflict');
+    },
+    pendingReviews: () => db.prepare("SELECT * FROM review_intents ORDER BY created_at, id").all(),
+    getReview(id) { return review(db.prepare("SELECT * FROM reviews WHERE id = ?").get(id)); },
+    listReviews(sessionId) { return db.prepare("SELECT id, session_id, branch, base_revision, checks, decision, created_at FROM reviews WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 64").all(sessionId).map(reviewSummary); },
+    decideReview(id, decision) {
+      const current = this.getReview(id);
+      if (!current || !['approve', 'reject'].includes(decision)) return null;
+      if (current.decision === 'pending') db.prepare("UPDATE reviews SET decision = ? WHERE id = ?").run(decision, id);
+      return this.getReview(id);
+    },
     close: () => db.close(),
   };
 }
 
 function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id, conversationId: row.conversation_id, createdAt: row.created_at }; }
+function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }
+function reviewSummary(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, checks: JSON.parse(row.checks).map(({ ok }) => ({ ok })), decision: row.decision, createdAt: row.created_at }; }

@@ -16,6 +16,7 @@ pub struct State {
     pub model: Option<String>,
     pub named_morons: Vec<(String, String)>,
     pub selected_moron: Option<String>,
+    pub review: Option<NamedReview>,
     pub error: Option<&'static str>,
     pub ready: bool,
     pub pending: bool,
@@ -30,6 +31,7 @@ impl Default for State {
             model: None,
             named_morons: vec![],
             selected_moron: None,
+            review: None,
             error: None,
             ready: false,
             pending: false,
@@ -45,6 +47,39 @@ pub enum Command {
     Reconnect,
     Retry,
     SelectMoron(String),
+    ReviewDecision {
+        id: String,
+        decision: ReviewDecision,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub enum ReviewDecision {
+    Approve,
+    Reject,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedReview {
+    pub id: String,
+    pub branch: String,
+    pub base_revision: String,
+    #[serde(default)]
+    pub diff: String,
+    pub checks: Vec<NamedCheck>,
+    pub decision: String,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct NamedCheck {
+    pub ok: bool,
+}
+#[derive(serde::Deserialize)]
+struct NamedReviews {
+    reviews: Vec<NamedReview>,
+}
+#[derive(serde::Deserialize)]
+struct NamedReviewDetail {
+    review: NamedReview,
 }
 
 // The only token accepted here is the backend application bearer, never a provider key.
@@ -414,6 +449,7 @@ async fn handle(
         }
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) => Err("Named morons require the self-hosted backend"),
+        Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
     };
     state.request_error = result.err();
     // Only uncertain failures retain the idempotency key. Definite rejection
@@ -603,15 +639,32 @@ async fn named_http(
             if history.session_id != session || history.moron_id != selected {
                 return Err("Named session identity mismatch");
             }
-            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog))
+            let reviews: NamedReviews = api.get(&format!("v1/sessions/{session}/reviews")).await?;
+            if reviews.reviews.len() > 64 || reviews.reviews.iter().any(|r| r.id.len() != 16 ||
+                !r.id.bytes().all(|b| b.is_ascii_hexdigit()) || r.diff.len() > 256 * 1024 ||
+                r.branch.len() > 100 || r.base_revision.len() != 40 || r.checks.len() > 8 ||
+                !matches!(r.decision.as_str(), "pending" | "approve" | "reject")) {
+                return Err("Invalid named reviews");
+            }
+            let selected_review = reviews.reviews.iter().find(|r| r.decision == "pending")
+                .or_else(|| reviews.reviews.first());
+            let review = if let Some(summary) = selected_review {
+                let detail: NamedReviewDetail = api.get(&format!("v1/reviews/{}", summary.id)).await?;
+                if detail.review.id != summary.id || detail.review.diff.len() > 256 * 1024 {
+                    return Err("Invalid named review detail");
+                }
+                Some(detail.review)
+            } else { None };
+            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog, review))
         }
         .await;
         let session = match refreshed {
-            Ok((model, snapshot, session, catalog)) => {
+            Ok((model, snapshot, session, catalog, review)) => {
                 state.model = Some(model);
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
+                state.review = review;
                 state.status = "Connected";
                 state.ready = true;
                 state.error = None;
@@ -649,6 +702,13 @@ async fn named_http(
                             selected = id;
                             state.request_error = None;
                         }
+                    }
+                    Command::ReviewDecision { id, decision } => {
+                        if state.review.as_ref().is_some_and(|r| r.id == id && r.decision == "pending") {
+                            let verb = match decision { ReviewDecision::Approve => "approve", ReviewDecision::Reject => "reject" };
+                            state.request_error = api.post(&format!("v1/reviews/{id}/decision"),
+                                serde_json::json!({"decision":verb})).await.err();
+                        } else { state.request_error = Some("Review is no longer pending"); }
                     }
                     Command::Stop(_) => { state.request_error = Some("Named task stop is not available yet"); }
                 }

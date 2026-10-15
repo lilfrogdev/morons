@@ -1,25 +1,24 @@
 # Isolated review runner
 
-`prepareReview` is a trusted-caller API for proposed repository changes. It
-creates `morons-review/<id>` from the repository's committed `HEAD` in a new
-temporary Git worktree, applies a bounded patch, runs caller-selected checks,
-and returns the diff and check output. It never commits, pushes, merges, or
-edits the source checkout. Existing uncommitted source work stays in place and
-is explicitly reported as `sourceDirty`.
+`prepareReview` accepts a patch against a repository's committed `HEAD` from a
+trusted caller. It checks exact approved paths, creates a `morons-review/<id>`
+branch in a separate worktree, runs the caller's fixed checks, and commits the
+proposal on that branch. The source checkout, including its uncommitted work,
+is left intact. The runner does not push, merge, deploy, or apply an approved
+proposal to the running application.
 
-`readSourceAtHead` reads one bounded committed text file from a trusted caller's
-exact `allowedPaths` list. It rejects traversal and untracked files and does
-not expose uncommitted edits. Construct the allowlist after reviewing the
-repository; tracked files can contain credentials or other private material.
+The self-hosted server gives the runner an account-private `reviewRoot`, saves
+an intent before invoking it, and retries unfinished intents after restart.
+The runner can reuse the same branch and patch after a retry. Failed or
+unexpected worktree states remain for operator inspection.
 
-The repository path, branch name, and check command list must come from a
-human-approved plan, not from model text. The model may propose only the patch.
-The caller owns review-branch cleanup after the human has inspected it. A
-failed patch removes its temporary worktree; a successful review retains it.
+`readSourceAtHead` returns one bounded committed text file from an exact
+operator allowlist. Review the list before use: committed files can still
+contain private material. The model supplies only a patch or one allowed path;
+the repository, branch, storage root, and check commands are trusted inputs.
 
-This module is not an OS sandbox. A check command can read whatever its process
-account can read, and Git hooks or repository content may be hostile. Run it
-in a separate, restricted account/container with no Morons server credentials,
-provider tokens, or production repository write grants before connecting it to
-an agent. External effects need separate operation IDs and reconciliation on
-uncertain completion. No application route currently invokes this module.
+The macOS worker runs separately without provider credentials and under a
+no-network `sandbox-exec` profile. This profile does not confine filesystem
+reads. A stronger platform-specific runner boundary is needed before enabling
+untrusted repositories or arbitrary check commands. The connected server uses
+only a fixed `git diff --check` check.

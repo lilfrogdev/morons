@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
-import { mkdir, open, unlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -11,6 +11,9 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { openNodeOptChat } from "@morons/optchat/node";
 import { moronMemoryAccess, moronMemorySource } from "@morons/optchat/morons";
 import { openCatalog, validId } from "./catalog.mjs";
+import { repoTools } from "./repo-tools.mjs";
+import { acquireOwnerLock } from "./owner-lock.mjs";
+import { runReviewOperation } from "./review.mjs";
 
 // A deterministic fixture provider: this server cannot make paid inference calls.
 function fixtureModels() {
@@ -24,12 +27,22 @@ function fixtureModels() {
   };
   const stream = (_model, conversation) => {
     const events = createAssistantMessageEventStream();
+    const latest = conversation.messages.at(-1);
     const last = [...conversation.messages].reverse().find((message) => message.role === "user");
     const input = typeof last?.content === "string" ? last.content : "";
+    const source = /^\/source ([^\n]+)$/.exec(input);
+    const patch = input.startsWith('/review\n') ? input.slice('/review\n'.length) : null;
+    const tool = latest?.role === 'toolResult' ? null : source ? { name: 'source_read', arguments: { path: source[1] } } :
+      patch ? { name: 'prepare_review', arguments: { patch } } : null;
+    const resultText = latest?.role === 'toolResult'
+      ? latest.content?.filter((part) => part.type === 'text').map((part) => part.text).join('') ?? ''
+      : `Fixture: ${input}`;
     const answer = {
-      role: "assistant", content: [{ type: "text", text: `Fixture: ${input}` }],
+      role: "assistant", content: tool ? [{ type: 'toolCall',
+        id: createHash('sha256').update(`${conversation.messages.length}:${input}`).digest('hex').slice(0, 24),
+        name: tool.name, arguments: tool.arguments }] : [{ type: "text", text: resultText }],
       api: model.api, provider: model.provider, model: model.id,
-      timestamp: Date.now(), stopReason: "stop",
+      timestamp: Date.now(), stopReason: tool ? 'toolUse' : "stop",
       usage: {
         input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -83,26 +96,24 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {} }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null }) {
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
   // Pi Durable's Node adapter has no cross-process lock. One server process must own this file.
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
-  let ownerLock;
-  try { ownerLock = await open(lockPath, "wx", 0o600); }
-  catch (error) {
-    if (error?.code === "EEXIST") throw new Error("database_already_owned_or_stale_lock");
-    throw error;
-  }
-  let catalog, harness, root, optchat;
+  const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
+  let catalog, harness, root, optchat, repoExtension;
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
+    const registry = createRegistry();
+    repoExtension = repoTools(catalog, repositoryPlan);
+    if (repoExtension) registry.install(repoExtension);
     harness = await Harness.open(
       await openNodeSqliteStorage(databasePath),
-      { models: fixtureModels(), registry: createRegistry(), settings: { compaction: { enabled: false, backgroundTokens: 0 } } },
+      { models: fixtureModels(), registry, settings: { compaction: { enabled: false, backgroundTokens: 0 } } },
       BACKGROUND_CONTEXT,
     );
     root = await harness.root(BACKGROUND_CONTEXT, {
@@ -113,10 +124,21 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     catalog?.close();
     optchat?.database.close();
     await ownerLock.close();
-    await unlink(lockPath);
     throw error;
   }
   harness.resume();
+  if (repositoryPlan) {
+    for (const intent of catalog.pendingReviews()) {
+      try {
+        const result = await runReviewOperation(repositoryPlan, { operation: 'review',
+          branch: intent.branch, patch: intent.patch });
+        catalog.saveReview({ id: intent.id, sessionId: intent.session_id, branch: intent.branch,
+          baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
+      } catch {
+        // Keep the intent for operator inspection or a later restart.
+      }
+    }
+  }
   let shuttingDown = false;
   const inFlight = new Map();
   const handoffFlight = new Map();
@@ -206,9 +228,9 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const raw = entryText(entry);
         const display = role === "user" ? replies.find((reply) => reply.text === raw)?.display_text : undefined;
         const handoff = role === "user" && handoffs.find((item) => display === `@${item.target_moron_id} ${item.question}`);
-        return { id: entry.id, role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : raw),
+        return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : raw),
           ...(handoff ? { handoff: { targetMoronId: handoff.target_moron_id, answer: handoff.answer } } : {}) };
-      }) };
+      }).filter((entry) => entry.role === 'user' || entry.text.length > 0) };
   }
   function scopedHandoffText(handoff) {
     return `@${handoff.target_moron_id} ${handoff.question}\n\n[Scoped answer from @${handoff.target_moron_id}: ${handoff.answer}]`;
@@ -217,7 +239,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const instructions = [moron.rules, moron.preferences].filter(Boolean).join("\n\n");
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: { provider: "morons-fixture", modelId: "fixture" }, instructions },
+      agent: { model: { provider: "morons-fixture", modelId: "fixture" }, instructions,
+        ...(moron.id === 'repo' && repoExtension ? { extensions: [repoExtension] } : {}) },
     }, BACKGROUND_CONTEXT);
     return catalog.createSession(id, moron.id, conversation.id);
   }
@@ -277,6 +300,28 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return send(response, 200, { models: [{ provider: "morons-fixture", id: "fixture", label: "Offline fixture", available: true }] });
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons() });
+      const reviewList = /^\/v1\/sessions\/([^/]+)\/reviews$/.exec(path);
+      if (reviewList && request.method === 'GET') {
+        const session = catalog.getSession(decodeURIComponent(reviewList[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        return send(response, 200, { reviews: catalog.listReviews(session.id) });
+      }
+      const reviewDetail = /^\/v1\/reviews\/([a-f0-9]{16})$/.exec(path);
+      if (reviewDetail && request.method === 'GET') {
+        const review = catalog.getReview(reviewDetail[1]);
+        return review ? send(response, 200, { review }) : send(response, 404, { error: 'review_not_found' });
+      }
+      const reviewDecision = /^\/v1\/reviews\/([a-f0-9]{16})\/decision$/.exec(path);
+      if (reviewDecision && request.method === 'POST') {
+        const body = await readBody(request);
+        if (body?.decision !== 'approve' && body?.decision !== 'reject')
+          return send(response, 400, { error: 'invalid_decision' });
+        const current = catalog.getReview(reviewDecision[1]);
+        if (!current) return send(response, 404, { error: 'review_not_found' });
+        if (current.decision !== 'pending' && current.decision !== body.decision)
+          return send(response, 409, { error: 'review_already_decided' });
+        return send(response, 200, { review: catalog.decideReview(current.id, body.decision) });
+      }
       if (request.method === "POST" && path === "/v1/morons") {
         const body = await readBody(request);
         if (catalog.getMoron(body?.id)) return send(response, 409, { error: "moron_exists" });
@@ -358,7 +403,6 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     await harness.close(BACKGROUND_CONTEXT);
     catalog.close();
     await ownerLock.close();
-    await unlink(lockPath);
     throw error;
   }
   return {
@@ -370,7 +414,6 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       catalog.close();
       optchat.database.close();
       await ownerLock.close();
-      await unlink(lockPath);
     },
   };
 }
