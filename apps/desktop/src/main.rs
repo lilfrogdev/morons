@@ -24,7 +24,10 @@ const ICON_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox=
 const ICON_STAR: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#b77900" stroke-width="1.5" stroke-linejoin="round"><path d="m12 2 3.1 6.3 7 1-5 4.9 1.2 6.9L12 17.8l-6.3 3.3 1.2-6.9-5-4.9 7-1z"/></svg>"##;
 const ICON_CHEVRON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>"##;
 fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
-fn provider_name(provider: &str) -> &str { if provider == "morons-fixture" { "Offline fixture" } else if provider == "openai" { "OpenAI" } else { provider } }
+fn provider_name(provider: &str) -> &str { if provider == "morons-fixture" { "Offline" } else if provider == "openai" { "OpenAI" } else { provider } }
+fn model_label(provider: &str, label: &str) -> String {
+    if provider == "morons-fixture" { label.replace("Offline fixture", "Offline") } else { label.to_owned() }
+}
 
 actions!(morons, [SendMessage, Quit, FocusNext, FocusPrevious]);
 struct Chat {
@@ -135,6 +138,8 @@ impl Chat {
         let query = self.model_search.read(cx).text().to_lowercase();
         let tokens: Vec<_> = query.split_whitespace().collect();
         self.state.models.iter().filter(|option| {
+            if !option.available && !self.state.selected_model.as_ref().is_some_and(|(provider, id)|
+                provider == &option.provider && id == &option.id) { return false; }
             if !tokens.is_empty() {
                 let haystack = format!("{} {} {}", option.label, option.id, provider_name(&option.provider)).to_lowercase();
                 tokens.iter().all(|token| haystack.contains(token))
@@ -327,7 +332,11 @@ impl Render for Chat {
             self.state.status
         };
         let model = self.state.model.as_deref().unwrap_or("No model connected");
-        let model_display = if narrow && model == "Offline fixture" { "Offline" } else { model };
+        let needs_provider = self.state.selected_model.as_ref().is_some_and(|(provider, _)|
+            provider == "morons-fixture") && self.state.provider_state.as_deref() != Some("connected");
+        let model_display = if needs_provider { "Set up provider".to_owned() } else {
+            model_label(self.state.selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or(""), model)
+        };
         let model_options = self.state.models.clone();
         let visible_models = self.visible_models(cx);
         let mut providers = Vec::<String>::new();
@@ -497,17 +506,13 @@ impl Render for Chat {
                     .child(self.bootstrap_token.clone())
                     .child(button("account-create", "Create first account").on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
             ))
-            .when(self.state.selected_moron.is_some(), |d| d.child(
+            .when(self.state.selected_moron.is_some() && self.state.provider_available &&
+                matches!(provider_state.as_deref(), Some("awaiting_callback" | "open_browser")), |d| d.child(
                 div().id("provider-panel").role(gpui::Role::Region)
                     .aria_label("ChatGPT provider connection")
                     .px_6().py_2().border_b_1().border_color(rgb(0xE0E6EC))
                     .flex().flex_col().gap_2().text_sm()
-                    .child(if self.state.provider_available {
-                        format!("ChatGPT connection: {}", provider_state.as_deref().unwrap_or("disconnected"))
-                    } else { "ChatGPT login needs an unlocked private provider store. Offline chat remains available.".to_owned() })
-                    .when(self.state.provider_available && provider_state.as_deref() != Some("connected"), |d| d.child(
-                        button("provider-start", "Connect ChatGPT").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderStart, cx)))
-                    ))
+                    .child("Complete ChatGPT sign-in")
                     .when_some(provider_url, |d, url| d.child(
                         button("provider-browser", "Open ChatGPT sign-in in browser").on_click(move |_, _, cx| cx.open_url(&url))
                     ))
@@ -517,9 +522,6 @@ impl Render for Chat {
                         .child(button("provider-callback-submit", "Submit callback URL").on_click(cx.listener(|view, _, _, cx| view.submit_provider_callback(cx))))
                         .child(button("provider-cancel", "Cancel sign-in").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderCancel, cx))))
                     )
-                    .when(provider_state.as_deref() == Some("connected"), |d| d.child(
-                        button("provider-logout", "Disconnect ChatGPT").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderLogout, cx)))
-                    ))
             ))
             .when(!self.state.account_login, |d| d.child(
                 div()
@@ -631,9 +633,9 @@ impl Render for Chat {
                                 .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
                                 .text_size(px(12.))
                                 .child(svg().data(provider_icon(selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or("")))
-                                    .w(px(16.)).h(px(16.)))
-                                .child(div().min_w_0().truncate().child(model_display.to_owned()))
-                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                                    .w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
+                                .child(div().min_w_0().truncate().child(model_display.clone()))
+                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.open_model_menu(window, cx);
                                     cx.stop_propagation();
@@ -710,7 +712,7 @@ impl Render for Chat {
                                             .w(px(35.)).h(px(36.)).rounded(px(6.))
                                             .bg(if self.model_section == "favorites" { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                                             .flex().items_center().justify_center()
-                                            .child(svg().data(ICON_STAR).w(px(20.)).h(px(20.)))
+                                            .child(svg().data(ICON_STAR).w(px(20.)).h(px(20.)).text_color(rgb(0xB77900)))
                                             .on_click(cx.listener(|view, _, _, cx| {
                                                 view.model_section = "favorites".into(); view.model_cursor = 0;
                                                 view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
@@ -727,7 +729,7 @@ impl Render for Chat {
                                                 .w(px(35.)).h(px(36.)).rounded(px(6.))
                                                 .bg(if self.model_section == *provider { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                                                 .flex().items_center().justify_center()
-                                                .child(svg().data(provider_icon(provider)).w(px(20.)).h(px(20.)))
+                                                .child(svg().data(provider_icon(provider)).w(px(20.)).h(px(20.)).text_color(rgb(0x626772)))
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     view.model_section = chosen.clone(); view.model_cursor = 0;
                                                     view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
@@ -735,9 +737,38 @@ impl Render for Chat {
                                                 }))
                                         })))
                                     .child(div().flex_1().min_w_0().pt(px(7.)).px(px(12.)).pb(px(9.)).flex().flex_col()
+                                        .when(needs_provider || provider_state.as_deref() == Some("connected"), |d| d.child(
+                                            div().id("provider-setup-choice").role(gpui::Role::Button)
+                                                .aria_label(if provider_state.as_deref() == Some("connected") { "Disconnect ChatGPT" } else { "Set up provider" })
+                                                .h(px(42.)).px_2().mb_1().rounded(px(6.))
+                                                .bg(rgb(0xF7F7F8)).flex().items_center()
+                                                .child(div().flex_1().child(if provider_state.as_deref() == Some("connected") { "Disconnect ChatGPT" } else { "Set up provider" }))
+                                                .child(div().text_size(px(11.)).text_color(rgb(0x626772))
+                                                    .child(if self.state.provider_available { "ChatGPT" } else { "Server setup required" }))
+                                                .when(self.state.provider_available, |d| d.focusable().tab_stop(true).cursor_pointer())
+                                                .on_click(cx.listener(|view, _, _, cx| {
+                                                    if view.state.provider_available {
+                                                        view.show_model = false;
+                                                        view.command(if view.state.provider_state.as_deref() == Some("connected") {
+                                                            Command::ProviderLogout
+                                                        } else { Command::ProviderStart }, cx);
+                                                    }
+                                                    cx.stop_propagation();
+                                                }))
+                                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                                    if view.state.provider_available && !event.keystroke.modifiers.modified() &&
+                                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                        view.show_model = false;
+                                                        view.command(if view.state.provider_state.as_deref() == Some("connected") {
+                                                            Command::ProviderLogout
+                                                        } else { Command::ProviderStart }, cx);
+                                                        cx.stop_propagation();
+                                                    }
+                                                }))
+                                        ))
                                         .child(div().h(px(32.)).border_b_1()
                                             .border_color(rgb(0xE3E5E8)).flex().items_center().gap(px(5.))
-                                            .child(svg().data(ICON_SEARCH).w(px(16.)).h(px(16.)))
+                                            .child(svg().data(ICON_SEARCH).w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                             .child(self.model_search.clone()))
                                         .when(self.model_section == "favorites" && self.model_search.read(cx).text().is_empty(), |d|
                                             d.child(div().pt(px(10.)).px_2().text_size(px(11.))
@@ -749,7 +780,10 @@ impl Render for Chat {
                                                 div().px_2().pt(px(20.)).text_color(rgb(0x626772))
                                                     .child(if !self.model_search.read(cx).text().is_empty() { "No models found" }
                                                         else if self.model_section == "favorites" { "No favorites yet" }
-                                                        else { "No available models" })))
+                                                        else if self.model_section == "openai" &&
+                                                            self.state.provider_state.as_deref() != Some("connected") {
+                                                            "Set up provider to see models"
+                                                        } else { "No available models" })))
                                             .children(visible_models.iter().enumerate().map(|(index, option)| {
                                                 let selected = selected_model.as_ref().is_some_and(|(provider, id)|
                                                     provider == &option.provider && id == &option.id);
@@ -775,14 +809,14 @@ impl Render for Chat {
                                                     }))
                                                     .child(div().id(SharedString::from(format!("model-choice-{provider}-{id}")))
                                                         .role(gpui::Role::Button)
-                                                        .aria_label(SharedString::from(format!("Select {}", option.label)))
+                                                        .aria_label(SharedString::from(format!("Select {}", model_label(&option.provider, &option.label))))
                                                         .flex_1().min_w_0().flex().flex_col().justify_center()
                                                         .when(option.available, |d| d.cursor_pointer())
                                                         .when(!option.available, |d| d.opacity(0.45))
-                                                        .child(div().truncate().line_height(px(16.)).child(option.label.clone()))
+                                                        .child(div().truncate().line_height(px(16.)).child(model_label(&option.provider, &option.label)))
                                                         .child(div().flex().items_center().gap(px(5.)).mt(px(3.))
                                                             .text_size(px(11.)).text_color(rgb(0x626772))
-                                                            .child(svg().data(provider_icon(&option.provider)).w(px(12.)).h(px(12.)))
+                                                            .child(svg().data(provider_icon(&option.provider)).w(px(12.)).h(px(12.)).text_color(rgb(0x626772)))
                                                             .child(provider_name(&option.provider).to_owned()))
                                                         .on_click(cx.listener(move |view, _, window, cx| {
                                                             view.choose_model(provider.clone(), id.clone(), cx);
@@ -797,7 +831,7 @@ impl Render for Chat {
                                                         .w(px(24.)).h(px(26.)).rounded(px(4.))
                                                         .flex().items_center().justify_center().cursor_pointer()
                                                         .child(svg().data(ICON_STAR).w(px(14.)).h(px(14.))
-                                                            .when(favorite, |d| d.text_color(rgb(0xEAB308))))
+                                                            .text_color(if favorite { rgb(0xEAB308) } else { rgb(0xB77900) }))
                                                         .on_click(cx.listener(move |view, _, _, cx| {
                                                             view.command(Command::ToggleModelFavorite {
                                                                 provider: star_provider.clone(), id: star_id.clone(), favorite: !favorite,
