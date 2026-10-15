@@ -23,5 +23,8 @@ reads; only the offline fixture uses it. A real-model repository session
 requires the separately verified container runner described in
 `packages/selfhost/README.md`. In that mode the worker clones committed source
 under the account's review directory so the source checkout and its Git
-metadata remain read-only. The connected server uses only a fixed
-`git diff --check` check.
+metadata remain read-only. The connected server requires an operator-selected
+profile for exact `review-runner/src` or `optchat/src` paths and runs both
+`git diff --check` and the package's Node test suite on the candidate. Test
+scripts and test files remain outside the model's path allowlist. Other
+packages need their own reviewed dependency and check policy.

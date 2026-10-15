@@ -53,11 +53,28 @@ test('actual account server rejects source and account-data overlap before Docke
   try {
     await mkdir(join(source, '.git'), { recursive: true });
     const args = { bootstrapToken: 'synthetic-bootstrap-token-1234567890',
-      repositoryPlan: { repository: source, allowedPaths: ['README.md'], runnerImage: image } };
+      repositoryPlan: { repository: source,
+        allowedPaths: ['packages/review-runner/src/value.mjs'], checkProfile: 'review-runner', runnerImage: image } };
     await assert.rejects(openAccountServer({ ...args, dataDir: join(source, 'private-data') }),
       /runner_private_path_overlaps_source/);
     await assert.rejects(openAccountServer({ ...args, dataDir: dir }),
       /runner_private_path_overlaps_source/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('real-model repository tools fail closed without a matching trusted test profile', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'morons-runner-profile-'));
+  const source = join(dir, 'source');
+  try {
+    await mkdir(join(source, '.git'), { recursive: true });
+    const args = { dataDir: join(dir, 'data'),
+      bootstrapToken: 'synthetic-bootstrap-token-1234567890',
+      repositoryPlan: { repository: source,
+        allowedPaths: ['packages/review-runner/src/value.mjs'], runnerImage: image } };
+    await assert.rejects(openAccountServer(args), /review_check_profile_does_not_cover_approved_paths/);
+    await assert.rejects(openAccountServer({ ...args,
+      repositoryPlan: { ...args.repositoryPlan, checkProfile: 'optchat' } }),
+    /review_check_profile_does_not_cover_approved_paths/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -78,7 +95,8 @@ test('CLI rejects bootstrap and provider-key files inside the mounted repository
         cwd: new URL('..', import.meta.url).pathname, encoding: 'utf8',
         env: { ...process.env, MORONS_DATA_DIR: join(dir, 'data'),
           MORONS_BOOTSTRAP_TOKEN_FILE: bootstrap, MORONS_PROVIDER_KEY_FILE: providerKey,
-          MORONS_REPOSITORY: source, MORONS_SOURCE_PATHS: 'README.md',
+          MORONS_REPOSITORY: source, MORONS_SOURCE_PATHS: 'packages/review-runner/src/value.mjs',
+          MORONS_REVIEW_CHECK_PROFILE: 'review-runner',
           MORONS_PROVIDER_MODEL_ID: 'mock-model', MORONS_RUNNER_IMAGE: image },
         timeout: 10_000,
       }), (error) => error.status === 1 && /runner_private_path_overlaps_source/.test(error.stderr));
@@ -89,8 +107,7 @@ test('CLI rejects bootstrap and provider-key files inside the mounted repository
 test('live container denies file escape, symlink escape, credential env, network, and approval writes', async (t) => {
   const runnerImage = process.env.MORONS_TEST_RUNNER_IMAGE;
   if (!runnerImage) return t.skip('set MORONS_TEST_RUNNER_IMAGE to a preloaded immutable Node 22+ and Git image');
-  try { await verifyContainerRunner(runnerImage); }
-  catch (error) { return t.skip(`container preflight unavailable: ${error.message}`); }
+  await verifyContainerRunner(runnerImage);
   const dir = await mkdtemp(join(tmpdir(), 'morons-container-boundary-'));
   const source = join(dir, 'source');
   const reviews = join(dir, 'reviews');

@@ -22,7 +22,7 @@ export function repoTools(catalog, plan) {
   });
   const patch = defineTool({
     name: 'prepare_review', replay: 'unsafe',
-    description: 'Prepare a patch on an isolated review branch and run the fixed diff check. Human review is required.',
+    description: 'Prepare a patch on an isolated review branch and run the operator-selected fixed checks. Human review is required.',
     parameters: Type.Object({ patch: Type.String({ maxLength: 262144 }) }),
     async execute({ patch }, api) {
       const session = catalog.getSessionByConversation(api.conversationId);
@@ -36,7 +36,7 @@ export function repoTools(catalog, plan) {
       const result = await runReviewOperation(plan, { operation: 'review', branch, patch, baseRevision });
       const saved = catalog.saveReview({ id, sessionId: session.id, branch, baseRevision: result.baseRevision,
         diff: result.diff, checks: result.checks });
-      return { output: [{ type: 'text', text: `Review ${saved.id} prepared on ${branch}. Check: ${saved.checks[0]?.ok ? 'passed' : 'failed'}. Human decision pending.` }] };
+      return { output: [{ type: 'text', text: `Review ${saved.id} prepared on ${branch}. Checks: ${saved.checks.every((check) => check.ok) ? 'passed' : 'failed'}. Human decision pending.` }] };
     },
   });
   return defineExtension({ name: 'repo-review', tools: [source, patch] });

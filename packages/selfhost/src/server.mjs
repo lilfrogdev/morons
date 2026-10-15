@@ -13,6 +13,7 @@ import { moronMemoryAccess, moronMemorySource } from "@morons/optchat/morons";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
 import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
+import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
@@ -127,6 +128,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
     const registry = createRegistry();
     if (repositoryPlan?.runnerImage) {
+      trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
       await assertRunnerPathSeparation(repositoryPlan.repository, dirname(databasePath));
       await assertRunnerPathSeparation(repositoryPlan.repository, repositoryPlan.reviewRoot);
       await verifyContainerRunner(repositoryPlan.runnerImage);

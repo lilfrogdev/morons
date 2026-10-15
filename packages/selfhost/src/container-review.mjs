@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm, symlink, writeFile, mkdir, lstat } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 
 const runnerDirectory = fileURLToPath(new URL('../../review-runner/', import.meta.url));
 const MAX_OUTPUT = 512 * 1024;
@@ -135,12 +136,13 @@ export async function verifyContainerRunner(image) {
 
 export async function runContainerReviewOperation(plan, operation) {
   if (!validRunnerImage(plan.runnerImage)) throw new Error('runner_image_digest_required');
+  trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
   if (!plan.reviewRoot) throw new Error('persistent_review_root_required');
   const { source: repository, privatePath: reviewRoot } =
     await assertRunnerPathSeparation(plan.repository, plan.reviewRoot);
   const workerRoot = await realpath(runnerDirectory);
   const input = JSON.stringify({ plan: { repository: '/source', reviewRoot: '/reviews',
-    allowedPaths: plan.allowedPaths, isolatedClone: true }, ...operation });
+    allowedPaths: plan.allowedPaths, checkProfile: plan.checkProfile, isolatedClone: true }, ...operation });
   if (Buffer.byteLength(input) > 300_000) throw new Error('review_request_too_large');
   const result = await docker(containerArgs({ image: plan.runnerImage, repository, reviewRoot, workerRoot }), input);
   let response;

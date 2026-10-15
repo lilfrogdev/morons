@@ -52,9 +52,12 @@ clones committed source rather than writing Git metadata in the original
 checkout. On this Mac both Colima profiles are stopped, so the live container
 probe has not run and real-model repository tools are unavailable. The next
 platform action is to start the existing Colima profile and provide a reviewed
-Node 22+ and Git image digest for the live adversarial test. Trusted build
-checks beyond the fixed `git diff --check` and an explicit reviewed apply
-workflow remain to be added before any self-update claim.
+Node 22+ and Git image digest for the live adversarial test. Two trusted,
+dependency-free check profiles now run the candidate's `review-runner` or
+`optchat` Node suite as well as `git diff --check`; model edits are confined
+to the selected package's source paths. The self-host backend and GPUI need
+separate dependency images and build policies. An explicit reviewed apply
+workflow remains to be added before any self-update claim.
 The container runner rejects source/data directory overlap and linked Git
 worktrees. Review intents pin the original base SHA for restart recovery.
 

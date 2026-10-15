@@ -1,14 +1,54 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { prepareReview, readSourceAtHead } from '../src/index.mjs';
+import { trustedCheckPlan } from '../src/check-policy.mjs';
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
+
+test('trusted profile runs immutable package tests on candidate and recovery', async () => {
+  const repository = await mkdtemp(join(tmpdir(), 'morons-policy-source-'));
+  const reviewRoot = await mkdtemp(join(tmpdir(), 'morons-policy-reviews-'));
+  const sourcePath = 'packages/review-runner/src/value.mjs';
+  try {
+    git(repository, 'init', '-q');
+    await mkdir(join(repository, 'packages/review-runner/src'), { recursive: true });
+    await mkdir(join(repository, 'packages/review-runner/test'), { recursive: true });
+    await writeFile(join(repository, 'packages/review-runner/package.json'),
+      JSON.stringify({ type: 'module', scripts: { test: 'node --test test/*.test.mjs' } }));
+    await writeFile(join(repository, sourcePath), 'export const value = 1;\n');
+    await writeFile(join(repository, 'packages/review-runner/test/value.test.mjs'),
+      "import { test } from 'node:test'; import { strict as assert } from 'node:assert'; import { value } from '../src/value.mjs'; test('value', () => assert.equal(value, 1));\n");
+    git(repository, 'add', '.');
+    git(repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      '-c', 'commit.gpgSign=false', 'commit', '-qm', 'base');
+    const policy = trustedCheckPlan('review-runner', [sourcePath]);
+    const shared = { repository, allowedPaths: [sourcePath], reviewRoot,
+      isolatedClone: true, checks: policy.checks,
+      requiredScript: { manifest: policy.manifest, script: policy.script } };
+    const passing = await prepareReview({ ...shared, branch: 'morons-review/policy-pass',
+      patch: `diff --git a/${sourcePath} b/${sourcePath}\n--- a/${sourcePath}\n+++ b/${sourcePath}\n@@ -1 +1 @@\n-export const value = 1;\n+export const value = 1; // reviewed\n` });
+    assert.deepEqual(passing.checks.map((check) => check.ok), [true, true]);
+    const badPatch = `diff --git a/${sourcePath} b/${sourcePath}\n--- a/${sourcePath}\n+++ b/${sourcePath}\n@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;\n`;
+    const failing = await prepareReview({ ...shared, branch: 'morons-review/policy-fail', patch: badPatch });
+    assert.deepEqual(failing.checks.map((check) => check.ok), [true, false]);
+    const recovered = await prepareReview({ ...shared, branch: 'morons-review/policy-fail', patch: badPatch });
+    assert.deepEqual(recovered.checks.map((check) => check.ok), [true, false]);
+    assert.throws(() => trustedCheckPlan('review-runner', ['packages/review-runner/test/value.test.mjs']),
+      /review_check_profile_does_not_cover_approved_paths/);
+    assert.throws(() => trustedCheckPlan('review-runner', ['packages/selfhost/src/server.mjs']),
+      /review_check_profile_does_not_cover_approved_paths/);
+    await assert.rejects(prepareReview({ ...shared, branch: 'morons-review/policy-script-mismatch',
+      requiredScript: { ...shared.requiredScript, script: 'node --test wrong.test.mjs' },
+      patch: badPatch }), /review_check_script_changed/);
+  } finally { await rm(repository, { recursive: true, force: true });
+    await rm(reviewRoot, { recursive: true, force: true }); }
+});
 
 test('proposal changes only isolated branch and returns check evidence', async () => {
   const repository = await mkdtemp(join(tmpdir(), 'morons-source-'));

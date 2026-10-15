@@ -9,6 +9,7 @@ import { acquireOwnerLock } from './owner-lock.mjs';
 import { createProviderFlow } from './provider-flow.mjs';
 import { openProviderRuntime } from './provider-runtime.mjs';
 import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
+import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 
 function send(response, status, body) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -58,6 +59,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
     throw new Error('private_data_directory_required');
   await chmod(dataDir, 0o700);
   if (repositoryPlan?.runnerImage) {
+    trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
     await assertRunnerPathSeparation(repositoryPlan.repository, dataDir);
     await verifyContainerRunner(repositoryPlan.runnerImage);
   }
@@ -191,9 +193,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const { MORONS_DATA_DIR: dataDir, MORONS_BOOTSTRAP_TOKEN_FILE: bootstrapFile,
     MORONS_PROVIDER_KEY_FILE: providerFile, MORONS_REPOSITORY: repository,
     MORONS_SOURCE_PATHS: sourcePaths, MORONS_PROVIDER_MODEL_ID: providerModelId,
-    MORONS_RUNNER_IMAGE: runnerImage } = process.env;
+    MORONS_RUNNER_IMAGE: runnerImage, MORONS_REVIEW_CHECK_PROFILE: checkProfile } = process.env;
   const repositoryPlan = repository && sourcePaths ?
-    { repository, allowedPaths: sourcePaths.split(',').filter(Boolean), ...(runnerImage ? { runnerImage } : {}) } : null;
+    { repository, allowedPaths: sourcePaths.split(',').filter(Boolean),
+      ...(runnerImage ? { runnerImage, checkProfile } : {}) } : null;
   Promise.all([privateFile(bootstrapFile), providerFile ? privateFile(providerFile) : Promise.resolve(null)])
     .then(async ([bootstrap, providerKey]) => {
       if (repositoryPlan?.runnerImage) {
@@ -209,7 +212,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const runnerErrors = new Set(['runner_image_digest_required', 'container_engine_not_running',
         'runner_image_not_present', 'runner_image_missing_node_or_git', 'container_runner_unavailable',
         'container_boundary_probe_failed', 'container_runner_timeout', 'runner_private_path_overlaps_source',
-        'runner_source_must_have_embedded_git']);
+        'runner_source_must_have_embedded_git', 'review_check_profile_does_not_cover_approved_paths']);
       process.stderr.write(runnerErrors.has(error?.message) ?
         `Morons review runner unavailable: ${error.message}.\n` :
         'Morons account server startup failed. Check private file ownership, data directory, and lock state.\n');

@@ -1,4 +1,5 @@
 import { inspectSource, readSourceAtHead, prepareReview } from './index.mjs';
+import { trustedCheckPlan } from './check-policy.mjs';
 
 // One request per short-lived process. The host supplies this plan, never the model.
 // The worker has no provider credentials and accepts only two fixed operations.
@@ -18,6 +19,13 @@ try {
   } else if (request.operation === 'read') {
     result = await readSourceAtHead(plan.repository, request.path, plan.allowedPaths);
   } else if (request.operation === 'review') {
+    let checks = [{ file: 'git', args: ['diff', '--check'] }];
+    let requiredScript = null;
+    if (plan.checkProfile !== undefined) {
+      const policy = trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
+      checks = policy.checks;
+      requiredScript = { manifest: policy.manifest, script: policy.script };
+    }
     result = await prepareReview({
       repository: plan.repository,
       branch: request.branch,
@@ -26,7 +34,8 @@ try {
       reviewRoot: plan.reviewRoot ?? null,
       isolatedClone: plan.isolatedClone === true,
       baseRevision: request.baseRevision ?? null,
-      checks: [{ file: 'git', args: ['diff', '--check'] }],
+      checks,
+      requiredScript,
     });
   } else {
     throw new Error('Invalid review operation');

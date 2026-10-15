@@ -109,7 +109,14 @@ process is stopped before manually clearing that lock.
 ## Real-model repository runner
 
 The model receives repository read and proposal tools only when the operator
-sets `MORONS_REPOSITORY`, `MORONS_SOURCE_PATHS`, and `MORONS_RUNNER_IMAGE`.
+sets `MORONS_REPOSITORY`, `MORONS_SOURCE_PATHS`, `MORONS_RUNNER_IMAGE`, and
+`MORONS_REVIEW_CHECK_PROFILE`. The supported profiles are `review-runner` and
+`optchat`. Each accepts exact allowlisted files only under its package's
+`src/` directory, keeps its test script and tests outside the edit allowlist,
+and runs `git diff --check` plus that package's Node test suite on the
+candidate checkout. The same checks rerun after intent recovery. Other paths
+or an absent/mismatched profile fail closed. The dependency-heavy self-host
+backend and GPUI need separately provisioned dependencies and check policies.
 The image must already be installed locally, be named by an immutable
 `@sha256:` digest, and contain Node 22+ and Git. The server never pulls an
 image or starts a container engine. At startup it probes the engine and image,
@@ -121,7 +128,7 @@ The worker container mounts the source repository read-only, its own code
 read-only, and the account's review directory writable. It has no provider
 credentials, account database, or Docker socket; network is disabled. It
 clones committed source into the review directory, creates a proposal branch
-there, applies only allowlisted paths, runs the fixed `git diff --check`, and
+there, applies only allowlisted paths, runs the fixed checks, and
 returns a diff for human review. It cannot merge, push, apply to the running
 app, or change review decisions. The operator must review the image and the
 source-path allowlist; an approved path may itself contain private source.
@@ -133,13 +140,22 @@ points outside the read-only source mount. Review intents pin the source base
 commit so recovery still works if the source branch advances.
 
 On this Mac, Docker and Colima are installed but the Colima profiles are
-stopped, and no runner image was inspected. To complete validation, the user
-must authorize starting the existing Colima profile and supplying a reviewed,
-preloaded Node 22+ and Git image digest. Then run `npm test` with
-`MORONS_TEST_RUNNER_IMAGE` set to that digest and inspect the live boundary
-test result. Only after it passes should `MORONS_RUNNER_IMAGE` be added to the
-server launch environment. No real login or paid inference is needed for this
-boundary test.
+stopped, so no local runner image or digest could be inspected. A proposed
+upstream is the official `docker.io/library/node:22.23.3-bookworm` arm64 tag,
+whose buildpack-deps base includes Git. After permission to start Colima and
+pull the image, inspect its local `RepoDigests` and select its immutable
+`docker.io/library/node@sha256:...` reference; never substitute a guessed
+digest. The proposed commands are `colima start default`,
+`docker pull --platform linux/arm64 docker.io/library/node:22.23.3-bookworm`,
+and `docker image inspect docker.io/library/node:22.23.3-bookworm --format '{{json .RepoDigests}}'`.
+Starting Colima uses its configured four CPUs, 8 GiB RAM limit, and 30 GiB
+virtual disk; the image pull consumes network bandwidth and space in that
+disk. No custom image build is needed for the two dependency-free profiles.
+Then run `npm test` with `MORONS_TEST_RUNNER_IMAGE` set to that digest and
+inspect the live boundary test result. Only after it passes should
+`MORONS_RUNNER_IMAGE` be added to the server launch environment together with
+an approved check profile and exact source-path list. No real login or paid
+inference is needed for this boundary test.
 
 A separate authenticated TLS ingress and remote-device testing are required
 before use from other devices. The native Windows and iPhone clients remain

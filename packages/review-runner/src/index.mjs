@@ -87,7 +87,7 @@ export async function inspectSource(repository) {
  * This commits only on the isolated proposal branch. It never pushes, merges,
  * or changes the source checkout.
  */
-export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], reviewRoot = null, isolatedClone = false, baseRevision = null }) {
+export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], requiredScript = null, reviewRoot = null, isolatedClone = false, baseRevision = null }) {
   if (!validBranch(branch)) throw new Error('Invalid review branch');
   if (typeof patch !== 'string' || !patch || Buffer.byteLength(patch) > MAX_PATCH_BYTES)
     throw new Error('Invalid patch');
@@ -98,8 +98,12 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     throw new Error('Approved patch paths required');
   if (!Array.isArray(checks) || checks.length > 8 || checks.some((c) =>
     !c || typeof c.file !== 'string' || !/^[a-zA-Z0-9_.-]+$/.test(c.file) ||
+    (c.cwd !== undefined && c.cwd !== '.' && !validSourcePath(c.cwd)) ||
     !Array.isArray(c.args) || c.args.length > 24 || c.args.some((a) => typeof a !== 'string' || a.length > 256)))
     throw new Error('Invalid trusted checks');
+  if (requiredScript !== null && (!validSourcePath(requiredScript.manifest) ||
+      typeof requiredScript.script !== 'string' || requiredScript.script.length > 256))
+    throw new Error('Invalid trusted script');
 
   const root = await realpath(resolve(repository));
   const inside = await command('git', ['rev-parse', '--show-toplevel'], root);
@@ -144,6 +148,10 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     }
     const checkedBranch = await command('git', ['symbolic-ref', '--short', 'HEAD'], worktree);
     if (!checkedBranch.ok || checkedBranch.stdout.trim() !== branch) throw new Error('Review worktree branch mismatch');
+    if (requiredScript) {
+      const manifest = JSON.parse(await readFile(join(worktree, requiredScript.manifest), 'utf8'));
+      if (manifest?.scripts?.test !== requiredScript.script) throw new Error('review_check_script_changed');
+    }
     const base = await command('git', ['rev-parse', `${branch}^`], worktree);
     const finished = base.ok && base.stdout.trim() === revision.stdout.trim();
     if (finished) {
@@ -152,7 +160,10 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
       if (!proposal.ok || !diff.ok) throw new Error('Cannot recover committed proposal');
       const results = [];
       for (const check of checks) results.push({ file: check.file, args: check.args,
-        ...await command('git', ['diff', '--check', revision.stdout.trim(), branch], worktree) });
+        cwd: check.cwd ?? '.', ...await command(check.file,
+          check.file === 'git' && check.args.join('\0') === 'diff\0--check' ?
+            ['diff', '--check', revision.stdout.trim(), branch] : check.args,
+          join(worktree, check.cwd ?? '.'), 120_000) });
       return { branch, baseRevision: revision.stdout.trim(), proposalRevision: proposal.stdout.trim(),
         sourceDirty: Boolean(status.stdout.trim()), worktree, diff: diff.stdout, checks: results };
     }
@@ -175,8 +186,8 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
       throw new Error('Patch touches an unapproved path');
     const results = [];
     for (const check of checks) {
-      const result = await command(check.file, check.args, worktree, 120_000);
-      results.push({ file: check.file, args: check.args, ...result });
+      const result = await command(check.file, check.args, join(worktree, check.cwd ?? '.'), 120_000);
+      results.push({ file: check.file, args: check.args, cwd: check.cwd ?? '.', ...result });
     }
     const diff = await command('git', ['--no-pager', 'diff', '--no-ext-diff', '--binary', '--'], worktree);
     if (!diff.ok) throw new Error('Cannot produce review diff');
