@@ -11,6 +11,8 @@ use tokio::sync::mpsc;
 pub struct State {
     pub snapshot: Snapshot,
     pub status: &'static str,
+    // Display only. The backend owns model selection and provider credentials.
+    pub model: Option<String>,
     pub error: Option<&'static str>,
     pub ready: bool,
     pub pending: bool,
@@ -22,6 +24,7 @@ impl Default for State {
         Self {
             snapshot: Snapshot::empty(),
             status: "Connecting…",
+            model: None,
             error: None,
             ready: false,
             pending: false,
@@ -136,7 +139,7 @@ impl Api {
             None => request,
         }
     }
-    async fn ready(&self) -> Result<bool, &'static str> {
+    async fn ready(&self) -> Result<(bool, String), &'static str> {
         let response = self
             .request(reqwest::Method::GET, "status")
             .timeout(Duration::from_secs(15))
@@ -151,7 +154,7 @@ impl Api {
         if status.version != 1 || status.auth_mode != "bearer" || status.model.len() > 256 {
             return Err("Unsupported backend status");
         }
-        Ok(status.ready)
+        Ok((status.ready, status.model))
     }
     async fn snapshot(&self) -> Result<Snapshot, &'static str> {
         let response = self
@@ -270,8 +273,9 @@ async fn http(
         state.status = "Connecting…";
         publisher.publish(&state);
         let result = match api.ready().await {
-            Ok(ready) => {
+            Ok((ready, model)) => {
                 state.ready = ready;
+                state.model = Some(model);
                 api.snapshot().await
             }
             Err(error) => Err(error),
@@ -419,6 +423,7 @@ async fn mock(mut commands: mpsc::Receiver<Command>, publisher: Publisher) {
     let mut state = State {
         ready: true,
         status: "Demo · mock transport",
+        model: Some("Local demo".into()),
         ..State::default()
     };
     let mut words: Vec<String> = vec![];

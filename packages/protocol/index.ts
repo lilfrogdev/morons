@@ -52,6 +52,34 @@ export interface Failure {
   version: typeof VERSION;
   error: { code: string; message: string };
 }
+// The catalog is owner-scoped. A named moron's rules and preferences are durable,
+// while a session selects which moron owns a conversation on each device.
+export interface Moron {
+  id: string;
+  name: string;
+  rules: string;
+  preferences: string;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface MoronSession {
+  id: string;
+  moronId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface Handoff {
+  id: string;
+  sessionId: string;
+  fromMoronId: string;
+  toMoronId: string;
+  question: string;
+  answer: string | null;
+  status: "pending" | "answered";
+  createdAt: number;
+  updatedAt: number;
+}
 export function terminal(status: TaskStatus): boolean {
   return status === "completed" || status === "failed" || status === "stopped";
 }

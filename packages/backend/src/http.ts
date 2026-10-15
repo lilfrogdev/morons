@@ -44,7 +44,7 @@ export async function authorized(
   for (let i = 0; i < x.length; i++) different |= x[i] ^ y[i];
   return different === 0;
 }
-async function readJsonBody(
+export async function readJsonBody(
   request: Request,
   allowEmpty = false,
 ): Promise<unknown> {

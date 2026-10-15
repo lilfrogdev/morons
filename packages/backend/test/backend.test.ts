@@ -75,6 +75,90 @@ afterEach(async () => {
     await rm(dir, { recursive: true, force: true });
 });
 describe("local SQLite/Pi backend", () => {
+  it("persists named morons, device sessions, and bounded explicit handoffs without leaking transcript", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "morons-catalog-"));
+    dirs.push(dir);
+    const mf = await start(dir);
+    const create = (path: string, body: unknown) => api(mf, path, "POST", body);
+    const repo = await create("../morons", {
+      id: "repo",
+      name: "Repo",
+      rules: "Read before proposing changes.",
+      preferences: "Short answers.",
+    });
+    expect(repo.status).toBe(201);
+    expect(
+      (
+        await create("../morons", {
+          id: "repo",
+          name: "Repo",
+          rules: "Read before proposing changes.",
+          preferences: "Short answers.",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await create("../morons", {
+          id: "freddy",
+          name: "Freddy",
+          rules: "Answer budget questions.",
+          preferences: "USD.",
+        })
+      ).status,
+    ).toBe(201);
+    const sessionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const handoffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    expect(
+      (
+        await create("../sessions", {
+          id: sessionId,
+          moronId: "repo",
+          title: "Repository work",
+        })
+      ).status,
+    ).toBe(201);
+    const handoff = await create("../handoffs", {
+      id: handoffId,
+      sessionId,
+      toMoronId: "freddy",
+      question: "What is the grocery budget?",
+    });
+    expect(handoff.status).toBe(201);
+    const payload = (await handoff.json()) as any;
+    expect(payload.handoff.fromMoronId).toBe("repo");
+    expect(payload.handoff).not.toHaveProperty("transcript");
+    expect(
+      (
+        await create("../handoffs", {
+          id: handoffId,
+          sessionId,
+          toMoronId: "freddy",
+          question: "Different question",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await create(`../handoffs/${handoffId}/answer`, {
+          answer: "USD 200 this week.",
+        })
+      ).status,
+    ).toBe(200);
+    await mf.dispose();
+    runtimes.splice(runtimes.indexOf(mf), 1);
+    const restarted = await start(dir);
+    const saved = await api(restarted, `../handoffs/${handoffId}`);
+    expect(((await saved.json()) as any).handoff.answer).toBe(
+      "USD 200 this week.",
+    );
+    expect(
+      ((await (await api(restarted, "../sessions")).json()) as any).sessions,
+    ).toHaveLength(1);
+    expect(
+      ((await (await api(restarted, "../morons")).json()) as any).morons,
+    ).toHaveLength(2);
+  });
   it("authenticates every route, fails closed with absent configuration and spoofed Host", async () => {
     const mf = await start();
     expect((await api(mf, "snapshot", "GET", undefined, "wrong")).status).toBe(

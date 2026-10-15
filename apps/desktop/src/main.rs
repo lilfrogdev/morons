@@ -1,5 +1,8 @@
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-compile_error!("Morons desktop supports macOS Apple Silicon only");
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+)))]
+compile_error!("Morons desktop currently targets macOS Apple Silicon and Windows");
 
 mod input;
 use gpui::{prelude::*, *};
@@ -18,6 +21,7 @@ struct Chat {
     local_error: Option<&'static str>,
     last_ack: Option<String>,
     scroll: ScrollHandle,
+    show_model: bool,
 }
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
@@ -59,6 +63,7 @@ impl Chat {
             local_error: None,
             last_ack: None,
             scroll: ScrollHandle::new(),
+            show_model: false,
         }
     }
     fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
@@ -105,7 +110,7 @@ fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
         .tab_stop(true)
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded_sm()
         .bg(rgb(0xE8ECEF))
         .text_color(rgb(0x233342))
         .text_sm()
@@ -125,6 +130,7 @@ impl Render for Chat {
         } else {
             self.state.status
         };
+        let model = self.state.model.as_deref().unwrap_or("No model connected");
         let messages = self
             .state
             .snapshot
@@ -151,7 +157,7 @@ impl Render for Chat {
                     .flex_col()
                     .gap_2()
                     .p_4()
-                    .rounded_lg()
+                    .rounded_sm()
                     .bg(if message.role == Role::User {
                         rgb(0xECF1F5)
                     } else {
@@ -213,7 +219,11 @@ impl Render for Chat {
             .flex_col()
             .bg(rgb(0xF6F8FA))
             .text_color(rgb(0x243440))
-            .font_family(".AppleSystemUIFont")
+            .font_family(if cfg!(target_os = "windows") {
+                "Segoe UI"
+            } else {
+                ".AppleSystemUIFont"
+            })
             .on_action(cx.listener(Self::send))
             .child(
                 div()
@@ -288,46 +298,123 @@ impl Render for Chat {
                         .mx_auto()
                         .flex()
                         .flex_col()
-                        .gap_2()
-                        .child(self.input.clone())
+                        .gap_1()
+                        .when(self.show_model, |d| {
+                            d.child(
+                                div()
+                                    .id("model-menu")
+                                    .role(gpui::Role::Status)
+                                    .aria_label("Current backend model")
+                                    .self_end()
+                                    .mb_1()
+                                    .p_3()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(rgb(0xCBD5DE))
+                                    .bg(rgb(0xFFFFFF))
+                                    .text_sm()
+                                    .child(format!("◇  {model}"))
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .text_color(rgb(0x667786))
+                                            .child("Configured on the backend"),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
+                                .p_3()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(rgb(0xBAC8D3))
+                                .bg(rgb(0xFFFFFF))
                                 .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(div().text_xs().text_color(rgb(0x667786)).child(
-                                    "Enter to send · Shift-Enter for newline · Closing the app leaves backend work running",
-                                ))
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x647484))
+                                        .child("Message your Moron"),
+                                )
+                                .child(self.input.clone())
                                 .child(
                                     div()
                                         .flex()
-                                        .gap_2()
-                                        .when(self.state.pending, |d| {
-                                            d.child(button("retry", "Retry request").on_click(
-                                                cx.listener(|view, _, _, cx| {
-                                                    view.command(Command::Retry, cx)
-                                                }),
-                                            ))
-                                        })
-                                        .when_some(active, |d, id| {
-                                            d.child(button("stop", "Stop").on_click(cx.listener(
-                                                move |view, _, _, cx| {
-                                                    view.command(Command::Stop(id.clone()), cx)
-                                                },
-                                            )))
-                                        })
-                                        .when(
-                                            self.state.ready && !self.state.pending
-                                                && self.state.snapshot.active_task_id.is_none(),
-                                            |d| {
-                                                d.child(button("send", "Send").on_click(
-                                                    cx.listener(|view, _, window, cx| {
-                                                        view.send(&SendMessage, window, cx)
-                                                    }),
-                                                ))
-                                            },
+                                        .justify_between()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    button("attach", "+")
+                                                        .aria_label("Add attachment")
+                                                        .on_click(cx.listener(|view, _, _, cx| {
+                                                            view.local_error = Some(
+                                                                "Attachments need backend support",
+                                                            );
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                .child(
+                                                    button("model", "◇ Model ⌃")
+                                                        .aria_label("Current model")
+                                                        .on_click(cx.listener(|view, _, _, cx| {
+                                                            view.show_model = !view.show_model;
+                                                            cx.notify();
+                                                        })),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .gap_2()
+                                                .when(self.state.pending, |d| {
+                                                    d.child(button("retry", "Retry").on_click(
+                                                        cx.listener(|view, _, _, cx| {
+                                                            view.command(Command::Retry, cx)
+                                                        }),
+                                                    ))
+                                                })
+                                                .when_some(active, |d, id| {
+                                                    d.child(button("stop", "Stop").on_click(
+                                                        cx.listener(move |view, _, _, cx| {
+                                                            view.command(
+                                                                Command::Stop(id.clone()),
+                                                                cx,
+                                                            )
+                                                        }),
+                                                    ))
+                                                })
+                                                .when(
+                                                    self.state.ready
+                                                        && !self.state.pending
+                                                        && self
+                                                            .state
+                                                            .snapshot
+                                                            .active_task_id
+                                                            .is_none(),
+                                                    |d| {
+                                                        d.child(button("send", "Send ↑").on_click(
+                                                            cx.listener(|view, _, window, cx| {
+                                                                view.send(&SendMessage, window, cx)
+                                                            }),
+                                                        ))
+                                                    },
+                                                ),
                                         ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x667786))
+                                .child("Enter to send · Shift-Enter for newline"),
                         ),
                 ),
             )
@@ -347,6 +434,8 @@ fn main() {
             KeyBinding::new("enter", SendMessage, Some("TextInput")),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
+        #[cfg(target_os = "windows")]
+        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         let bounds = Bounds::centered(None, size(px(900.), px(720.)), cx);
         let window = cx

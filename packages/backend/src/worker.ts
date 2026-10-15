@@ -15,7 +15,11 @@ export const worker = {
         "unauthorized",
         "Valid bearer authentication is required.",
       );
-    if (!new URL(request.url).pathname.startsWith("/v1/root/"))
+    if (
+      !/^\/v1\/(root\/|morons(?:\/|$)|sessions(?:\/|$)|handoffs(?:\/|$))/.test(
+        new URL(request.url).pathname,
+      )
+    )
       return failure(404, "not_found", "Unknown endpoint.");
     const response = await env.ROOT.get(env.ROOT.idFromName("root")).fetch(
       request,

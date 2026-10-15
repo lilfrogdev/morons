@@ -23,6 +23,7 @@ import {
   stopBody,
 } from "./http";
 import { productionModels, validApiKey } from "./model";
+import { Catalog } from "./catalog";
 import type { Env } from "./worker";
 interface Row extends Record<string, SqlStorageValue> {
   id: string;
@@ -60,12 +61,14 @@ export class RootChat extends DurableObject<Env> {
   >;
   private readonly piHarness: PiHarness;
   private readonly lifecycle: Lifecycle<Env>;
+  private readonly catalog: Catalog;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS morons_tasks (
       id TEXT PRIMARY KEY, status TEXT NOT NULL, input TEXT NOT NULL, createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL, error TEXT, answer TEXT, attempts INTEGER NOT NULL DEFAULT 0,
       stopRequested INTEGER NOT NULL DEFAULT 0)`);
+    this.catalog = new Catalog(ctx.storage.sql);
     this.piHarness = new PiHarness({
       defaults: {
         model: { provider: "openai", id: env.MODEL_ID ?? "gpt-5-mini" },
@@ -380,6 +383,8 @@ export class RootChat extends DurableObject<Env> {
       );
     try {
       const path = new URL(request.url).pathname;
+      if (/^\/v1\/(morons|sessions|handoffs)(\/|$)/.test(path))
+        return await this.serial(() => this.catalog.handle(request, path));
       if (request.method === "GET" && path === "/v1/root/status")
         return json({
           version: VERSION,

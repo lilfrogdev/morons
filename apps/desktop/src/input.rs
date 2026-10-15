@@ -7,7 +7,7 @@ use gpui::{
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style,
     TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, hsla, point,
-    prelude::*, px, relative, rgba, size, white,
+    prelude::*, px, relative, rgba, size,
 };
 
 use unicode_segmentation::*;
@@ -93,7 +93,7 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
-            placeholder: "Message Moron…".into(),
+            placeholder: "Describe a change or ask about the work…".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -278,9 +278,9 @@ impl TextInput {
             let offset = self.scroll.offset();
             if y + offset.y < px(0.) {
                 self.scroll.set_offset(point(px(0.), -y));
-            } else if y + layout.line_height + offset.y > px(104.) {
+            } else if y + layout.line_height + offset.y > px(70.) {
                 self.scroll
-                    .set_offset(point(px(0.), px(104.) - y - layout.line_height));
+                    .set_offset(point(px(0.), px(70.) - y - layout.line_height));
             }
         }
     }
@@ -725,7 +725,7 @@ impl Render for TextInput {
             .flex()
             .id("composer")
             .role(gpui::Role::MultilineTextInput)
-            .aria_label("Message Moron")
+            .aria_label("Message your Moron")
             .aria_value(self.content.clone())
             .aria_placeholder(self.placeholder.clone())
             .key_context("TextInput")
@@ -754,17 +754,16 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .line_height(px(24.))
-            .text_size(px(16.))
+            .line_height(px(22.))
+            .text_size(px(14.))
             .child(
                 div()
                     .id("composer-scroll")
                     .track_scroll(&self.scroll)
-                    .h(px(112.))
+                    .h(px(76.))
                     .overflow_y_scroll()
                     .w_full()
-                    .p(px(4.))
-                    .bg(white())
+                    .p(px(2.))
                     .child(TextElement { input: cx.entity() }),
             )
     }
@@ -796,6 +795,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("home", Home, Some("TextInput")),
         KeyBinding::new("end", End, Some("TextInput")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
+    ]);
+    #[cfg(target_os = "windows")]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
+        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
+        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
     ]);
 }
 
