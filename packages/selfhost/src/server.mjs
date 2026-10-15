@@ -122,7 +122,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
-  let catalog, harness, root, optchat, repoExtension;
+  let catalog, harness, root, optchat, repoExtension, selectedModel;
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
@@ -139,7 +139,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     if (providerModelId && !providerModels?.getProvider('openai')?.getModels().some((model) => model.id === providerModelId))
       throw new Error('configured_provider_model_not_in_catalog');
-    const selectedModel = providerModelId ? { provider: 'openai', modelId: providerModelId } :
+    selectedModel = providerModelId ? { provider: 'openai', modelId: providerModelId } :
       { provider: 'morons-fixture', modelId: 'fixture' };
     harness = await Harness.open(
       await openNodeSqliteStorage(databasePath),
@@ -337,7 +337,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
       if (request.method === "GET" && path === "/v1/models")
-        return send(response, 200, { models: [providerModelId ? { provider: 'openai', id: providerModelId,
+        return send(response, 200, { selected: { provider: selectedModel.provider, id: selectedModel.modelId }, models: [providerModelId ? { provider: 'openai', id: providerModelId,
           label: `Configured Pi model: ${providerModelId} (sign-in required)`, available: true } :
           { provider: 'morons-fixture', id: 'fixture', label: 'Offline fixture', available: true }] });
       if (request.method === "GET" && path === "/v1/morons")

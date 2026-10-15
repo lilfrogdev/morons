@@ -53,7 +53,9 @@ test("named morons own distinct durable sessions and preserve rules", async () =
   };
   try {
     server = await openFixtureServer({ databasePath, ownerToken });
-    assert.equal((await call("GET", "/v1/models")).models[0].id, "fixture");
+    const modelCatalog = await call("GET", "/v1/models");
+    assert.equal(modelCatalog.models[0].id, "fixture");
+    assert.deepEqual(modelCatalog.selected, { provider: 'morons-fixture', id: 'fixture' });
     assert.equal((await call("POST", "/v1/morons", { id: "repo", name: "Repo", rules: "Inspect source", preferences: "Concise" })).status, 201);
     assert.equal((await call("POST", "/v1/morons", { id: "fitness", name: "Fitness", rules: "Stay active", preferences: "" })).status, 201);
     const repoSession = await call("POST", "/v1/morons/repo/sessions", { id: "repo-main" });

@@ -15,6 +15,8 @@ pub struct State {
     pub status: &'static str,
     // Display only. The backend owns model selection and provider credentials.
     pub model: Option<String>,
+    pub models: Vec<ModelOption>,
+    pub selected_model: Option<(String, String)>,
     pub named_morons: Vec<(String, String)>,
     pub selected_moron: Option<String>,
     pub review: Option<NamedReview>,
@@ -36,6 +38,8 @@ impl Default for State {
             snapshot: Snapshot::empty(),
             status: "Connecting…",
             model: None,
+            models: vec![],
+            selected_model: None,
             named_morons: vec![],
             selected_moron: None,
             review: None,
@@ -518,16 +522,22 @@ fn valid_named_id(value: &str) -> bool {
             .iter()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
-#[derive(serde::Deserialize)]
-struct NamedModel {
-    provider: String,
-    id: String,
-    label: String,
-    available: bool,
+#[derive(Clone, serde::Deserialize)]
+pub struct ModelOption {
+    pub provider: String,
+    pub id: String,
+    pub label: String,
+    pub available: bool,
 }
 #[derive(serde::Deserialize)]
 struct NamedModels {
-    models: Vec<NamedModel>,
+    models: Vec<ModelOption>,
+    selected: Option<SelectedModel>,
+}
+#[derive(serde::Deserialize)]
+struct SelectedModel {
+    provider: String,
+    id: String,
 }
 
 struct NamedApi {
@@ -710,14 +720,18 @@ async fn named_http(
             if models.models.len() > 128 {
                 return Err("Model catalog exceeds client limit");
             }
-            let model = models
-                .models
-                .iter()
-                .find(|m| m.available)
-                .ok_or("No model available")?;
-            if model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128 {
+            if models.models.iter().any(|model| model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128) {
                 return Err("Invalid model catalog");
             }
+            let model_selection = models.selected.map(|value| (value.provider, value.id)).or_else(|| {
+                let mut available = models.models.iter().filter(|model| model.available);
+                let only = available.next()?;
+                available.next().is_none().then(|| (only.provider.clone(), only.id.clone()))
+            }).ok_or("Ambiguous selected model")?;
+            let model = models.models.iter().find(|model| model.available &&
+                model.provider == model_selection.0 && model.id == model_selection.1)
+                .ok_or("No selected model available")?;
+            let selected_model = model.label.clone();
             let mut catalog: NamedMorons = api.get("v1/morons").await?;
             if catalog.morons.is_empty() {
                 let _ = api.post("v1/morons", serde_json::json!({
@@ -763,12 +777,14 @@ async fn named_http(
             let documents = lease.as_ref().and_then(|lease| lease.documents(&me.account.id, &session, epoch, now))
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
-            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
+            Ok::<_, &'static str>((selected_model, model_selection, models.models, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
         }
         .await;
         let session = match refreshed {
-            Ok((model, snapshot, session, catalog, review, provider, documents, expires_at)) => {
+            Ok((model, selected_model, models, snapshot, session, catalog, review, provider, documents, expires_at)) => {
                 state.model = Some(model);
+                state.models = models;
+                state.selected_model = Some(selected_model);
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
@@ -839,6 +855,10 @@ async fn named_http(
                         state.snapshot = Snapshot::empty();
                         state.review = None;
                         state.named_morons.clear();
+                        state.selected_moron = None;
+                        state.model = None;
+                        state.models.clear();
+                        state.selected_model = None;
                         state.ready = false;
                         state.account_login = true;
                         state.provider_url = None;

@@ -5,13 +5,21 @@
 compile_error!("Morons desktop currently targets macOS Apple Silicon and Windows");
 
 mod input;
+mod drafts;
 use gpui::{prelude::*, *};
 use morons_desktop::{
     model::{Role, TaskStatus},
     transport::{Command, Config, State, Worker},
 };
 
-actions!(morons, [SendMessage, Quit]);
+const ICON_PLUS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"##;
+const ICON_SEND: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>"##;
+const ICON_MIC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5zM5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>"##;
+const ICON_HOME: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg>"##;
+const ICON_FOLDER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/></svg>"##;
+const ICON_AGENT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01M9 17h6"/></svg>"##;
+
+actions!(morons, [SendMessage, Quit, FocusNext, FocusPrevious]);
 struct Chat {
     input: Entity<input::TextInput>,
     login_name: Entity<input::TextInput>,
@@ -26,10 +34,13 @@ struct Chat {
     last_ack: Option<String>,
     scroll: ScrollHandle,
     show_model: bool,
+    drafts: drafts::Drafts,
+    _input_subscription: Subscription,
 }
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
         let input = cx.new(input::TextInput::new);
+        let input_subscription = cx.observe(&input, |_, _, cx| cx.notify());
         let login_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("account-name"); field.set_placeholder("Account name"); field });
         let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
         let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("First-account setup code"); field });
@@ -40,6 +51,7 @@ impl Chat {
                 if view
                     .update(cx, |view, cx| {
                         if let Some((id, text)) = &state.accepted
+                            && view.state.selected_moron == state.selected_moron
                             && view.last_ack.as_ref() != Some(id)
                         {
                             view.last_ack = Some(id.clone());
@@ -62,6 +74,13 @@ impl Chat {
                             }
                             view.last_ack = None;
                             view.local_error = None;
+                            view.drafts.clear();
+                        } else if view.state.selected_moron != state.selected_moron {
+                            let current = view.input.read(cx).text().to_owned();
+                            let restored = view.drafts.switch(state.selected_moron.as_deref(), &current);
+                            view.input.update(cx, |input, cx| { input.set_text(restored); cx.notify(); });
+                            view.last_ack = None;
+                            view.show_model = false;
                         }
                         view.state = state;
                         if follow {
@@ -88,6 +107,8 @@ impl Chat {
             last_ack: None,
             scroll: ScrollHandle::new(),
             show_model: false,
+            drafts: drafts::Drafts::default(),
+            _input_subscription: input_subscription,
         }
     }
     fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
@@ -143,6 +164,80 @@ impl Chat {
         self.command(Command::ProviderCallback(url), cx);
         self.provider_callback.update(cx, |field, cx| { field.reset(); cx.notify(); });
     }
+    fn sidebar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.state.selected_moron.as_deref();
+        div()
+            .id("moron-sidebar")
+            .role(gpui::Role::Navigation)
+            .aria_label("Morons sidebar")
+            .h_full()
+            .w(px(if narrow { 176. } else { 272. }))
+            .flex_shrink_0()
+            .flex()
+            .bg(rgb(0xF7F7F8))
+            .border_r_1()
+            .border_color(rgb(0xE3E5E8))
+            .when(!narrow, |d| d.child(
+                div().w(px(52.)).h_full().flex_shrink_0()
+                    .border_r_1().border_color(rgb(0xE3E5E8))
+                    .flex().flex_col().items_center().pt_4()
+                    .child(div().w(px(38.)).h(px(38.)).rounded(px(6.))
+                        .bg(rgb(0xECEEF1)).flex().items_center().justify_center()
+                        .child(svg().data(ICON_HOME).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+            ))
+            .child(
+                div().flex_1().min_w_0().h_full().flex().flex_col()
+                    .px_3().pt_5().pb_3()
+                    .child(div().px_2().mb_7().text_size(px(17.))
+                        .font_weight(FontWeight::BOLD).child("Morons"))
+                    .child(div().px_2().mb_2().text_size(px(12.))
+                        .font_weight(FontWeight::BOLD).text_color(rgb(0x626772))
+                        .child("Your Morons"))
+                    .child(div().id("moron-list").role(gpui::Role::List)
+                        .aria_label("Named Morons")
+                        .flex_1().min_h_0().overflow_y_scroll()
+                        .flex().flex_col().gap_1()
+                        .when(self.state.named_morons.is_empty(), |d| d.child(
+                            div().px_2().py_2().text_size(px(12.))
+                                .text_color(rgb(0x626772))
+                                .child(if self.state.account_login {
+                                    "Sign in to see your Morons"
+                                } else { "No named Morons yet" })
+                        ))
+                        .children(self.state.named_morons.iter().map(|(id, name)| {
+                            let selected = active == Some(id.as_str());
+                            let chosen = id.clone();
+                            let key_choice = id.clone();
+                            div().id(SharedString::from(format!("sidebar-moron-{id}")))
+                                .role(gpui::Role::Button)
+                                .aria_label(SharedString::from(format!("Open {name}")))
+                                .aria_selected(selected)
+                                .focusable().tab_stop(true)
+                                .w_full().min_w_0().h(px(36.)).px_2()
+                                .rounded(px(6.)).flex().items_center().gap_2()
+                                .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
+                                .hover(|d| d.bg(rgb(0xECEEF1)))
+                                .cursor_pointer().text_size(px(14.))
+                                .child(div().w(px(20.)).flex_shrink_0()
+                                    .child(svg().data(if id == "repo" { ICON_FOLDER } else { ICON_AGENT })
+                                        .w(px(18.)).h(px(18.)).text_color(rgb(0x626772))))
+                                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.command(Command::SelectMoron(chosen.clone()), cx)
+                                }))
+                                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.command(Command::SelectMoron(key_choice.clone()), cx);
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                        })))
+                    .child(div().px_2().pt_3().text_size(px(11.))
+                        .text_color(rgb(0x626772))
+                        .child(self.state.status))
+            )
+    }
 }
 fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
     div()
@@ -162,7 +257,8 @@ fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
         .child(label)
 }
 impl Render for Chat {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = window.bounds().size.width < px(760.);
         let active = self.state.snapshot.active_task_id.clone();
         let error = self
             .local_error
@@ -174,6 +270,10 @@ impl Render for Chat {
             self.state.status
         };
         let model = self.state.model.as_deref().unwrap_or("No model connected");
+        let model_display = if narrow && model == "Offline fixture" { "Offline" } else { model };
+        let model_options = self.state.models.clone();
+        let selected_model = self.state.selected_model.clone();
+        let draft_ready = !self.input.read(cx).text().trim().is_empty();
         let review = self.state.review.clone();
         let provider_url = self.state.provider_url.clone();
         let provider_state = self.state.provider_state.clone();
@@ -265,15 +365,29 @@ impl Render for Chat {
             .aria_label("Morons chat")
             .size_full()
             .flex()
-            .flex_col()
-            .bg(rgb(0xF6F8FA))
-            .text_color(rgb(0x243440))
+            .bg(rgb(0xFFFFFF))
+            .text_color(rgb(0x24262B))
             .font_family(if cfg!(target_os = "windows") {
                 "Segoe UI"
             } else {
                 ".AppleSystemUIFont"
             })
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
+            .on_click(cx.listener(|view, _, _, cx| {
+                if view.show_model { view.show_model = false; cx.notify(); }
+            }))
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                if view.show_model && event.keystroke.key == "escape" {
+                    view.show_model = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .child(self.sidebar(narrow, cx))
+            .child(div().id("main-pane").flex_1().min_w_0().h_full()
+                .flex().flex_col().bg(rgb(0xFFFFFF))
             .child(
                 div()
                     .flex()
@@ -319,42 +433,6 @@ impl Render for Chat {
                     .child(self.bootstrap_token.clone())
                     .child(button("account-create", "Create first account").on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
             ))
-            .when(!self.state.named_morons.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("named-morons")
-                        .role(gpui::Role::List)
-                        .aria_label("Named Morons")
-                        .flex()
-                        .gap_2()
-                        .px_6()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(rgb(0xE0E6EC))
-                        .children(self.state.named_morons.iter().map(|(id, name)| {
-                            let chosen = id.clone();
-                            let selected = self.state.selected_moron.as_deref() == Some(id);
-                            div()
-                                .id(SharedString::from(format!("moron-{id}")))
-                                .role(gpui::Role::Button)
-                                .aria_label(SharedString::from(format!("Open {name}")))
-                                .px_3()
-                                .py_2()
-                                .rounded_sm()
-                                .bg(if selected {
-                                    rgb(0xD9E7EF)
-                                } else {
-                                    rgb(0xE8ECEF)
-                                })
-                                .cursor_pointer()
-                                .text_sm()
-                                .child(name.clone())
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.command(Command::SelectMoron(chosen.clone()), cx)
-                                }))
-                        })),
-                )
-            })
             .when(self.state.selected_moron.is_some(), |d| d.child(
                 div().id("provider-panel").role(gpui::Role::Region)
                     .aria_label("ChatGPT provider connection")
@@ -457,133 +535,136 @@ impl Render for Chat {
                 )
             })
             .when(!self.state.account_login, |d| d.child(
-                div().px_6().pb_5().pt_2().child(
+                div().px(px(16.)).pb(px(16.)).pt(px(6.)).child(
                     div()
                         .w_full()
-                        .max_w(px(780.))
-                        .mx_auto()
+                        .min_h(px(123.))
+                        .relative()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .pt(px(14.)).px(px(14.)).pb(px(10.))
+                        .rounded(px(8.))
+                        .border_1().border_color(rgb(0xE3E5E8))
+                        .bg(rgb(0xFFFFFF))
+                        .shadow(vec![
+                            BoxShadow::new(px(0.), px(3.), hsla(0., 0., 0., 0.07)).blur_radius(px(14.)),
+                            BoxShadow::new(px(0.), px(1.), hsla(0., 0., 0., 0.03)).blur_radius(px(3.)),
+                        ])
+                        .child(self.input.clone())
+                        .child(div().flex_1().min_h(px(10.)))
+                        .child(div().flex().items_center().gap(px(8.))
+                            .child(div().w(px(100.)).h(px(32.)).px(px(2.)).rounded(px(8.))
+                                .border_1().border_color(rgb(0xE3E5E8))
+                                .flex().items_center()
+                                .child(div().w_full().px_2().py_1().rounded(px(5.))
+                                    .bg(rgb(0xFFFFFF)).shadow_xs().text_size(px(12.))
+                                    .child("Moron")))
+                            .child(div().id("attach-unavailable")
+                                .aria_label("Attachments unavailable for this connection")
+                                .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
+                                .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                            .child(div().id("model").role(gpui::Role::Button)
+                                .aria_label("Current backend model details; selection unavailable")
+                                .aria_expanded(self.show_model)
+                                .focusable().tab_stop(true)
+                                .min_w_0().max_w(px(190.)).flex_1().h(px(28.)).px_2()
+                                .rounded(px(6.)).flex().items_center().gap_1()
+                                .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
+                                .text_size(px(12.))
+                                .child(svg().data(ICON_AGENT).w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
+                                .child(div().min_w_0().truncate().child(model_display.to_owned()))
+                                .child("⌄")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_model = !view.show_model;
+                                    cx.stop_propagation(); cx.notify();
+                                }))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.show_model = !view.show_model;
+                                        cx.stop_propagation(); cx.notify();
+                                    }
+                                })))
+                            .child(div().flex_1())
+                            .when(self.state.pending, |d| d.child(button("retry", "Retry")
+                                .on_click(cx.listener(|view, _, _, cx| view.command(Command::Retry, cx)))))
+                            .when_some(active.clone(), |d, id| d.child(button("stop", "Stop")
+                                .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
+                            .child(div().id("mic-unavailable")
+                                .aria_label("Dictation unavailable")
+                                .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
+                                .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                            .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
+                                div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
+                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
+                                    .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
+                                    .flex().items_center().justify_center()
+                                    .child(svg().data(ICON_SEND).w(px(16.)).h(px(16.)).text_color(rgb(0xFFFFFF)))
+                                    .when(draft_ready, |d| d.role(gpui::Role::Button)
+                                        .focusable().tab_stop(true).cursor_pointer()
+                                        .on_click(cx.listener(|view, _, window, cx| view.send(&SendMessage, window, cx)))
+                                        .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                                            if !event.keystroke.modifiers.modified() &&
+                                                matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                view.send(&SendMessage, window, cx);
+                                                cx.stop_propagation();
+                                            }
+                                        })))
+                            )))
                         .when(self.show_model, |d| {
                             d.child(
                                 div()
                                     .id("model-menu")
-                                    .role(gpui::Role::Status)
-                                    .aria_label("Current backend model")
-                                    .self_end()
-                                    .mb_1()
-                                    .p_3()
-                                    .rounded_sm()
+                                    .role(gpui::Role::Region)
+                                    .aria_label("Backend model details; selection managed by server")
+                                    .absolute().bottom(px(56.)).left(px(if narrow { 0. } else { 161. }))
+                                    .w(px(362.)).max_w_full().h(px(348.))
+                                    .rounded(px(8.))
                                     .border_1()
-                                    .border_color(rgb(0xCBD5DE))
+                                    .border_color(rgb(0xE3E5E8))
                                     .bg(rgb(0xFFFFFF))
-                                    .text_sm()
-                                    .child(format!("◇  {model}"))
-                                    .child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .text_color(rgb(0x667786))
-                                            .child("Configured on the backend"),
-                                    ),
+                                    .shadow(vec![BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., 0.12)).blur_radius(px(28.))])
+                                    .text_size(px(12.))
+                                    .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                                    .flex()
+                                    .child(div().w(px(44.)).h_full().flex_shrink_0()
+                                        .border_r_1().border_color(rgb(0xE3E5E8))
+                                        .flex().flex_col().items_center().pt_3().gap_3()
+                                        .child(div().w(px(24.)).h(px(24.))
+                                            .flex().items_center().justify_center()
+                                            .child(svg().data(ICON_AGENT).w(px(18.)).h(px(18.)).text_color(rgb(0x626772))))
+                                        .child(div().w(px(32.)).h(px(32.)).rounded(px(6.))
+                                            .bg(rgb(0xECEEF1)).flex().items_center().justify_center()
+                                            .child(svg().data(ICON_AGENT).w(px(20.)).h(px(20.)).text_color(rgb(0x626772)))))
+                                    .child(div().flex_1().min_w_0().p(px(12.)).flex().flex_col()
+                                        .child(div().h(px(36.)).px_2().border_b_1()
+                                            .border_color(rgb(0xE3E5E8)).flex().items_center().gap_2()
+                                            .text_color(rgb(0x626772))
+                                            .child("Models on this server"))
+                                        .child(div().id("model-catalog").role(gpui::Role::List)
+                                            .aria_label("Server model catalog")
+                                            .flex_1().min_h_0().overflow_y_scroll().pt_2()
+                                            .when(model_options.is_empty(), |d| d.child(
+                                                div().px_2().py_2().text_color(rgb(0x626772))
+                                                    .child("No model catalog available")))
+                                            .children(model_options.iter().map(|option| {
+                                                let selected = selected_model.as_ref().is_some_and(|(provider, id)|
+                                                    provider == &option.provider && id == &option.id);
+                                                div().px_2().py_2().rounded(px(6.))
+                                                    .bg(if selected { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
+                                                    .flex().items_center().gap_2()
+                                                    .child(div().min_w_0().flex_1().flex().flex_col()
+                                                        .child(div().truncate().child(option.label.clone()))
+                                                        .child(div().text_size(px(11.)).text_color(rgb(0x626772))
+                                                            .child(option.provider.clone())))
+                                                    .when(selected, |d| d.child("✓"))
+                                            })))
+                                        .child(div().pt_2().border_t_1().border_color(rgb(0xE3E5E8))
+                                            .text_color(rgb(0x626772)).child("Model selection is set by your server."))),
                             )
                         })
-                        .child(
-                            div()
-                                .p_3()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(rgb(0xBAC8D3))
-                                .bg(rgb(0xFFFFFF))
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(rgb(0x647484))
-                                        .child("Message your Moron"),
-                                )
-                                .child(self.input.clone())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .justify_between()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(
-                                                    button("attach", "+")
-                                                        .aria_label("Add attachment")
-                                                        .on_click(cx.listener(|view, _, _, cx| {
-                                                            view.local_error = Some(
-                                                                "Attachments need backend support",
-                                                            );
-                                                            cx.notify();
-                                                        })),
-                                                )
-                                                .child(
-                                                    button("model", "◇ Model ⌃")
-                                                        .aria_label("Current model")
-                                                        .on_click(cx.listener(|view, _, _, cx| {
-                                                            view.show_model = !view.show_model;
-                                                            cx.notify();
-                                                        })),
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .gap_2()
-                                                .when(self.state.pending, |d| {
-                                                    d.child(button("retry", "Retry").on_click(
-                                                        cx.listener(|view, _, _, cx| {
-                                                            view.command(Command::Retry, cx)
-                                                        }),
-                                                    ))
-                                                })
-                                                .when_some(active, |d, id| {
-                                                    d.child(button("stop", "Stop").on_click(
-                                                        cx.listener(move |view, _, _, cx| {
-                                                            view.command(
-                                                                Command::Stop(id.clone()),
-                                                                cx,
-                                                            )
-                                                        }),
-                                                    ))
-                                                })
-                                                .when(
-                                                    self.state.ready
-                                                        && !self.state.pending
-                                                        && self
-                                                            .state
-                                                            .snapshot
-                                                            .active_task_id
-                                                            .is_none(),
-                                                    |d| {
-                                                        d.child(button("send", "Send ↑").on_click(
-                                                            cx.listener(|view, _, window, cx| {
-                                                                view.send(&SendMessage, window, cx)
-                                                            }),
-                                                        ))
-                                                    },
-                                                ),
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(0x667786))
-                                .child("Enter to send · Shift-Enter for newline"),
-                        ),
                 ),
-            ))
+            )))
     }
 }
 fn main() {
@@ -595,10 +676,13 @@ fn main() {
         }
     };
     let login_initial = matches!(config, Config::NamedLogin { .. });
+    let preview = std::env::var_os("MORONS_UI_PREVIEW").is_some();
     gpui_platform::application().run(move |cx: &mut App| {
         input::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("enter", SendMessage, Some("TextInput")),
+            KeyBinding::new("tab", FocusNext, None),
+            KeyBinding::new("shift-tab", FocusPrevious, None),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         #[cfg(target_os = "windows")]
@@ -611,7 +695,7 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(640.), px(480.))),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Morons".into()),
+                        title: Some(if preview { "Morons UI Preview".into() } else { "Morons".into() }),
                         ..Default::default()
                     }),
                     ..Default::default()

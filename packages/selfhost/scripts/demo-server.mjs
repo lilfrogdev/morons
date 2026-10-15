@@ -31,6 +31,11 @@ await call('POST', '/v1/accounts/bootstrap', { name: 'demo', password: 'disposab
   { 'X-Morons-Bootstrap': bootstrapToken });
 const { token } = await call('POST', '/v1/session/login', { name: 'demo', password: 'disposable-demo-password-123' });
 await call('POST', '/v1/morons', { id: 'repo', name: 'Repository', rules: 'Read committed source and present changes for review.', preferences: 'Be concise.' }, token);
+for (const moron of [
+  { id: 'fitness', name: 'Fitness', rules: 'Help with fitness goals.', preferences: 'Be practical.' },
+  { id: 'freddy', name: 'Freddy · Finance', rules: 'Help with a grocery budget.', preferences: 'Be concise.' },
+  { id: 'goals', name: 'Ongoing goals', rules: 'Track open goals.', preferences: 'Remember decisions.' },
+]) await call('POST', '/v1/morons', moron, token);
 await call('POST', '/v1/morons/repo/sessions', { id: 'repo' }, token);
 await call('POST', '/v1/sessions/repo/chat', { requestId: '11111111-1111-4111-8111-111111111111', text: '/source README.md' }, token);
 const patch = 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n';

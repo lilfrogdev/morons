@@ -6,7 +6,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, SharedString, Style,
-    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, hsla, point,
+    TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point,
     prelude::*, px, relative, rgba, size,
 };
 
@@ -95,7 +95,7 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
-            placeholder: "Describe a change or ask about the work…".into(),
+            placeholder: "Message your Moron…".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -120,6 +120,11 @@ impl TextInput {
     pub fn set_id(&mut self, value: &'static str) { self.id = value; }
     pub fn text(&self) -> &str {
         &self.content
+    }
+    pub fn set_text(&mut self, text: String) {
+        self.reset();
+        self.selected_range = text.len()..text.len();
+        self.content = text.into();
     }
     pub fn composing(&self) -> bool {
         self.marked_range.is_some()
@@ -589,7 +594,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+            (input.placeholder.clone(), gpui::rgb(0x626772).into())
         } else if input.secret {
             ("*".repeat(content.len()).into(), style.color)
         } else {
@@ -772,16 +777,18 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .line_height(px(22.))
+            .line_height(px(if self.id == "composer" { 24. } else { 22. }))
             .text_size(px(14.))
             .child(
                 div()
                     .id(SharedString::from(format!("{}-scroll", self.id)))
                     .track_scroll(&self.scroll)
-                    .h(px(if self.id == "composer" { 76. } else { 34. }))
+                    .h(if self.id == "composer" {
+                        self.content_height.max(px(24.)).min(px(144.))
+                    } else { px(34.) })
                     .overflow_y_scroll()
                     .w_full()
-                    .p(px(2.))
+                    .p(px(if self.id == "composer" { 0. } else { 2. }))
                     .child(TextElement { input: cx.entity() }),
             )
     }
