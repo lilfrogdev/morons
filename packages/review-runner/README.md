@@ -19,6 +19,9 @@ the repository, branch, storage root, and check commands are trusted inputs.
 
 The macOS worker runs separately without provider credentials and under a
 no-network `sandbox-exec` profile. This profile does not confine filesystem
-reads. A stronger platform-specific runner boundary is needed before enabling
-untrusted repositories or arbitrary check commands. The connected server uses
-only a fixed `git diff --check` check.
+reads; only the offline fixture uses it. A real-model repository session
+requires the separately verified container runner described in
+`packages/selfhost/README.md`. In that mode the worker clones committed source
+under the account's review directory so the source checkout and its Git
+metadata remain read-only. The connected server uses only a fixed
+`git diff --check` check.

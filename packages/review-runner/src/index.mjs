@@ -18,12 +18,16 @@ function runnerEnv() {
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
     GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_TEMPLATE_DIR: '/dev/null',
+    GIT_LFS_SKIP_SMUDGE: '1',
   };
 }
 
 async function command(file, args, cwd, timeout = 30_000) {
   try {
-    const { stdout, stderr } = await exec(file, args, {
+    const safeArgs = file === 'git' ? ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args] : args;
+    const { stdout, stderr } = await exec(file, safeArgs, {
       cwd,
       env: runnerEnv(),
       timeout,
@@ -68,16 +72,27 @@ export async function readSourceAtHead(repository, relativePath, allowedPaths) {
   return { path: relativePath, text: source.stdout };
 }
 
+export async function inspectSource(repository) {
+  const root = await realpath(resolve(repository));
+  const inside = await command('git', ['rev-parse', '--show-toplevel'], root);
+  if (!inside.ok || inside.stdout.trim() !== root) throw new Error('Repository root required');
+  const head = await command('git', ['rev-parse', 'HEAD'], root);
+  if (!head.ok || !/^[0-9a-f]{40}$/.test(head.stdout.trim())) throw new Error('Cannot resolve base revision');
+  return { baseRevision: head.stdout.trim() };
+}
+
 /**
  * Trusted-caller boundary. The model may supply a patch, but branch name,
  * repository, and check commands must come from an operator-approved plan.
  * This commits only on the isolated proposal branch. It never pushes, merges,
  * or changes the source checkout.
  */
-export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], reviewRoot = null }) {
+export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], reviewRoot = null, isolatedClone = false, baseRevision = null }) {
   if (!validBranch(branch)) throw new Error('Invalid review branch');
   if (typeof patch !== 'string' || !patch || Buffer.byteLength(patch) > MAX_PATCH_BYTES)
     throw new Error('Invalid patch');
+  if (baseRevision !== null && (typeof baseRevision !== 'string' || !/^[0-9a-f]{40}$/.test(baseRevision)))
+    throw new Error('Invalid base revision');
   if (!Array.isArray(allowedPaths) || allowedPaths.length === 0 ||
       allowedPaths.length > 128 || allowedPaths.some((path) => !validSourcePath(path)))
     throw new Error('Approved patch paths required');
@@ -91,8 +106,10 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
   if (!inside.ok || inside.stdout.trim() !== root) throw new Error('Repository root required');
   const status = await command('git', ['status', '--porcelain=v1'], root);
   if (!status.ok) throw new Error('Cannot inspect source checkout');
-  const revision = await command('git', ['rev-parse', 'HEAD'], root);
-  if (!revision.ok) throw new Error('Cannot resolve base revision');
+  const revision = baseRevision ? { ok: true, stdout: baseRevision } : await command('git', ['rev-parse', 'HEAD'], root);
+  if (!revision.ok || !/^[0-9a-f]{40}$/.test(revision.stdout.trim())) throw new Error('Cannot resolve base revision');
+  const baseType = await command('git', ['cat-file', '-t', revision.stdout.trim()], root);
+  if (!baseType.ok || baseType.stdout.trim() !== 'commit') throw new Error('Pinned base commit unavailable');
 
   if (reviewRoot !== null && (typeof reviewRoot !== 'string' || !reviewRoot.startsWith('/')))
     throw new Error('Invalid review storage');
@@ -111,9 +128,19 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     if (previous === null) await writeFile(patchPath, patch, { mode: 0o600, flag: 'wx' });
     const present = await stat(worktree).then((item) => item.isDirectory()).catch(() => false);
     if (!present) {
-      const add = await command('git', ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, worktree, revision.stdout.trim()], root);
-      if (!add.ok) throw new Error(`Cannot create isolated branch: ${add.stderr}`);
-      created = true;
+      if (isolatedClone) {
+        // A container sees the source read-only. Clone into its account-private
+        // output mount so Git never writes source .git/worktrees or refs.
+        const clone = await command('git', ['clone', '--no-local', '--no-checkout', '--quiet', root, worktree], directory, 120_000);
+        if (!clone.ok) throw new Error(`Cannot clone committed source: ${clone.stderr}`);
+        created = true;
+        const branchCreate = await command('git', ['checkout', '-b', branch, revision.stdout.trim()], worktree);
+        if (!branchCreate.ok) throw new Error(`Cannot create isolated branch: ${branchCreate.stderr}`);
+      } else {
+        const add = await command('git', ['worktree', 'add', '-b', branch, worktree, revision.stdout.trim()], root);
+        if (!add.ok) throw new Error(`Cannot create isolated branch: ${add.stderr}`);
+        created = true;
+      }
     }
     const checkedBranch = await command('git', ['symbolic-ref', '--short', 'HEAD'], worktree);
     if (!checkedBranch.ok || checkedBranch.stdout.trim() !== branch) throw new Error('Review worktree branch mismatch');
@@ -164,7 +191,7 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
       sourceDirty: Boolean(status.stdout.trim()), worktree, diff: diff.stdout, checks: results };
   } catch (error) {
     if (!reviewRoot) {
-      if (created) await command('git', ['worktree', 'remove', '--force', worktree], root);
+      if (created && !isolatedClone) await command('git', ['worktree', 'remove', '--force', worktree], root);
       await rm(directory, { recursive: true, force: true });
     }
     throw error;

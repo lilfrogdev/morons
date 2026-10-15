@@ -64,6 +64,29 @@ server checks file ownership and permissions, derives a separate key per
 account, and stores Pi credentials encrypted in each account directory. The
 key's bytes do not appear in argv, logs, or the GPUI client.
 
+For a human Mac tryout of the login handoff while keeping chat offline, stop
+the first server, then start it with a new private key file:
+
+```sh
+umask 077
+openssl rand 32 > "$HOME/.config/morons/provider-key"
+MORONS_DATA_DIR="$HOME/.local/share/morons" \
+MORONS_BOOTSTRAP_TOKEN_FILE="$HOME/.config/morons/bootstrap" \
+MORONS_PROVIDER_KEY_FILE="$HOME/.config/morons/provider-key" \
+npm run start:account
+```
+
+Launch GPUI with the same `MORONS_BACKEND_URL` command above. Connect in the
+app only when ready to complete the provider's browser flow. The app does not
+place the account password, bootstrap code, provider key, callback code, or
+device token in command-line arguments. It does not persist the device token;
+the app asks for account sign-in on restart. The account database stores
+scrypt password hashes and SHA-256 device-token hashes. If login is completed,
+Pi's provider credential is stored in the account-private
+`accounts/<account-id>/provider.credentials` file, encrypted with AES-256-GCM
+using a key derived from the external provider-key file; the latter is never
+copied into the account directory.
+
 Adding the key exposes login controls but keeps chat on the offline fixture.
 To select a real Pi model, also set `MORONS_PROVIDER_MODEL_ID` to a model ID in
 Pi's installed OpenAI catalog. This operator choice may still fail if the
@@ -78,10 +101,45 @@ URL into GPUI. Callback codes and provider tokens are never returned by the
 status route. The provider can be cancelled or disconnected from GPUI.
 Provider status is reconciled from local credential metadata on restart; it
 does not verify remote token validity. With a real provider selected,
-repository tools are disabled until a stronger filesystem/process boundary
-exists; ordinary chat can use the selected model after sign-in. A hard
+repository tools require the container runner described below; ordinary chat
+can use the selected model after sign-in. A hard
 crash can leave the encrypted credential-store owner lock. Verify the former
 process is stopped before manually clearing that lock.
+
+## Real-model repository runner
+
+The model receives repository read and proposal tools only when the operator
+sets `MORONS_REPOSITORY`, `MORONS_SOURCE_PATHS`, and `MORONS_RUNNER_IMAGE`.
+The image must already be installed locally, be named by an immutable
+`@sha256:` digest, and contain Node 22+ and Git. The server never pulls an
+image or starts a container engine. At startup it probes the engine and image,
+then checks file, symlink, environment, network, subprocess escape, and
+approval-write boundaries in a disposable container. Startup fails if a probe
+fails. A real model without this verified runner has no repository tools.
+
+The worker container mounts the source repository read-only, its own code
+read-only, and the account's review directory writable. It has no provider
+credentials, account database, or Docker socket; network is disabled. It
+clones committed source into the review directory, creates a proposal branch
+there, applies only allowlisted paths, runs the fixed `git diff --check`, and
+returns a diff for human review. It cannot merge, push, apply to the running
+app, or change review decisions. The operator must review the image and the
+source-path allowlist; an approved path may itself contain private source.
+The server rejects a private data directory nested inside the source (or the
+reverse), including symlink aliases. The CLI also rejects bootstrap and
+provider-key files located in the source. For now the source must have an embedded
+`.git` directory; linked worktrees are rejected because their Git metadata
+points outside the read-only source mount. Review intents pin the source base
+commit so recovery still works if the source branch advances.
+
+On this Mac, Docker and Colima are installed but the Colima profiles are
+stopped, and no runner image was inspected. To complete validation, the user
+must authorize starting the existing Colima profile and supplying a reviewed,
+preloaded Node 22+ and Git image digest. Then run `npm test` with
+`MORONS_TEST_RUNNER_IMAGE` set to that digest and inspect the live boundary
+test result. Only after it passes should `MORONS_RUNNER_IMAGE` be added to the
+server launch environment. No real login or paid inference is needed for this
+boundary test.
 
 A separate authenticated TLS ingress and remote-device testing are required
 before use from other devices. The native Windows and iPhone clients remain

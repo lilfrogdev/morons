@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, realpath } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -12,6 +12,7 @@ import { openNodeOptChat } from "@morons/optchat/node";
 import { moronMemoryAccess, moronMemorySource } from "@morons/optchat/morons";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
+import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
@@ -110,6 +111,12 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
+  if (repositoryPlan?.runnerImage) {
+    const sourceRoot = await realpath(repositoryPlan.repository);
+    const storagePath = resolve(dirname(databasePath));
+    if (sourceRoot === storagePath || sourceRoot.startsWith(`${storagePath}${sep}`) ||
+        storagePath.startsWith(`${sourceRoot}${sep}`)) throw new Error('runner_private_path_overlaps_source');
+  }
   // Pi Durable's Node adapter has no cross-process lock. One server process must own this file.
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
@@ -119,7 +126,12 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
     const registry = createRegistry();
-    repoExtension = providerModelId ? null : repoTools(catalog, repositoryPlan);
+    if (repositoryPlan?.runnerImage) {
+      await assertRunnerPathSeparation(repositoryPlan.repository, dirname(databasePath));
+      await assertRunnerPathSeparation(repositoryPlan.repository, repositoryPlan.reviewRoot);
+      await verifyContainerRunner(repositoryPlan.runnerImage);
+    }
+    repoExtension = providerModelId && !repositoryPlan?.runnerImage ? null : repoTools(catalog, repositoryPlan);
     if (repoExtension) registry.install(repoExtension);
     const models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
@@ -147,7 +159,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     for (const intent of catalog.pendingReviews()) {
       try {
         const result = await runReviewOperation(repositoryPlan, { operation: 'review',
-          branch: intent.branch, patch: intent.patch });
+          branch: intent.branch, patch: intent.patch, baseRevision: intent.base_revision ?? null });
         catalog.saveReview({ id: intent.id, sessionId: intent.session_id, branch: intent.branch,
           baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
       } catch {

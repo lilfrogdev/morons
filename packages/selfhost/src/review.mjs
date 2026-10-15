@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { runContainerReviewOperation } from './container-review.mjs';
 
 const worker = fileURLToPath(new URL('../../review-runner/src/worker.mjs', import.meta.url));
 const MAX_RESULT_BYTES = 512 * 1024;
@@ -8,6 +9,7 @@ const MAX_RESULT_BYTES = 512 * 1024;
 export async function runReviewOperation(plan, operation) {
   if (!plan || typeof plan.repository !== 'string' || !Array.isArray(plan.allowedPaths) ||
       plan.allowedPaths.length === 0) throw new Error('review_plan_unavailable');
+  if (plan.runnerImage) return runContainerReviewOperation(plan, operation);
   if (process.platform !== 'darwin') throw new Error('review_sandbox_unavailable');
   // This profile removes network access. Fixed operations and exact source /
   // patch path allowlists are enforced in the worker. Host-level filesystem

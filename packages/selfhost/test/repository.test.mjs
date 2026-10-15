@@ -77,13 +77,17 @@ test('repo moron reads committed source and prepares a reviewed patch without ch
     assert.equal((await call('POST', `/v1/reviews/${review.id}/decision`, { decision: 'approve' })).review.decision, 'approve');
     await server.close();
     const catalog = openCatalog(join(path, 'accounts', bootstrapped.account.id, 'pi.sqlite.catalog.sqlite'));
-    catalog.reserveReview({ id: 'bbbbbbbbbbbbbbbb', sessionId: 'repo-main', branch: 'morons-review/bbbbbbbbbbbbbbbb', patch });
+    catalog.reserveReview({ id: 'bbbbbbbbbbbbbbbb', sessionId: 'repo-main', branch: 'morons-review/bbbbbbbbbbbbbbbb', patch, baseRevision: base });
     catalog.close();
+    await writeFile(join(repository, 'later.txt'), 'new source commit\n');
+    git(repository, 'add', 'later.txt');
+    git(repository, 'commit', '-qm', 'advance after review intent');
     server = await openAccountServer({ dataDir: path, bootstrapToken,
       repositoryPlan: { repository, allowedPaths: ['README.md'] } });
     const afterRestart = (await call('GET', '/v1/sessions/repo-main/reviews')).reviews;
     assert.equal(afterRestart.length, 2);
     assert.equal(afterRestart.find((item) => item.id === review.id).decision, 'approve');
+    assert.equal(afterRestart.find((item) => item.id === 'bbbbbbbbbbbbbbbb').baseRevision, base);
     assert.equal(git(repository, 'show', 'morons-review/bbbbbbbbbbbbbbbb:README.md'), 'after');
   } finally {
     await server?.close().catch(() => {});

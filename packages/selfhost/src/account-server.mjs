@@ -8,6 +8,7 @@ import { openFixtureServer } from './server.mjs';
 import { acquireOwnerLock } from './owner-lock.mjs';
 import { createProviderFlow } from './provider-flow.mjs';
 import { openProviderRuntime } from './provider-runtime.mjs';
+import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
 
 function send(response, status, body) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -56,6 +57,10 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
   if (!(await lstat(dataDir)).isDirectory() || (await lstat(dataDir)).isSymbolicLink())
     throw new Error('private_data_directory_required');
   await chmod(dataDir, 0o700);
+  if (repositoryPlan?.runnerImage) {
+    await assertRunnerPathSeparation(repositoryPlan.repository, dataDir);
+    await verifyContainerRunner(repositoryPlan.runnerImage);
+  }
   const lockPath = join(dataDir, '.owner.lock');
   const lock = await acquireOwnerLock(lockPath, 'account_server_already_owned_or_stale_lock');
   let accounts;
@@ -71,9 +76,11 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       const directory = join(dataDir, 'accounts', account.id);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
+      const reviewRoot = join(directory, 'reviews');
+      if (account.administrator && repositoryPlan) await mkdir(reviewRoot, { recursive: true, mode: 0o700 });
       const internalToken = randomBytes(32).toString('hex');
       const accountPlan = account.administrator && repositoryPlan ?
-        { ...repositoryPlan, reviewRoot: join(directory, 'reviews') } : null;
+        { ...repositoryPlan, reviewRoot } : null;
       const providerRuntime = activeProviderFactory ? await activeProviderFactory(account, directory) : null;
       let server;
       try {
@@ -183,13 +190,29 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const { MORONS_DATA_DIR: dataDir, MORONS_BOOTSTRAP_TOKEN_FILE: bootstrapFile,
     MORONS_PROVIDER_KEY_FILE: providerFile, MORONS_REPOSITORY: repository,
-    MORONS_SOURCE_PATHS: sourcePaths, MORONS_PROVIDER_MODEL_ID: providerModelId } = process.env;
+    MORONS_SOURCE_PATHS: sourcePaths, MORONS_PROVIDER_MODEL_ID: providerModelId,
+    MORONS_RUNNER_IMAGE: runnerImage } = process.env;
   const repositoryPlan = repository && sourcePaths ?
-    { repository, allowedPaths: sourcePaths.split(',').filter(Boolean) } : null;
+    { repository, allowedPaths: sourcePaths.split(',').filter(Boolean), ...(runnerImage ? { runnerImage } : {}) } : null;
   Promise.all([privateFile(bootstrapFile), providerFile ? privateFile(providerFile) : Promise.resolve(null)])
-    .then(([bootstrap, providerKey]) => openAccountServer({ dataDir,
+    .then(async ([bootstrap, providerKey]) => {
+      if (repositoryPlan?.runnerImage) {
+        await assertRunnerPathSeparation(repositoryPlan.repository, bootstrapFile);
+        if (providerFile) await assertRunnerPathSeparation(repositoryPlan.repository, providerFile);
+      }
+      return openAccountServer({ dataDir,
       bootstrapToken: bootstrap.toString('utf8').trim(), providerKey, providerModelId, repositoryPlan,
-      port: Number(process.env.PORT ?? 8787) }))
+      port: Number(process.env.PORT ?? 8787) });
+    })
     .then(({ url }) => process.stdout.write(`Morons local account server listening at ${url}\n`))
-    .catch(() => { process.stderr.write('Morons account server startup failed. Check private file ownership, data directory, and lock state.\n'); process.exitCode = 1; });
+    .catch((error) => {
+      const runnerErrors = new Set(['runner_image_digest_required', 'container_engine_not_running',
+        'runner_image_not_present', 'runner_image_missing_node_or_git', 'container_runner_unavailable',
+        'container_boundary_probe_failed', 'container_runner_timeout', 'runner_private_path_overlaps_source',
+        'runner_source_must_have_embedded_git']);
+      process.stderr.write(runnerErrors.has(error?.message) ?
+        `Morons review runner unavailable: ${error.message}.\n` :
+        'Morons account server startup failed. Check private file ownership, data directory, and lock state.\n');
+      process.exitCode = 1;
+    });
 }

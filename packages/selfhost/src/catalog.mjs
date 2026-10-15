@@ -14,6 +14,8 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, base_revision TEXT NOT NULL, diff TEXT NOT NULL, checks TEXT NOT NULL, decision TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS visualizations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), document TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);`);
+  if (!db.prepare('PRAGMA table_info(review_intents)').all().some((column) => column.name === 'base_revision'))
+    db.exec('ALTER TABLE review_intents ADD COLUMN base_revision TEXT');
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
@@ -47,16 +49,30 @@ export function openCatalog(path) {
     createHandoff: (sourceSessionId, requestId, targetMoronId, question, targetSessionId) => db.prepare("INSERT OR IGNORE INTO handoffs VALUES (?, ?, ?, ?, ?, NULL)").run(sourceSessionId, requestId, targetMoronId, question, targetSessionId),
     saveHandoffAnswer: (sourceSessionId, requestId, answer) => db.prepare("UPDATE handoffs SET answer = ? WHERE source_session_id = ? AND request_id = ?").run(answer, sourceSessionId, requestId),
     saveReview({ id, sessionId, branch, baseRevision, diff, checks }) {
+      const intent = db.prepare('SELECT * FROM review_intents WHERE id = ?').get(id);
+      if (intent && (intent.session_id !== sessionId || intent.branch !== branch ||
+          (intent.base_revision && intent.base_revision !== baseRevision))) throw new Error('review_base_conflict');
       db.prepare("INSERT OR IGNORE INTO reviews VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
         .run(id, sessionId, branch, baseRevision, diff, JSON.stringify(checks), Date.now());
       db.prepare("DELETE FROM review_intents WHERE id = ?").run(id);
       return this.getReview(id);
     },
-    reserveReview({ id, sessionId, branch, patch }) {
-      db.prepare("INSERT OR IGNORE INTO review_intents VALUES (?, ?, ?, ?, ?)").run(id, sessionId, branch, patch, Date.now());
+    getReviewIntent: (id) => db.prepare('SELECT * FROM review_intents WHERE id = ?').get(id),
+    reserveReview({ id, sessionId, branch, patch, baseRevision }) {
+      const prior = db.prepare('SELECT * FROM review_intents WHERE id = ?').get(id);
+      if (prior) {
+        if (prior.session_id !== sessionId || prior.branch !== branch || prior.patch !== patch ||
+            prior.base_revision !== baseRevision) throw new Error('review_intent_conflict');
+        return prior;
+      }
+      if (typeof baseRevision !== 'string' || !/^[0-9a-f]{40}$/.test(baseRevision)) throw new Error('invalid_review_base');
+      db.prepare("INSERT OR IGNORE INTO review_intents (id, session_id, branch, patch, created_at, base_revision) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, sessionId, branch, patch, Date.now(), baseRevision);
       const intent = db.prepare("SELECT * FROM review_intents WHERE id = ?").get(id);
-      if (intent?.session_id !== sessionId || intent?.branch !== branch || intent?.patch !== patch)
+      if (intent?.session_id !== sessionId || intent?.branch !== branch || intent?.patch !== patch ||
+          intent?.base_revision !== baseRevision)
         throw new Error('review_intent_conflict');
+      return intent;
     },
     pendingReviews: () => db.prepare("SELECT * FROM review_intents ORDER BY created_at, id").all(),
     saveVisualization(sessionId, document) {

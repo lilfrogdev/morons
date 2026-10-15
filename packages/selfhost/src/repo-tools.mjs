@@ -29,8 +29,11 @@ export function repoTools(catalog, plan) {
       if (session?.moronId !== 'repo') throw new Error('repo_tool_forbidden');
       const id = reviewId(api.conversationId, api.callId);
       const branch = `morons-review/${id}`;
-      catalog.reserveReview({ id, sessionId: session.id, branch, patch });
-      const result = await runReviewOperation(plan, { operation: 'review', branch, patch });
+      const existing = catalog.getReviewIntent(id);
+      const baseRevision = existing ? existing.base_revision :
+        (await runReviewOperation(plan, { operation: 'inspect' })).baseRevision;
+      catalog.reserveReview({ id, sessionId: session.id, branch, patch, baseRevision });
+      const result = await runReviewOperation(plan, { operation: 'review', branch, patch, baseRevision });
       const saved = catalog.saveReview({ id, sessionId: session.id, branch, baseRevision: result.baseRevision,
         diff: result.diff, checks: result.checks });
       return { output: [{ type: 'text', text: `Review ${saved.id} prepared on ${branch}. Check: ${saved.checks[0]?.ok ? 'passed' : 'failed'}. Human decision pending.` }] };

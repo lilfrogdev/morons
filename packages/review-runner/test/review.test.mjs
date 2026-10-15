@@ -98,3 +98,69 @@ test('persistent review worktree retries the same proposal without another commi
     assert.equal(git(repository, 'rev-list', '--count', `${first.baseRevision}..${first.branch}`), '1');
   } finally { await rm(repository, { recursive: true, force: true }); await rm(reviewRoot, { recursive: true, force: true }); }
 });
+
+test('isolated clone prepares and retries a branch without writing source Git metadata', async () => {
+  const repository = await mkdtemp(join(tmpdir(), 'morons-clone-source-'));
+  const reviewRoot = await mkdtemp(join(tmpdir(), 'morons-clone-reviews-'));
+  const patch = 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n';
+  try {
+    git(repository, 'init', '-q');
+    await writeFile(join(repository, 'README.md'), 'before\n');
+    git(repository, 'add', '.');
+    git(repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'base');
+    const beforeRefs = git(repository, 'for-each-ref', '--format=%(refname) %(objectname)');
+    const beforeWorktrees = git(repository, 'worktree', 'list', '--porcelain');
+    await writeFile(join(repository, 'README.md'), 'uncommitted local edit\n');
+    const args = { repository, branch: 'morons-review/clone', patch, allowedPaths: ['README.md'],
+      reviewRoot, isolatedClone: true, checks: [{ file: 'git', args: ['diff', '--check'] }] };
+    const first = await prepareReview(args);
+    const second = await prepareReview(args);
+    assert.equal(first.proposalRevision, second.proposalRevision);
+    assert.equal(first.checks[0].ok, true);
+    assert.match(first.diff, /\+after/);
+    assert.equal(await readFile(join(repository, 'README.md'), 'utf8'), 'uncommitted local edit\n');
+    assert.equal(git(repository, 'for-each-ref', '--format=%(refname) %(objectname)'), beforeRefs);
+    assert.equal(git(repository, 'worktree', 'list', '--porcelain'), beforeWorktrees);
+    assert.equal(git(first.worktree, 'show', 'HEAD:README.md'), 'after');
+  } finally { await rm(repository, { recursive: true, force: true }); await rm(reviewRoot, { recursive: true, force: true }); }
+});
+
+test('isolated clone rejects patch traversal and cannot change an approval record', async () => {
+  const repository = await mkdtemp(join(tmpdir(), 'morons-escape-source-'));
+  const reviewRoot = await mkdtemp(join(tmpdir(), 'morons-escape-reviews-'));
+  const approval = join(reviewRoot, 'approval.sqlite');
+  try {
+    git(repository, 'init', '-q');
+    await writeFile(join(repository, 'README.md'), 'safe\n');
+    git(repository, 'add', '.');
+    git(repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'base');
+    await writeFile(approval, 'approved=false\n');
+    const escape = 'diff --git a/../approval.sqlite b/../approval.sqlite\n--- a/../approval.sqlite\n+++ b/../approval.sqlite\n@@ -1 +1 @@\n-approved=false\n+approved=true\n';
+    await assert.rejects(prepareReview({ repository, branch: 'morons-review/escape',
+      patch: escape, allowedPaths: ['README.md'], reviewRoot, isolatedClone: true }), /Patch rejected|Patch failed|unapproved path/);
+    assert.equal(await readFile(approval, 'utf8'), 'approved=false\n');
+  } finally { await rm(repository, { recursive: true, force: true }); await rm(reviewRoot, { recursive: true, force: true }); }
+});
+
+test('pinned review recovers after the source branch advances', async () => {
+  const repository = await mkdtemp(join(tmpdir(), 'morons-pinned-source-'));
+  const reviewRoot = await mkdtemp(join(tmpdir(), 'morons-pinned-reviews-'));
+  const patch = 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n';
+  try {
+    git(repository, 'init', '-q');
+    await writeFile(join(repository, 'README.md'), 'before\n');
+    git(repository, 'add', '.');
+    git(repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'base');
+    const baseRevision = git(repository, 'rev-parse', 'HEAD');
+    const args = { repository, branch: 'morons-review/pinned', patch, allowedPaths: ['README.md'],
+      reviewRoot, isolatedClone: true, baseRevision, checks: [{ file: 'git', args: ['diff', '--check'] }] };
+    const first = await prepareReview(args);
+    await writeFile(join(repository, 'new.txt'), 'later\n');
+    git(repository, 'add', 'new.txt');
+    git(repository, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'later');
+    const recovered = await prepareReview(args);
+    assert.equal(recovered.proposalRevision, first.proposalRevision);
+    assert.equal(recovered.baseRevision, baseRevision);
+    assert.equal(recovered.diff, first.diff);
+  } finally { await rm(repository, { recursive: true, force: true }); await rm(reviewRoot, { recursive: true, force: true }); }
+});

@@ -1,4 +1,4 @@
-import { readSourceAtHead, prepareReview } from './index.mjs';
+import { inspectSource, readSourceAtHead, prepareReview } from './index.mjs';
 
 // One request per short-lived process. The host supplies this plan, never the model.
 // The worker has no provider credentials and accepts only two fixed operations.
@@ -13,7 +13,9 @@ try {
   if (!plan || typeof plan.repository !== 'string' || !Array.isArray(plan.allowedPaths))
     throw new Error('Invalid review plan');
   let result;
-  if (request.operation === 'read') {
+  if (request.operation === 'inspect') {
+    result = await inspectSource(plan.repository);
+  } else if (request.operation === 'read') {
     result = await readSourceAtHead(plan.repository, request.path, plan.allowedPaths);
   } else if (request.operation === 'review') {
     result = await prepareReview({
@@ -22,6 +24,8 @@ try {
       patch: request.patch,
       allowedPaths: plan.allowedPaths,
       reviewRoot: plan.reviewRoot ?? null,
+      isolatedClone: plan.isolatedClone === true,
+      baseRevision: request.baseRevision ?? null,
       checks: [{ file: 'git', args: ['diff', '--check'] }],
     });
   } else {

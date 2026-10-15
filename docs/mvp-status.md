@@ -34,7 +34,7 @@ a final redirect URL if needed, cancel, status, and disconnect. The server
 requires an owner-private 32-byte unlock key before exposing this path, keeps
 provider credentials in an encrypted per-account store, and never returns
 them to GPUI. The real Pi model path passed mocked responses through durable
-chat; repository tools are absent in that mode. The default remains offline
+chat; repository tools are gated on a verified container runner in that mode. The default remains offline
 even with a provider key; selecting a real model also requires an explicit
 catalog model ID from the operator. Account entitlement and remote token
 validity have not been verified. No actual OAuth or paid call was made. Local
@@ -42,11 +42,21 @@ credential metadata restores provider status after a restart.
 
 ## Trust boundary and remaining milestones
 
-The review worker is a separate process without provider credentials and with
-macOS network access denied. Its current sandbox **does not confine filesystem
-reads**. Real-provider sessions therefore have no repository tools. A stronger
-filesystem/process runner and explicit trusted check and apply workflow are
-required before model-directed code execution.
+The older macOS worker uses `sandbox-exec` to deny network but does not
+confine filesystem reads; it remains for the offline fixture only. The new
+real-model worker requires a locally preloaded, digest-pinned Docker image.
+Startup probes the container's file, symlink, environment, network, subprocess
+escape, and approval-write boundary. Its source mount is read-only and its
+account-private review output is the only writable host mount. The worker
+clones committed source rather than writing Git metadata in the original
+checkout. On this Mac both Colima profiles are stopped, so the live container
+probe has not run and real-model repository tools are unavailable. The next
+platform action is to start the existing Colima profile and provide a reviewed
+Node 22+ and Git image digest for the live adversarial test. Trusted build
+checks beyond the fixed `git diff --check` and an explicit reviewed apply
+workflow remain to be added before any self-update claim.
+The container runner rejects source/data directory overlap and linked Git
+worktrees. Review intents pin the original base SHA for restart recovery.
 
 The account server binds loopback only. For remote devices, configure and
 qualify authenticated TLS ingress, token storage on each client, and session
