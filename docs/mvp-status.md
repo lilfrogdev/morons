@@ -50,17 +50,22 @@ The older macOS worker uses `sandbox-exec` to deny network but does not
 confine filesystem reads; it remains for the offline fixture only. The new
 real-model worker requires a locally preloaded, digest-pinned Docker image.
 Startup probes the container's file, symlink, environment, network, subprocess
-escape, and approval-write boundary. Its source mount is read-only and its
-account-private `computer-home` and review output are the only writable host mounts. The worker
+escape, and approval-write boundary. Its source and trusted worker mounts are
+read-only. The account container can write only its `computer-home`; each
+proposal can write only its own home and review directory. The worker
 clones committed source rather than writing Git metadata in the original
-checkout. A Docker Desktop container now persists across repository operations,
-stops at server shutdown, and reconnects to the same account-private workspace
-on restart. This adopts Rakazo's computer lifecycle boundary for repository
+checkout. The Docker Desktop account workspace persists across source reads and
+stops at server shutdown. Each proposal uses a separate persistent container,
+home, and review directory; it stops after the operation and reconnects for
+recovery. This adopts Rakazo's computer lifecycle boundary for repository
 operations; browser, desktop, and file-transfer actions are not implemented.
-On this Mac Docker Desktop is installed but stopped, so the live container
-probe has not run and real-model repository tools are unavailable. The next
-platform action is to start Docker Desktop and provide a reviewed
-Node 22+ and Git image digest for the live boundary probe. Two trusted,
+On this Mac I started Docker Desktop and installed the official
+`node:22.23.3-bookworm` arm64 digest
+`sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729`.
+The boundary and two-proposal lifecycle smoke passed with disposable source
+and worker copies under `/tmp`. A bounded Docker mount of this checkout's
+worker path under Documents timed out after 20 seconds; direct checkout access
+still needs file-sharing diagnosis. Two trusted,
 dependency-free check profiles now run the candidate's `review-runner` or
 `optchat` syntax check as well as `git diff --check`; model edits are confined
 to the selected package's source paths. The self-host backend and GPUI need

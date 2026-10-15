@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, realpath, rm, symlink, writeFile, mkdir, lstat } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, symlink, writeFile, mkdir, lstat, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
@@ -53,16 +53,17 @@ function workspaceName(workspaceRoot) {
   return `morons-${createHash('sha256').update(workspaceRoot).digest('hex').slice(0, 24)}`;
 }
 
-function workspaceFingerprint({ image, repository, reviewRoot, workspaceRoot, workerRoot }) {
+function workspaceFingerprint({ image, repository, reviewRoot, workspaceRoot, workerRoot, reviewWritable }) {
   return createHash('sha256').update(JSON.stringify({ policy: 1, image, repository, reviewRoot,
-    workspaceRoot, workerRoot })).digest('hex');
+    workspaceRoot, workerRoot, reviewWritable })).digest('hex');
 }
 
 export function workspaceCreateArgs({ image, repository, reviewRoot, workspaceRoot,
-  workerRoot = runnerDirectory, uid = process.getuid?.(), gid = process.getgid?.() }) {
+  workerRoot = runnerDirectory, reviewWritable = false,
+  uid = process.getuid?.(), gid = process.getgid?.() }) {
   if (!validRunnerImage(image) || !Number.isInteger(uid) || !Number.isInteger(gid))
     throw new Error('invalid_runner_configuration');
-  const configuration = { image, repository, reviewRoot, workspaceRoot, workerRoot };
+  const configuration = { image, repository, reviewRoot, workspaceRoot, workerRoot, reviewWritable };
   return [
     'create', '--pull=never', '--name', workspaceName(workspaceRoot),
     '--label', `morons.workspace.fingerprint=${workspaceFingerprint(configuration)}`,
@@ -74,7 +75,7 @@ export function workspaceCreateArgs({ image, repository, reviewRoot, workspaceRo
     '--env', 'LANG=C', '--env', 'GIT_CONFIG_NOSYSTEM=1',
     '--env', 'GIT_CONFIG_GLOBAL=/dev/null', '--env', 'GIT_TERMINAL_PROMPT=0',
     '--mount', `type=bind,source=${mountPath(repository)},target=/source,readonly`,
-    '--mount', `type=bind,source=${mountPath(reviewRoot)},target=/reviews`,
+    '--mount', `type=bind,source=${mountPath(reviewRoot)},target=/reviews${reviewWritable ? '' : ',readonly'}`,
     '--mount', `type=bind,source=${mountPath(workspaceRoot)},target=/home/morons`,
     '--mount', `type=bind,source=${mountPath(workerRoot)},target=/worker,readonly`,
     '--workdir', '/worker', '--entrypoint', 'sleep', image, 'infinity',
@@ -91,7 +92,7 @@ function docker(args, input = '', timeout = 180_000) {
     let output = '', error = '';
     let settled = false;
     const fail = (reason) => { if (!settled) { settled = true; child.kill('SIGKILL'); reject(new Error(reason)); } };
-    const timer = setTimeout(() => fail('container_runner_timeout'), timeout);
+    const timer = setTimeout(() => fail(`container_runner_timeout_${args[0]}`), timeout);
     child.on('error', () => fail('container_runner_unavailable'));
     child.stdout.on('data', (chunk) => {
       output += chunk;
@@ -121,7 +122,7 @@ async function inspectWorkspace(configuration) {
   const mounts = details?.Mounts ?? [];
   const expected = [
     [configuration.repository, '/source', false],
-    [configuration.reviewRoot, '/reviews', true],
+    [configuration.reviewRoot, '/reviews', configuration.reviewWritable],
     [configuration.workspaceRoot, '/home/morons', true],
     [configuration.workerRoot, '/worker', false],
   ];
@@ -131,7 +132,7 @@ async function inspectWorkspace(configuration) {
       details?.HostConfig?.ReadonlyRootfs !== true ||
       details?.HostConfig?.Privileged !== false ||
       !details?.HostConfig?.CapDrop?.includes('ALL') ||
-      !details?.HostConfig?.SecurityOpt?.includes('no-new-privileges:true') ||
+      !details?.HostConfig?.SecurityOpt?.includes('no-new-privileges=true') ||
       details?.HostConfig?.PidsLimit !== 64 ||
       details?.HostConfig?.Memory !== 512 * 1024 * 1024 ||
       details?.HostConfig?.NanoCpus !== 1_000_000_000 ||
@@ -170,7 +171,7 @@ async function workspaceConfiguration(plan) {
   if (workspaceRoot === reviewRoot || workspaceRoot.startsWith(`${reviewRoot}${sep}`) ||
       reviewRoot.startsWith(`${workspaceRoot}${sep}`)) throw new Error('workspace_review_path_overlap');
   return { image: plan.runnerImage, repository, reviewRoot, workspaceRoot,
-    workerRoot: await realpath(runnerDirectory) };
+    workerRoot: await realpath(runnerDirectory), reviewWritable: plan.reviewWritable === true };
 }
 
 async function provisionWorkspace(configuration) {
@@ -181,6 +182,12 @@ async function provisionWorkspace(configuration) {
       details = await inspectWorkspace(configuration);
       if (!details) throw new Error('workspace_create_failed');
     } else details = await inspectWorkspace(configuration);
+  }
+  if (configuration.reviewWritable && details?.State?.Running) {
+    const stopped = await docker(['stop', '--time', '0', workspaceName(configuration.workspaceRoot)], '', 20_000);
+    if (stopped.code !== 0) throw new Error('proposal_recovery_stop_failed');
+    details = await inspectWorkspace(configuration);
+    if (details?.State?.Running) throw new Error('proposal_recovery_stop_failed');
   }
   if (!details?.State?.Running) {
     const started = await docker(['start', workspaceName(configuration.workspaceRoot)], '', 30_000);
@@ -234,7 +241,7 @@ export async function verifyContainerRunner(image) {
   for (const [entrypoint, expected] of [['node', /^v(2[2-9]|[3-9]\d)\./], ['git', /^git version /]]) {
     const check = await docker(['run', '--pull=never', '--rm', '--network=none', '--read-only',
       '--cap-drop=ALL', '--security-opt=no-new-privileges=true', '--entrypoint', entrypoint,
-      image, '--version'], '', 15_000);
+      image, '--version'], '', 60_000);
     if (check.code !== 0 || !expected.test(check.output)) throw new Error('runner_image_missing_node_or_git');
   }
 
@@ -270,7 +277,7 @@ export async function verifyContainerRunner(image) {
     const args = containerArgs({ image, repository: await realpath(source),
       reviewRoot: await realpath(reviews), workerRoot: await realpath(runnerDirectory) });
     args.splice(-1, 1, '-e', script);
-    const probe = await docker(args, '', 15_000);
+    const probe = await docker(args, '', 60_000);
     let answer;
     try { answer = JSON.parse(probe.output); } catch { throw new Error('container_boundary_probe_failed'); }
     if (probe.code !== 0 || Object.values(answer).some(Boolean) || Object.keys(answer).length !== 6)
@@ -281,11 +288,38 @@ export async function verifyContainerRunner(image) {
 export async function runContainerReviewOperation(plan, operation) {
   if (!validRunnerImage(plan.runnerImage)) throw new Error('runner_image_digest_required');
   trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
-  const provider = await openDockerWorkspaceProvider(plan);
+  let scopedPlan = { ...plan, reviewWritable: false };
+  if (operation.operation === 'review') {
+    if (typeof operation.branch !== 'string' ||
+        !/^morons-review\/[a-z0-9][a-z0-9-]{0,63}$/.test(operation.branch))
+      throw new Error('invalid_review_branch');
+    const id = operation.branch.split('/')[1];
+    for (const root of [plan.reviewRoot, plan.workspaceRoot]) {
+      const parent = join(dirname(root), root === plan.reviewRoot ? 'proposal-reviews' : 'proposal-homes');
+      await mkdir(parent, { mode: 0o700 }).catch((error) => {
+        if (error.code !== 'EEXIST') throw error;
+      });
+      for (const path of [parent, join(parent, id)]) {
+        await mkdir(path, { mode: 0o700 }).catch((error) => {
+          if (error.code !== 'EEXIST') throw error;
+        });
+        const info = await lstat(path);
+        if (!info.isDirectory() || info.isSymbolicLink() ||
+            (process.getuid && info.uid !== process.getuid()))
+          throw new Error('private_workspace_directory_required');
+        await chmod(path, 0o700);
+      }
+    }
+    scopedPlan = { ...plan, reviewRoot: join(dirname(plan.reviewRoot), 'proposal-reviews', id),
+      workspaceRoot: join(dirname(plan.workspaceRoot), 'proposal-homes', id), reviewWritable: true };
+  }
+  const provider = await openDockerWorkspaceProvider(scopedPlan);
   const input = JSON.stringify({ plan: { repository: '/source', reviewRoot: '/reviews',
     allowedPaths: plan.allowedPaths, checkProfile: plan.checkProfile, isolatedClone: true }, ...operation });
   if (Buffer.byteLength(input) > 300_000) throw new Error('review_request_too_large');
-  const result = await provider.execute(input);
+  let result;
+  try { result = await provider.execute(input); }
+  finally { if (operation.operation === 'review') await provider.stop(); }
   let response;
   try { response = JSON.parse(result.output); } catch { throw new Error('container_review_failed'); }
   if (result.code !== 0 || response?.ok !== true) throw new Error('container_review_failed');

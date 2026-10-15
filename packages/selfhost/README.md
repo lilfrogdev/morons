@@ -127,10 +127,12 @@ approval-write boundaries in a disposable container. Startup fails if a probe
 fails. A real model without this verified runner has no repository tools.
 
 The Docker Desktop workspace is provisioned once per administrator account and
-reconnected across operations. Server shutdown stops its container while the
-account's `computer-home` and review directories remain on disk. The worker
-container mounts the source repository read-only, its own code read-only, and
-only that account's `computer-home` and review directories writable. It has no provider
+reconnected across source reads. Each proposal has a separate persistent
+container, home, and review directory, stopped after its review operation and
+reconnected for recovery. Server shutdown stops the account container while
+the private files remain on disk. A proposal cannot mount another proposal's
+home or review directory. The worker container mounts the source repository
+read-only and its own code read-only. It has no provider
 credentials, account database, or Docker socket; network is disabled. It
 clones committed source into the review directory, creates a proposal branch
 there, applies only allowlisted paths, runs the fixed checks, and
@@ -145,28 +147,25 @@ points outside the read-only source mount. Review intents pin the source base
 commit so recovery still works if the source branch advances.
 
 The CLI explicitly targets Docker Desktop's `desktop-linux` context and does
-not change the operator's current Docker context. Docker Desktop is installed
-on this Mac but stopped, so no local runner image or digest could be inspected.
-A proposed
-upstream is the official `docker.io/library/node:22.23.3-bookworm` arm64 tag,
-whose buildpack-deps base includes Git. Once Docker Desktop is running, pull
-the image, inspect its local `RepoDigests`, and select its immutable
-`docker.io/library/node@sha256:...` reference; never substitute a guessed
-digest. Use `docker --context desktop-linux pull --platform linux/arm64
-docker.io/library/node:22.23.3-bookworm` and `docker --context desktop-linux
-image inspect docker.io/library/node:22.23.3-bookworm --format '{{json .RepoDigests}}'`.
-The image pull consumes network bandwidth and Docker Desktop disk space. No
-custom image build is needed for the two dependency-free profiles.
+not change the operator's current Docker context. On this Mac the official
+`node:22.23.3-bookworm` arm64 image is installed at
+`docker.io/library/node@sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729`.
+Its local runtime has Node 22.23.3 and Git 2.39.5. The boundary probe and a
+two-proposal lifecycle smoke passed with disposable source and worker copies
+under `/tmp`. Docker Desktop timed out after 20 seconds when mounting the
+checkout's worker path under Documents, so direct checkout access still needs
+file-sharing diagnosis. No Docker Desktop sharing setting was changed. The
+image used about 402 MB of compressed layers; no custom image
+build was needed.
 The persistent computer lifecycle follows Rakazo's provider model; this
 implementation currently supports repository read and isolated proposals,
 not Rakazo's browser, desktop, or file-transfer actions. See
 https://github.com/elie222/rakazo/blob/main/docs/computer-runtime.md and
 https://github.com/elie222/rakazo/blob/main/LICENSE.
-Then start the server with that digest in a disposable local configuration
-and inspect its live boundary probe result. Only after it passes should
-`MORONS_RUNNER_IMAGE` be added to the server launch environment together with
-an approved check profile and exact source-path list. No real login or paid
-inference is needed for this boundary test.
+For another checkout, confirm Docker Desktop can mount both the source and
+worker paths before starting the server with this digest, an approved check
+profile, and an exact source-path list. No real login or paid inference is
+needed for the boundary check.
 
 A separate authenticated TLS ingress and remote-device testing are required
 before use from other devices. The native Windows and iPhone clients remain
