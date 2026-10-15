@@ -95,7 +95,7 @@ impl TextInput {
         Self {
             focus_handle: cx.focus_handle(),
             content: "".into(),
-            placeholder: "Message your Moron…".into(),
+            placeholder: "Describe a change or ask about the work…".into(),
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -747,7 +747,7 @@ impl Render for TextInput {
         div()
             .flex()
             .id(self.id)
-            .role(gpui::Role::MultilineTextInput)
+            .role(if self.id == "model-search" { gpui::Role::TextInput } else { gpui::Role::MultilineTextInput })
             .aria_label(if self.secret { self.placeholder.clone() } else if self.id == "composer" { "Message your Moron".into() } else { self.placeholder.clone() })
             .aria_value(if self.secret { "".into() } else { self.content.clone() })
             .aria_placeholder(self.placeholder.clone())
@@ -777,15 +777,15 @@ impl Render for TextInput {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .w_full()
-            .line_height(px(if self.id == "composer" { 24. } else { 22. }))
-            .text_size(px(14.))
+            .line_height(px(if self.id == "composer" { 24. } else if self.id == "model-search" { 18. } else { 22. }))
+            .text_size(px(if self.id == "model-search" { 12. } else { 14. }))
             .child(
                 div()
                     .id(SharedString::from(format!("{}-scroll", self.id)))
                     .track_scroll(&self.scroll)
                     .h(if self.id == "composer" {
                         self.content_height.max(px(24.)).min(px(144.))
-                    } else { px(34.) })
+                    } else if self.id == "model-search" { px(24.) } else { px(34.) })
                     .overflow_y_scroll()
                     .w_full()
                     .p(px(if self.id == "composer" { 0. } else { 2. }))

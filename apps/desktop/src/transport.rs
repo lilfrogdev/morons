@@ -13,10 +13,11 @@ use tokio::sync::mpsc;
 pub struct State {
     pub snapshot: Snapshot,
     pub status: &'static str,
-    // Display only. The backend owns model selection and provider credentials.
+    // The backend owns model selection and provider credentials.
     pub model: Option<String>,
     pub models: Vec<ModelOption>,
     pub selected_model: Option<(String, String)>,
+    pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
     pub selected_moron: Option<String>,
     pub review: Option<NamedReview>,
@@ -40,6 +41,7 @@ impl Default for State {
             model: None,
             models: vec![],
             selected_model: None,
+            model_favorites: vec![],
             named_morons: vec![],
             selected_moron: None,
             review: None,
@@ -64,6 +66,8 @@ pub enum Command {
     Reconnect,
     Retry,
     SelectMoron(String),
+    SelectModel { provider: String, id: String },
+    ToggleModelFavorite { provider: String, id: String, favorite: bool },
     ReviewDecision {
         id: String,
         decision: ReviewDecision,
@@ -471,7 +475,8 @@ async fn handle(
             }
         }
         Command::Reconnect => Ok(()),
-        Command::SelectMoron(_) => Err("Named morons require the self-hosted backend"),
+        Command::SelectMoron(_) | Command::SelectModel { .. } | Command::ToggleModelFavorite { .. } =>
+            Err("Model and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
         Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
@@ -533,6 +538,8 @@ pub struct ModelOption {
 struct NamedModels {
     models: Vec<ModelOption>,
     selected: Option<SelectedModel>,
+    #[serde(default)]
+    favorites: Vec<SelectedModel>,
 }
 #[derive(serde::Deserialize)]
 struct SelectedModel {
@@ -573,6 +580,10 @@ impl NamedApi {
             .map_err(|_| "Request outcome uncertain; retry same request")?;
         if response.status().is_success() {
             Ok(())
+        } else if route.ends_with("/model") && response.status().as_u16() == 403 {
+            Err("Model is unavailable for this account")
+        } else if route.ends_with("/model") && response.status().as_u16() == 409 {
+            Err("Wait for the current task before changing models")
         } else if response.status().as_u16() == 409 {
             Err("Named request conflicts with existing state")
         } else {
@@ -716,22 +727,6 @@ async fn named_http(
     let mut selected = "repo".to_owned();
     loop {
         let refreshed = async {
-            let models: NamedModels = api.get("v1/models").await?;
-            if models.models.len() > 128 {
-                return Err("Model catalog exceeds client limit");
-            }
-            if models.models.iter().any(|model| model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128) {
-                return Err("Invalid model catalog");
-            }
-            let model_selection = models.selected.map(|value| (value.provider, value.id)).or_else(|| {
-                let mut available = models.models.iter().filter(|model| model.available);
-                let only = available.next()?;
-                available.next().is_none().then(|| (only.provider.clone(), only.id.clone()))
-            }).ok_or("Ambiguous selected model")?;
-            let model = models.models.iter().find(|model| model.available &&
-                model.provider == model_selection.0 && model.id == model_selection.1)
-                .ok_or("No selected model available")?;
-            let selected_model = model.label.clone();
             let mut catalog: NamedMorons = api.get("v1/morons").await?;
             if catalog.morons.is_empty() {
                 let _ = api.post("v1/morons", serde_json::json!({
@@ -748,6 +743,22 @@ async fn named_http(
                 selected = catalog.morons.first().ok_or("No named moron available")?.id.clone();
             }
             let session = api.selected_session(&selected).await?;
+            let models: NamedModels = api.get(&format!("v1/sessions/{session}/models")).await?;
+            if models.models.len() > 128 {
+                return Err("Model catalog exceeds client limit");
+            }
+            if models.models.iter().any(|model| model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128) {
+                return Err("Invalid model catalog");
+            }
+            let model_selection = models.selected.map(|value| (value.provider, value.id)).or_else(|| {
+                let mut available = models.models.iter().filter(|model| model.available);
+                let only = available.next()?;
+                available.next().is_none().then(|| (only.provider.clone(), only.id.clone()))
+            }).ok_or("Ambiguous selected model")?;
+            let model = models.models.iter().find(|model|
+                model.provider == model_selection.0 && model.id == model_selection.1)
+                .ok_or("Selected model missing from catalog")?;
+            let selected_model = model.label.clone();
             let history: NamedHistory = api.get(&format!("v1/sessions/{session}/history")).await?;
             if history.session_id != session || history.moron_id != selected {
                 return Err("Named session identity mismatch");
@@ -777,14 +788,16 @@ async fn named_http(
             let documents = lease.as_ref().and_then(|lease| lease.documents(&me.account.id, &session, epoch, now))
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
-            Ok::<_, &'static str>((selected_model, model_selection, models.models, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
+            let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
+            Ok::<_, &'static str>((selected_model, model.available, model_selection, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
         }
         .await;
         let session = match refreshed {
-            Ok((model, selected_model, models, snapshot, session, catalog, review, provider, documents, expires_at)) => {
+            Ok((model, model_available, selected_model, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at)) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
+                state.model_favorites = favorites;
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
@@ -797,7 +810,7 @@ async fn named_http(
                     .filter(|value| Url::parse(value).ok().is_some_and(|url|
                         url.scheme() == "https" && url.host_str() == Some("auth.openai.com") && value.len() <= 4096));
                 state.status = "Connected";
-                state.ready = true;
+                state.ready = model_available;
                 state.error = None;
                 state.pending = pending.is_some();
                 publisher.publish(&state);
@@ -842,6 +855,23 @@ async fn named_http(
                             state.request_error = None;
                         }
                     }
+                    Command::SelectModel { provider, id } => {
+                        if pending.is_some() || state.snapshot.active_task_id.is_some() {
+                            state.request_error = Some("Wait for the current task before changing models");
+                        } else if state.models.iter().any(|model| model.available &&
+                            model.provider == provider && model.id == id) {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/model"),
+                                serde_json::json!({"provider": provider, "id": id})).await.err();
+                        } else {
+                            state.request_error = Some("Model is unavailable for this account");
+                        }
+                    }
+                    Command::ToggleModelFavorite { provider, id, favorite } => {
+                        if state.models.iter().any(|model| model.provider == provider && model.id == id) {
+                            state.request_error = api.post("v1/models/favorite",
+                                serde_json::json!({"provider": provider, "id": id, "favorite": favorite})).await.err();
+                        }
+                    }
                     Command::ReviewDecision { id, decision } => {
                         if state.review.as_ref().is_some_and(|r| r.id == id && r.decision == "pending") {
                             let verb = match decision { ReviewDecision::Approve => "approve", ReviewDecision::Reject => "reject" };
@@ -859,6 +889,7 @@ async fn named_http(
                         state.model = None;
                         state.models.clear();
                         state.selected_model = None;
+                        state.model_favorites.clear();
                         state.ready = false;
                         state.account_login = true;
                         state.provider_url = None;

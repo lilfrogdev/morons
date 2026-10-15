@@ -18,10 +18,18 @@ const ICON_MIC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 
 const ICON_HOME: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg>"##;
 const ICON_FOLDER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/></svg>"##;
 const ICON_AGENT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01M9 17h6"/></svg>"##;
+const ICON_CPU: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></svg>"##;
+const ICON_OPENAI: &[u8] = include_bytes!("assets/model-openai.svg");
+const ICON_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg>"##;
+const ICON_STAR: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#b77900" stroke-width="1.5" stroke-linejoin="round"><path d="m12 2 3.1 6.3 7 1-5 4.9 1.2 6.9L12 17.8l-6.3 3.3 1.2-6.9-5-4.9 7-1z"/></svg>"##;
+const ICON_CHEVRON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>"##;
+fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
+fn provider_name(provider: &str) -> &str { if provider == "morons-fixture" { "Offline fixture" } else if provider == "openai" { "OpenAI" } else { provider } }
 
 actions!(morons, [SendMessage, Quit, FocusNext, FocusPrevious]);
 struct Chat {
     input: Entity<input::TextInput>,
+    model_search: Entity<input::TextInput>,
     login_name: Entity<input::TextInput>,
     login_password: Entity<input::TextInput>,
     bootstrap_token: Entity<input::TextInput>,
@@ -34,13 +42,17 @@ struct Chat {
     last_ack: Option<String>,
     scroll: ScrollHandle,
     show_model: bool,
+    model_section: String,
+    model_cursor: usize,
     drafts: drafts::Drafts,
     _input_subscription: Subscription,
 }
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
         let input = cx.new(input::TextInput::new);
+        let model_search = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("model-search"); field.set_placeholder("Search models…"); field });
         let input_subscription = cx.observe(&input, |_, _, cx| cx.notify());
+        cx.observe(&model_search, |_, _, cx| cx.notify()).detach();
         let login_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("account-name"); field.set_placeholder("Account name"); field });
         let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
         let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("First-account setup code"); field });
@@ -75,12 +87,17 @@ impl Chat {
                             view.last_ack = None;
                             view.local_error = None;
                             view.drafts.clear();
+                            view.show_model = false;
+                            view.model_section.clear();
+                            view.model_cursor = 0;
+                            view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         } else if view.state.selected_moron != state.selected_moron {
                             let current = view.input.read(cx).text().to_owned();
                             let restored = view.drafts.switch(state.selected_moron.as_deref(), &current);
                             view.input.update(cx, |input, cx| { input.set_text(restored); cx.notify(); });
                             view.last_ack = None;
                             view.show_model = false;
+                            view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
                         view.state = state;
                         if follow {
@@ -96,6 +113,7 @@ impl Chat {
         });
         Self {
             input,
+            model_search,
             login_name,
             login_password,
             bootstrap_token,
@@ -107,11 +125,50 @@ impl Chat {
             last_ack: None,
             scroll: ScrollHandle::new(),
             show_model: false,
+            model_section: String::new(),
+            model_cursor: 0,
             drafts: drafts::Drafts::default(),
             _input_subscription: input_subscription,
         }
     }
-    fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
+    fn visible_models(&self, cx: &Context<Self>) -> Vec<morons_desktop::transport::ModelOption> {
+        let query = self.model_search.read(cx).text().to_lowercase();
+        let tokens: Vec<_> = query.split_whitespace().collect();
+        self.state.models.iter().filter(|option| {
+            if !tokens.is_empty() {
+                let haystack = format!("{} {} {}", option.label, option.id, provider_name(&option.provider)).to_lowercase();
+                tokens.iter().all(|token| haystack.contains(token))
+            } else if self.model_section == "favorites" {
+                self.state.model_favorites.contains(&(option.provider.clone(), option.id.clone()))
+            } else { option.provider == self.model_section }
+        }).cloned().collect()
+    }
+    fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_model = !self.show_model;
+        if self.show_model {
+            self.model_section = self.state.selected_model.as_ref().map(|item| item.0.clone())
+                .or_else(|| self.state.models.first().map(|item| item.provider.clone())).unwrap_or_default();
+            self.model_cursor = 0;
+            self.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+            window.focus(&self.model_search.focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+    fn choose_model(&mut self, provider: String, id: String, cx: &mut Context<Self>) {
+        if self.state.models.iter().any(|option| option.provider == provider && option.id == id && option.available) {
+            self.show_model = false;
+            self.command(Command::SelectModel { provider, id }, cx);
+        }
+    }
+    fn send(&mut self, _: &SendMessage, window: &mut Window, cx: &mut Context<Self>) {
+        if self.show_model && self.model_search.focus_handle(cx).is_focused(window) {
+            let choices: Vec<_> = self.visible_models(cx).into_iter().filter(|option| option.available).collect();
+            if let Some(option) = choices.get(self.model_cursor).or_else(|| choices.first()) {
+                self.choose_model(option.provider.clone(), option.id.clone(), cx);
+                window.focus(&self.input.focus_handle(cx), cx);
+            }
+            return;
+        }
         if self.state.account_login {
             self.account_action(false, cx);
             return;
@@ -272,7 +329,13 @@ impl Render for Chat {
         let model = self.state.model.as_deref().unwrap_or("No model connected");
         let model_display = if narrow && model == "Offline fixture" { "Offline" } else { model };
         let model_options = self.state.models.clone();
+        let visible_models = self.visible_models(cx);
+        let mut providers = Vec::<String>::new();
+        for option in &model_options {
+            if !providers.contains(&option.provider) { providers.push(option.provider.clone()); }
+        }
         let selected_model = self.state.selected_model.clone();
+        let model_favorites = self.state.model_favorites.clone();
         let draft_ready = !self.input.read(cx).text().trim().is_empty();
         let review = self.state.review.clone();
         let provider_url = self.state.provider_url.clone();
@@ -378,9 +441,10 @@ impl Render for Chat {
             .on_click(cx.listener(|view, _, _, cx| {
                 if view.show_model { view.show_model = false; cx.notify(); }
             }))
-            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if view.show_model && event.keystroke.key == "escape" {
                     view.show_model = false;
+                    window.focus(&view.input.focus_handle(cx), cx);
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -535,7 +599,8 @@ impl Render for Chat {
                 )
             })
             .when(!self.state.account_login, |d| d.child(
-                div().px(px(16.)).pb(px(16.)).pt(px(6.)).child(
+                div().px(px(if narrow { 16. } else { 30. }))
+                    .pb(px(if narrow { 20. } else { 24. })).child(
                     div()
                         .w_full()
                         .min_h(px(123.))
@@ -543,7 +608,7 @@ impl Render for Chat {
                         .flex()
                         .flex_col()
                         .pt(px(14.)).px(px(14.)).pb(px(10.))
-                        .rounded(px(8.))
+                        .rounded(px(20.))
                         .border_1().border_color(rgb(0xE3E5E8))
                         .bg(rgb(0xFFFFFF))
                         .shadow(vec![
@@ -553,36 +618,31 @@ impl Render for Chat {
                         .child(self.input.clone())
                         .child(div().flex_1().min_h(px(10.)))
                         .child(div().flex().items_center().gap(px(8.))
-                            .child(div().w(px(100.)).h(px(32.)).px(px(2.)).rounded(px(8.))
-                                .border_1().border_color(rgb(0xE3E5E8))
-                                .flex().items_center()
-                                .child(div().w_full().px_2().py_1().rounded(px(5.))
-                                    .bg(rgb(0xFFFFFF)).shadow_xs().text_size(px(12.))
-                                    .child("Moron")))
                             .child(div().id("attach-unavailable")
                                 .aria_label("Attachments unavailable for this connection")
                                 .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
                                 .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
                             .child(div().id("model").role(gpui::Role::Button)
-                                .aria_label("Current backend model details; selection unavailable")
+                                .aria_label("Choose a model")
                                 .aria_expanded(self.show_model)
                                 .focusable().tab_stop(true)
-                                .min_w_0().max_w(px(190.)).flex_1().h(px(28.)).px_2()
+                                .min_w_0().max_w(px(230.)).h(px(28.)).px(px(7.))
                                 .rounded(px(6.)).flex().items_center().gap_1()
                                 .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
                                 .text_size(px(12.))
-                                .child(svg().data(ICON_AGENT).w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
+                                .child(svg().data(provider_icon(selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or("")))
+                                    .w(px(16.)).h(px(16.)))
                                 .child(div().min_w_0().truncate().child(model_display.to_owned()))
-                                .child("⌄")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.show_model = !view.show_model;
-                                    cx.stop_propagation(); cx.notify();
+                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.open_model_menu(window, cx);
+                                    cx.stop_propagation();
                                 }))
-                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                                     if !event.keystroke.modifiers.modified() &&
                                         matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        view.show_model = !view.show_model;
-                                        cx.stop_propagation(); cx.notify();
+                                        view.open_model_menu(window, cx);
+                                        cx.stop_propagation();
                                     }
                                 })))
                             .child(div().flex_1())
@@ -592,11 +652,12 @@ impl Render for Chat {
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
                             .child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
-                                .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
+                                .w(px(32.)).h(px(32.)).rounded(px(16.))
+                                .flex().items_center().justify_center()
                                 .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
                             .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
-                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
+                                    .w(px(28.)).h(px(28.)).rounded(px(14.))
                                     .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
                                     .flex().items_center().justify_center()
                                     .child(svg().data(ICON_SEND).w(px(16.)).h(px(16.)).text_color(rgb(0xFFFFFF)))
@@ -615,52 +676,145 @@ impl Render for Chat {
                             d.child(
                                 div()
                                     .id("model-menu")
-                                    .role(gpui::Role::Region)
-                                    .aria_label("Backend model details; selection managed by server")
-                                    .absolute().bottom(px(56.)).left(px(if narrow { 0. } else { 161. }))
+                                    .role(gpui::Role::Dialog)
+                                    .aria_label("Choose a model")
+                                    .absolute().bottom(px(56.)).left(px(14.))
                                     .w(px(362.)).max_w_full().h(px(348.))
-                                    .rounded(px(8.))
+                                    .rounded(px(10.))
                                     .border_1()
                                     .border_color(rgb(0xE3E5E8))
                                     .bg(rgb(0xFFFFFF))
-                                    .shadow(vec![BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., 0.12)).blur_radius(px(28.))])
+                                    .shadow(vec![
+                                        BoxShadow::new(px(0.), px(10.), hsla(0., 0., 0., 0.12)).blur_radius(px(28.)),
+                                        BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.03)).blur_radius(px(5.)),
+                                    ])
                                     .text_size(px(12.))
                                     .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified() {
+                                            let choices = view.visible_models(cx).into_iter().filter(|option| option.available).count();
+                                            if choices > 0 && matches!(event.keystroke.key.as_str(), "down" | "up") {
+                                                if event.keystroke.key == "down" { view.model_cursor = (view.model_cursor + 1) % choices; }
+                                                else { view.model_cursor = (view.model_cursor + choices - 1) % choices; }
+                                                cx.stop_propagation(); cx.notify();
+                                            }
+                                        }
+                                    }))
                                     .flex()
                                     .child(div().w(px(44.)).h_full().flex_shrink_0()
                                         .border_r_1().border_color(rgb(0xE3E5E8))
-                                        .flex().flex_col().items_center().pt_3().gap_3()
-                                        .child(div().w(px(24.)).h(px(24.))
+                                        .flex().flex_col().items_center().pt(px(5.)).gap(px(4.))
+                                        .child(div().id("model-favorites").role(gpui::Role::Button)
+                                            .aria_label("Favorites").aria_selected(self.model_section == "favorites")
+                                            .focusable().tab_stop(true).cursor_pointer()
+                                            .w(px(35.)).h(px(36.)).rounded(px(6.))
+                                            .bg(if self.model_section == "favorites" { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                                             .flex().items_center().justify_center()
-                                            .child(svg().data(ICON_AGENT).w(px(18.)).h(px(18.)).text_color(rgb(0x626772))))
-                                        .child(div().w(px(32.)).h(px(32.)).rounded(px(6.))
-                                            .bg(rgb(0xECEEF1)).flex().items_center().justify_center()
-                                            .child(svg().data(ICON_AGENT).w(px(20.)).h(px(20.)).text_color(rgb(0x626772)))))
-                                    .child(div().flex_1().min_w_0().p(px(12.)).flex().flex_col()
-                                        .child(div().h(px(36.)).px_2().border_b_1()
-                                            .border_color(rgb(0xE3E5E8)).flex().items_center().gap_2()
-                                            .text_color(rgb(0x626772))
-                                            .child("Models on this server"))
+                                            .child(svg().data(ICON_STAR).w(px(20.)).h(px(20.)))
+                                            .on_click(cx.listener(|view, _, _, cx| {
+                                                view.model_section = "favorites".into(); view.model_cursor = 0;
+                                                view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                cx.stop_propagation(); cx.notify();
+                                            })))
+                                        .child(div().w(px(32.)).border_t_1().border_color(rgb(0xE3E5E8)))
+                                        .children(providers.iter().map(|provider| {
+                                            let chosen = provider.clone();
+                                            div().id(SharedString::from(format!("model-provider-{provider}")))
+                                                .role(gpui::Role::Button)
+                                                .aria_label(SharedString::from(provider_name(provider).to_owned()))
+                                                .aria_selected(self.model_section == *provider)
+                                                .focusable().tab_stop(true).cursor_pointer()
+                                                .w(px(35.)).h(px(36.)).rounded(px(6.))
+                                                .bg(if self.model_section == *provider { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
+                                                .flex().items_center().justify_center()
+                                                .child(svg().data(provider_icon(provider)).w(px(20.)).h(px(20.)))
+                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                    view.model_section = chosen.clone(); view.model_cursor = 0;
+                                                    view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                                                    cx.stop_propagation(); cx.notify();
+                                                }))
+                                        })))
+                                    .child(div().flex_1().min_w_0().pt(px(7.)).px(px(12.)).pb(px(9.)).flex().flex_col()
+                                        .child(div().h(px(32.)).border_b_1()
+                                            .border_color(rgb(0xE3E5E8)).flex().items_center().gap(px(5.))
+                                            .child(svg().data(ICON_SEARCH).w(px(16.)).h(px(16.)))
+                                            .child(self.model_search.clone()))
+                                        .when(self.model_section == "favorites" && self.model_search.read(cx).text().is_empty(), |d|
+                                            d.child(div().pt(px(10.)).px_2().text_size(px(11.))
+                                                .text_color(rgb(0x626772)).child("Favorites")))
                                         .child(div().id("model-catalog").role(gpui::Role::List)
-                                            .aria_label("Server model catalog")
-                                            .flex_1().min_h_0().overflow_y_scroll().pt_2()
-                                            .when(model_options.is_empty(), |d| d.child(
-                                                div().px_2().py_2().text_color(rgb(0x626772))
-                                                    .child("No model catalog available")))
-                                            .children(model_options.iter().map(|option| {
+                                            .aria_label("Models")
+                                            .flex_1().min_h_0().overflow_y_scroll().pt(px(7.))
+                                            .when(visible_models.is_empty(), |d| d.child(
+                                                div().px_2().pt(px(20.)).text_color(rgb(0x626772))
+                                                    .child(if !self.model_search.read(cx).text().is_empty() { "No models found" }
+                                                        else if self.model_section == "favorites" { "No favorites yet" }
+                                                        else { "No available models" })))
+                                            .children(visible_models.iter().enumerate().map(|(index, option)| {
                                                 let selected = selected_model.as_ref().is_some_and(|(provider, id)|
                                                     provider == &option.provider && id == &option.id);
-                                                div().px_2().py_2().rounded(px(6.))
-                                                    .bg(if selected { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
-                                                    .flex().items_center().gap_2()
-                                                    .child(div().min_w_0().flex_1().flex().flex_col()
-                                                        .child(div().truncate().child(option.label.clone()))
-                                                        .child(div().text_size(px(11.)).text_color(rgb(0x626772))
-                                                            .child(option.provider.clone())))
-                                                    .when(selected, |d| d.child("✓"))
-                                            })))
-                                        .child(div().pt_2().border_t_1().border_color(rgb(0xE3E5E8))
-                                            .text_color(rgb(0x626772)).child("Model selection is set by your server."))),
+                                                let favorite = model_favorites.contains(&(option.provider.clone(), option.id.clone()));
+                                                let provider = option.provider.clone(); let id = option.id.clone();
+                                                let star_provider = provider.clone(); let star_id = id.clone();
+                                                let key_provider = provider.clone(); let key_id = id.clone();
+                                                let star_key_provider = provider.clone(); let star_key_id = id.clone();
+                                                let active_index = visible_models[..index].iter().filter(|item| item.available).count();
+                                                div().id(SharedString::from(format!("model-option-{provider}-{id}")))
+                                                    .role(gpui::Role::ListItem).aria_selected(selected)
+                                                    .when(option.available, |d| d.focusable().tab_stop(true))
+                                                    .h(px(46.)).px(px(8.)).rounded(px(6.))
+                                                    .bg(if selected || (option.available && self.model_cursor == active_index) { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
+                                                    .flex().items_center().gap(px(5.))
+                                                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                                                        if !event.keystroke.modifiers.modified() &&
+                                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                            view.choose_model(key_provider.clone(), key_id.clone(), cx);
+                                                            window.focus(&view.input.focus_handle(cx), cx);
+                                                            cx.stop_propagation();
+                                                        }
+                                                    }))
+                                                    .child(div().id(SharedString::from(format!("model-choice-{provider}-{id}")))
+                                                        .role(gpui::Role::Button)
+                                                        .aria_label(SharedString::from(format!("Select {}", option.label)))
+                                                        .flex_1().min_w_0().flex().flex_col().justify_center()
+                                                        .when(option.available, |d| d.cursor_pointer())
+                                                        .when(!option.available, |d| d.opacity(0.45))
+                                                        .child(div().truncate().line_height(px(16.)).child(option.label.clone()))
+                                                        .child(div().flex().items_center().gap(px(5.)).mt(px(3.))
+                                                            .text_size(px(11.)).text_color(rgb(0x626772))
+                                                            .child(svg().data(provider_icon(&option.provider)).w(px(12.)).h(px(12.)))
+                                                            .child(provider_name(&option.provider).to_owned()))
+                                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                                            view.choose_model(provider.clone(), id.clone(), cx);
+                                                            window.focus(&view.input.focus_handle(cx), cx);
+                                                            cx.stop_propagation();
+                                                        })))
+                                                    .when(selected, |d| d.child(div().text_color(rgb(0x626772)).child("✓")))
+                                                    .child(div().id(SharedString::from(format!("model-star-{}-{}", option.provider, option.id)))
+                                                        .role(gpui::Role::Button)
+                                                        .aria_label(if favorite { "Remove from favorites" } else { "Add to favorites" })
+                                                        .aria_selected(favorite).focusable().tab_stop(true)
+                                                        .w(px(24.)).h(px(26.)).rounded(px(4.))
+                                                        .flex().items_center().justify_center().cursor_pointer()
+                                                        .child(svg().data(ICON_STAR).w(px(14.)).h(px(14.))
+                                                            .when(favorite, |d| d.text_color(rgb(0xEAB308))))
+                                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                                            view.command(Command::ToggleModelFavorite {
+                                                                provider: star_provider.clone(), id: star_id.clone(), favorite: !favorite,
+                                                            }, cx);
+                                                            cx.stop_propagation();
+                                                        }))
+                                                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                                            if !event.keystroke.modifiers.modified() &&
+                                                                matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                                view.command(Command::ToggleModelFavorite {
+                                                                    provider: star_key_provider.clone(), id: star_key_id.clone(), favorite: !favorite,
+                                                                }, cx);
+                                                                cx.stop_propagation();
+                                                            }
+                                                        })))
+                                            }))),
+                                    ),
                             )
                         })
                 ),
@@ -688,7 +842,7 @@ fn main() {
         #[cfg(target_os = "windows")]
         cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        let bounds = Bounds::centered(None, size(px(900.), px(720.)), cx);
+        let bounds = Bounds::centered(None, size(px(1200.), px(760.)), cx);
         let window = cx
             .open_window(
                 WindowOptions {

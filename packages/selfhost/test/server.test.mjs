@@ -63,12 +63,23 @@ test("named morons own distinct durable sessions and preserve rules", async () =
     assert.equal(repoSession.status, 201);
     assert.equal(fitnessSession.status, 201);
     assert.notEqual(repoSession.session.conversationId, fitnessSession.session.conversationId);
+    const choices = await call('GET', '/v1/sessions/repo-main/models');
+    assert.deepEqual(choices.models.map(({ id, available }) => [id, available]),
+      [['fixture', true], ['fixture-alt', true]]);
+    assert.equal((await call('POST', '/v1/sessions/repo-main/model',
+      { provider: 'other-account', id: 'fixture-alt' })).status, 403);
+    assert.deepEqual((await call('POST', '/v1/sessions/repo-main/model',
+      { provider: 'morons-fixture', id: 'fixture-alt' })).selected,
+      { provider: 'morons-fixture', id: 'fixture-alt' });
+    assert.equal((await call('GET', '/v1/sessions/fitness-main/models')).selected.id, 'fixture');
     const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
     assert.equal((await call("POST", "/v1/sessions/repo-main/chat", { requestId: id, text: "Source?" })).answer, "Fixture: Source?");
     assert.equal((await call("POST", "/v1/sessions/repo-main/chat", { requestId: id, text: "Different" })).status, 409);
     assert.equal((await call("GET", "/v1/sessions/fitness-main/history")).messages.length, 0);
     await server.close();
     server = await openFixtureServer({ databasePath, ownerToken });
+    assert.equal((await call('GET', '/v1/sessions/repo-main/models')).selected.id, 'fixture-alt');
+    assert.equal((await call('GET', '/v1/sessions/fitness-main/models')).selected.id, 'fixture');
     const repo = await call("GET", "/v1/sessions/repo-main/history");
     assert.deepEqual(repo.messages.map((item) => item.role), ["user", "assistant"]);
     assert.equal((await call("GET", "/v1/morons")).morons.length, 2);
@@ -114,6 +125,12 @@ test("same request rejects conflicting text while in flight; distinct turns seri
     await fetch(`${server.url}/v1/morons/repo/sessions`, { method: "POST", headers, body: JSON.stringify({ id: "repo-main" }) });
     const first = post("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", "first");
     await firstSettled;
+    const duringTurn = await fetch(`${server.url}/v1/sessions/repo-main/model`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ provider: 'morons-fixture', id: 'fixture-alt' }),
+    });
+    assert.equal(duringTurn.status, 409);
+    assert.equal((await (await fetch(`${server.url}/v1/sessions/repo-main/models`, { headers })).json()).selected.id, 'fixture');
     const conflict = await post("aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa", "different");
     assert.equal(conflict.status, 409);
     const second = post("bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", "second");

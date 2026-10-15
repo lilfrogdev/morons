@@ -88,10 +88,12 @@ using a key derived from the external provider-key file; the latter is never
 copied into the account directory.
 
 Adding the key exposes login controls but keeps chat on the offline fixture.
-To select a real Pi model, also set `MORONS_PROVIDER_MODEL_ID` to a model ID in
-Pi's installed OpenAI catalog. This operator choice may still fail if the
-signed-in account lacks model access. No actual provider login or model call
-was made during development.
+After signing in, choose an available model from the GPUI composer. The server
+checks Pi's authenticated catalog and stores each durable session's choice.
+`MORONS_PROVIDER_MODEL_ID` can still set a server default, but is not required
+for interactive selection. Pi's catalog does not remotely verify each model's
+account entitlement, so a chosen real model may fail on the first call. No
+actual provider login or paid model call was made during development.
 
 GPUI starts OAuth only when a person presses **Connect ChatGPT**. It opens the
 Pi-generated `auth.openai.com` URL in a browser only when the person presses

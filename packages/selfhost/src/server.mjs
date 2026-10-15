@@ -37,7 +37,8 @@ function fixtureModels() {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 32768, maxTokens: 4096,
   };
-  const stream = (_model, conversation) => {
+  const alternate = { ...model, id: 'fixture-alt', name: 'Offline alternate' };
+  const stream = (selected, conversation) => {
     const events = createAssistantMessageEventStream();
     const latest = conversation.messages.at(-1);
     const last = [...conversation.messages].reverse().find((message) => message.role === "user");
@@ -53,7 +54,7 @@ function fixtureModels() {
       role: "assistant", content: tool ? [{ type: 'toolCall',
         id: createHash('sha256').update(`${conversation.messages.length}:${input}`).digest('hex').slice(0, 24),
         name: tool.name, arguments: tool.arguments }] : [{ type: "text", text: resultText }],
-      api: model.api, provider: model.provider, model: model.id,
+      api: selected.api, provider: selected.provider, model: selected.id,
       timestamp: Date.now(), stopReason: tool ? 'toolUse' : "stop",
       usage: {
         input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
@@ -69,7 +70,7 @@ function fixtureModels() {
   models.setProvider({
     id: model.provider, name: "Offline fixture",
     auth: { apiKey: { name: "Fixture", resolve: async () => ({ auth: { apiKey: "fixture" } }) } },
-    getModels: () => [model], stream, streamSimple: stream,
+    getModels: () => [model, alternate], stream, streamSimple: stream,
   });
   return models;
 }
@@ -122,7 +123,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
-  let catalog, harness, root, optchat, repoExtension, selectedModel;
+  let catalog, harness, root, optchat, repoExtension, selectedModel, models;
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
@@ -135,7 +136,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     }
     repoExtension = providerModelId && !repositoryPlan?.runnerImage ? null : repoTools(catalog, repositoryPlan);
     if (repoExtension) registry.install(repoExtension);
-    const models = providerModels ?? fixtureModels();
+    models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     if (providerModelId && !providerModels?.getProvider('openai')?.getModels().some((model) => model.id === providerModelId))
       throw new Error('configured_provider_model_not_in_catalog');
@@ -173,6 +174,27 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const inFlight = new Map();
   const handoffFlight = new Map();
   const sessionTail = new Map();
+  const modelChanges = new Set();
+  let modelRefreshAt = 0;
+  async function modelCatalog(conversation) {
+    if (providerModels && await models.checkAuth('openai')) {
+      if (Date.now() - modelRefreshAt > 60_000) {
+        modelRefreshAt = Date.now();
+        await models.refresh({ providers: ['openai'], allowNetwork: true });
+      }
+    }
+    const available = await models.getAvailable();
+    const allowed = new Set(available.map((model) => `${model.provider}\0${model.id}`));
+    const selected = (await conversation.agent(BACKGROUND_CONTEXT)).model;
+    const known = models.getModels().slice(0, 127).map((model) => ({
+      provider: model.provider, id: model.id, label: model.name,
+      available: allowed.has(`${model.provider}\0${model.id}`),
+    }));
+    if (selected && !known.some((model) => model.provider === selected.provider && model.id === selected.modelId))
+      known.push({ provider: selected.provider, id: selected.modelId, label: selected.modelId, available: false });
+    return { selected: selected && { provider: selected.provider, id: selected.modelId },
+      models: known, favorites: catalog.listModelFavorites() };
+  }
   const memoryAccess = (session) => moronMemoryAccess({
     accountId: "local-owner", moronId: session.moronId, sessionId: session.id,
     allowedSessionIds: [session.id], aclRevision: "local-owner-v1",
@@ -337,9 +359,16 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
       if (request.method === "GET" && path === "/v1/models")
-        return send(response, 200, { selected: { provider: selectedModel.provider, id: selectedModel.modelId }, models: [providerModelId ? { provider: 'openai', id: providerModelId,
-          label: `Configured Pi model: ${providerModelId} (sign-in required)`, available: true } :
-          { provider: 'morons-fixture', id: 'fixture', label: 'Offline fixture', available: true }] });
+        return send(response, 200, await modelCatalog(root));
+      if (request.method === 'POST' && path === '/v1/models/favorite') {
+        const body = await readBody(request);
+        if (typeof body?.provider !== 'string' || typeof body?.id !== 'string' ||
+            typeof body?.favorite !== 'boolean' || body.provider.length > 80 || body.id.length > 128 ||
+            !models.getModel(body.provider, body.id))
+          return send(response, 400, { error: 'invalid_model' });
+        catalog.setModelFavorite(body.provider, body.id, body.favorite);
+        return send(response, 200, { favorites: catalog.listModelFavorites() });
+      }
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons() });
       const visualList = /^\/v1\/sessions\/([^/]+)\/visualizations$/.exec(path);
@@ -413,6 +442,37 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         }
       }
       const sessionPath = /^\/v1\/sessions\/([^/]+)\/(history|chat)$/.exec(path);
+      const sessionModelPath = /^\/v1\/sessions\/([^/]+)\/models?$/.exec(path);
+      if (sessionModelPath) {
+        const session = catalog.getSession(decodeURIComponent(sessionModelPath[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+        if (!conversation) return send(response, 500, { error: 'conversation_missing' });
+        if (request.method === 'GET') return send(response, 200, await modelCatalog(conversation));
+        if (request.method === 'POST' && path.endsWith('/model')) {
+          const body = await readBody(request);
+          if (typeof body?.provider !== 'string' || typeof body?.id !== 'string' ||
+              body.provider.length > 80 || body.id.length > 128 || !body.provider || !body.id)
+            return send(response, 400, { error: 'invalid_model' });
+          if (modelChanges.has(session.id) || sessionTail.has(session.id))
+            return send(response, 409, { error: 'session_busy' });
+          modelChanges.add(session.id);
+          try {
+            const busy = (await harness.inspect(BACKGROUND_CONTEXT)).tasks.some((task) =>
+              task.record.conversationId === conversation.id);
+            if (busy || sessionTail.has(session.id)) return send(response, 409, { error: 'session_busy' });
+            const catalogView = await modelCatalog(conversation);
+            if (!catalogView.models.some((model) => model.provider === body.provider &&
+                model.id === body.id && model.available))
+              return send(response, 403, { error: 'model_unavailable' });
+            await conversation.configure({ model: { provider: body.provider, modelId: body.id },
+              ...(repoExtension && !repositoryPlan?.runnerImage
+                ? { extensions: body.provider === 'morons-fixture'
+                  ? { add: [repoExtension] } : { remove: [repoExtension] } } : {}) }, BACKGROUND_CONTEXT);
+            return send(response, 200, await modelCatalog(conversation));
+          } finally { modelChanges.delete(session.id); }
+        }
+      }
       if (sessionPath) {
         const session = catalog.getSession(decodeURIComponent(sessionPath[1]));
         if (!session) return send(response, 404, { error: "session_not_found" });
@@ -421,6 +481,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (request.method === "GET" && sessionPath[2] === "history")
           return send(response, 200, await history(conversation, session.id, session.moronId));
         if (request.method === "POST" && sessionPath[2] === "chat") {
+          if (modelChanges.has(session.id)) return send(response, 409, { error: 'session_busy' });
           const body = await readBody(request);
         const result = typeof body?.text === "string" && body.text.startsWith("@")
             ? await delegatedChat(session, body)

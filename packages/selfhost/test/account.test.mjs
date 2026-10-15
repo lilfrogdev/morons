@@ -33,6 +33,13 @@ test('two accounts isolate named Pi state while two device sessions share one ac
     assert.equal((await call('POST', '/v1/accounts', { name: 'charlie', password: 'charlie-test-password-123' }, bob.token)).status, 403);
     await call('POST', '/v1/morons', { id: 'repo', name: 'Alice Repo', rules: '', preferences: '' }, aliceMac.token);
     await call('POST', '/v1/morons/repo/sessions', { id: 'repo-main' }, aliceMac.token);
+    assert.deepEqual((await call('POST', '/v1/sessions/repo-main/model',
+      { provider: 'morons-fixture', id: 'fixture-alt' }, aliceMac.token)).selected,
+      { provider: 'morons-fixture', id: 'fixture-alt' });
+    assert.equal((await call('GET', '/v1/sessions/repo-main/models', null, alicePc.token)).selected.id, 'fixture-alt');
+    assert.equal((await call('POST', '/v1/models/favorite',
+      { provider: 'morons-fixture', id: 'fixture-alt', favorite: true }, aliceMac.token)).favorites.length, 1);
+    assert.equal((await call('GET', '/v1/sessions/repo-main/models', null, alicePc.token)).favorites[0].id, 'fixture-alt');
     const message = await call('POST', '/v1/sessions/repo-main/chat', {
       requestId: '11111111-1111-4111-8111-111111111111', text: 'Alice private decision',
     }, aliceMac.token);
@@ -49,16 +56,21 @@ test('two accounts isolate named Pi state while two device sessions share one ac
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).status, 404);
     await call('POST', '/v1/morons', { id: 'repo', name: 'Bob Repo', rules: '', preferences: '' }, bob.token);
     await call('POST', '/v1/morons/repo/sessions', { id: 'repo-main' }, bob.token);
+    assert.equal((await call('GET', '/v1/sessions/repo-main/models', null, bob.token)).selected.id, 'fixture');
+    assert.deepEqual((await call('GET', '/v1/sessions/repo-main/models', null, bob.token)).favorites, []);
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).messages.length, 0);
     assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, bob.token)).documents.length, 0);
     await server.close();
     server = await openAccountServer({ dataDir, bootstrapToken });
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, alicePc.token)).messages[0].text, 'Alice private decision');
+    assert.equal((await call('GET', '/v1/sessions/repo-main/models', null, alicePc.token)).selected.id, 'fixture-alt');
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).messages.length, 0);
     assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, alicePc.token)).documents.length, 1);
     await call('POST', '/v1/session/logout', {}, aliceMac.token);
     assert.equal((await call('GET', '/v1/morons', null, aliceMac.token)).status, 401);
     assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, aliceMac.token)).status, 401);
+    assert.equal((await call('POST', '/v1/sessions/repo-main/model',
+      { provider: 'morons-fixture', id: 'fixture' }, aliceMac.token)).status, 401);
     assert.equal((await call('GET', '/v1/morons', null, alicePc.token)).status, 200);
   } finally {
     await server?.close().catch(() => {});

@@ -14,11 +14,17 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, base_revision TEXT NOT NULL, diff TEXT NOT NULL, checks TEXT NOT NULL, decision TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS visualizations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), document TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);`);
+  db.exec('CREATE TABLE IF NOT EXISTS model_favorites (provider TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider, model_id))');
   if (!db.prepare('PRAGMA table_info(review_intents)').all().some((column) => column.name === 'base_revision'))
     db.exec('ALTER TABLE review_intents ADD COLUMN base_revision TEXT');
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
+    listModelFavorites: () => db.prepare('SELECT provider, model_id AS id FROM model_favorites ORDER BY provider, model_id').all(),
+    setModelFavorite(provider, id, favorite) {
+      if (favorite) db.prepare('INSERT OR IGNORE INTO model_favorites VALUES (?, ?)').run(provider, id);
+      else db.prepare('DELETE FROM model_favorites WHERE provider = ? AND model_id = ?').run(provider, id);
+    },
     listMorons: () => db.prepare("SELECT * FROM morons ORDER BY created_at, id").all().map(moron),
     getMoron: (id) => moron(getMoron.get(id)),
     createMoron({ id, name, rules, preferences }) {

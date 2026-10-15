@@ -114,9 +114,17 @@ fn serve(
             "/v1/session/logout" => serde_json::json!({"signedOut":true}),
             "/v1/session/me" => serde_json::json!({"account":{"id":"fixture-account","name":"owner"}}),
             "/v1/provider/openai/status" => serde_json::json!({"available":true,"provider":{"state":"awaiting_callback","authorizationUrl":"https://auth.openai.com/api/accounts/authorize?state=mock"}}),
-            "/v1/models" => {
-                serde_json::json!({"models":[{"provider":"morons-fixture","id":"fixture","label":"Offline fixture","available":true}]})
+            "/v1/sessions/main/models" | "/v1/sessions/main/model" => {
+                let selected = requests.lock().unwrap().iter().rev()
+                    .find(|(route, body)| route == "/v1/sessions/main/model" && body["id"].is_string())
+                    .map(|(_, body)| body["id"].as_str().unwrap().to_owned())
+                    .unwrap_or_else(|| "fixture".into());
+                serde_json::json!({"selected":{"provider":"morons-fixture","id":selected},
+                    "models":[{"provider":"morons-fixture","id":"fixture","label":"Offline fixture","available":true},
+                              {"provider":"morons-fixture","id":"fixture-alt","label":"Offline alternate","available":true}],
+                    "favorites":[]})
             }
+            "/v1/models/favorite" => serde_json::json!({"favorites":[]}),
             "/v1/morons" => serde_json::json!({"morons":[{"id":"repo","name":"Repository"}]}),
             "/v1/morons/repo/sessions" => serde_json::json!({"sessions":[{"id":"main"}]}),
             "/v1/sessions/main/history" => {
@@ -294,6 +302,11 @@ fn named_session_chat_reconnects_with_server_history() {
         let initial = until(&updates, |s| s.status == "Connected").await;
         assert_eq!(initial.model.as_deref(), Some("Offline fixture"));
         assert_eq!(initial.selected_moron.as_deref(), Some("repo"));
+        worker.send(Command::SelectModel { provider: "morons-fixture".into(), id: "fixture-alt".into() }).unwrap();
+        let switched = until(&updates, |s| s.selected_model.as_ref().is_some_and(|(_, id)| id == "fixture-alt")).await;
+        assert_eq!(switched.model.as_deref(), Some("Offline alternate"));
+        worker.send(Command::ToggleModelFavorite { provider: "morons-fixture".into(), id: "fixture-alt".into(), favorite: true }).unwrap();
+        until(&updates, |s| s.status == "Connected" && s.selected_model.as_ref().is_some_and(|(_, id)| id == "fixture-alt")).await;
         worker
             .send(Command::Submit("Inspect this repo".into()))
             .unwrap();
@@ -310,6 +323,8 @@ fn named_session_chat_reconnects_with_server_history() {
             .iter()
             .any(|(route, _)| route == "/v1/morons/repo/sessions")
     );
+    assert!(requests.iter().any(|(route, body)| route == "/v1/sessions/main/model" && body["id"] == "fixture-alt"));
+    assert!(requests.iter().any(|(route, body)| route == "/v1/models/favorite" && body["favorite"] == true));
     assert_eq!(
         requests
             .iter()
@@ -376,7 +391,12 @@ fn named_account_setup_signin_and_logout_use_in_app_credentials() {
         }).await.unwrap();
         worker.send(Command::AccountLogout).unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
-            loop { let state = updates.recv().await.unwrap(); if state.account_login { break; } }
+            loop { let state = updates.recv().await.unwrap(); if state.account_login {
+                assert!(state.models.is_empty());
+                assert!(state.selected_model.is_none());
+                assert!(state.model_favorites.is_empty());
+                break;
+            } }
         }).await.unwrap();
         let requests = fixture.requests.lock().unwrap();
         assert!(requests.iter().any(|(route, _)| route == "/v1/accounts/bootstrap"));

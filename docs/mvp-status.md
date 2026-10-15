@@ -34,10 +34,14 @@ a final redirect URL if needed, cancel, status, and disconnect. The server
 requires an owner-private 32-byte unlock key before exposing this path, keeps
 provider credentials in an encrypted per-account store, and never returns
 them to GPUI. The real Pi model path passed mocked responses through durable
-chat; repository tools are gated on a verified container runner in that mode. The default remains offline
-even with a provider key; selecting a real model also requires an explicit
-catalog model ID from the operator. Account entitlement and remote token
-validity have not been verified. No actual OAuth or paid call was made. Local
+chat; repository tools are gated on a verified container runner in that mode.
+The default remains offline even with a provider key. The server now presents Pi's authenticated
+catalog per account, checks availability again when a model is selected,
+persists that choice per durable session, and blocks changes while a turn is
+active. GPUI exposes search, provider filtering, and account-private model
+favorites. Pi's OpenAI catalog does not provide a remote entitlement probe;
+actual remote model access remains unverified until a human signs in and uses
+it. No actual OAuth or paid call was made. Local
 credential metadata restores provider status after a restart.
 
 ## Trust boundary and remaining milestones
