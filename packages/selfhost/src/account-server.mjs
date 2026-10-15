@@ -8,7 +8,7 @@ import { openFixtureServer } from './server.mjs';
 import { acquireOwnerLock } from './owner-lock.mjs';
 import { createProviderFlow } from './provider-flow.mjs';
 import { openProviderRuntime } from './provider-runtime.mjs';
-import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
+import { assertRunnerPathSeparation, stopContainerWorkspace, verifyContainerRunner } from './container-review.mjs';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 
 function send(response, status, body) {
@@ -79,10 +79,20 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
       const reviewRoot = join(directory, 'reviews');
-      if (account.administrator && repositoryPlan) await mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+      const workspaceRoot = join(directory, 'computer-home');
+      if (account.administrator && repositoryPlan) {
+        await mkdir(reviewRoot, { recursive: true, mode: 0o700 });
+        await mkdir(workspaceRoot, { recursive: true, mode: 0o700 });
+        for (const path of [reviewRoot, workspaceRoot]) {
+          const info = await lstat(path);
+          if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()))
+            throw new Error('private_workspace_directory_required');
+          await chmod(path, 0o700);
+        }
+      }
       const internalToken = randomBytes(32).toString('hex');
       const accountPlan = account.administrator && repositoryPlan ?
-        { ...repositoryPlan, reviewRoot } : null;
+        { ...repositoryPlan, reviewRoot, workspaceRoot } : null;
       const providerRuntime = activeProviderFactory ? await activeProviderFactory(account, directory) : null;
       let server;
       try {
@@ -90,7 +100,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
           ownerToken: internalToken, repositoryPlan: accountPlan, accountId: account.id,
           providerModels: providerRuntime?.models ?? null, providerModelId });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
-          providerRuntime };
+          providerRuntime, accountPlan };
       } catch (error) { await server?.close(); await providerRuntime?.close?.(); throw error; }
     })();
     runtimes.set(account.id, pending);
@@ -176,15 +186,19 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
     url: `http://${host}:${server.address().port}`,
     async close() {
       closing = true;
+      const errors = [];
       await new Promise((resolve) => server.close(resolve));
       for (const pending of runtimes.values()) {
-        const target = await pending;
-        await target.provider.close();
-        await target.server.close();
-        await target.providerRuntime?.close?.();
+        let target;
+        try { target = await pending; } catch (error) { errors.push(error); continue; }
+        for (const cleanup of [() => target.provider.close(), () => target.server.close(),
+          () => target.providerRuntime?.close?.(), () => stopContainerWorkspace(target.accountPlan)]) {
+          try { await cleanup(); } catch (error) { errors.push(error); }
+        }
       }
-      accounts.close();
-      await lock.close();
+      try { accounts.close(); } catch (error) { errors.push(error); }
+      try { await lock.close(); } catch (error) { errors.push(error); }
+      if (errors.length) throw new AggregateError(errors, 'account_server_cleanup_failed');
     },
   };
 }

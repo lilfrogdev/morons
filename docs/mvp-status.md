@@ -51,11 +51,15 @@ confine filesystem reads; it remains for the offline fixture only. The new
 real-model worker requires a locally preloaded, digest-pinned Docker image.
 Startup probes the container's file, symlink, environment, network, subprocess
 escape, and approval-write boundary. Its source mount is read-only and its
-account-private review output is the only writable host mount. The worker
+account-private `computer-home` and review output are the only writable host mounts. The worker
 clones committed source rather than writing Git metadata in the original
-checkout. On this Mac both Colima profiles are stopped, so the live container
+checkout. A Docker Desktop container now persists across repository operations,
+stops at server shutdown, and reconnects to the same account-private workspace
+on restart. This adopts Rakazo's computer lifecycle boundary for repository
+operations; browser, desktop, and file-transfer actions are not implemented.
+On this Mac Docker Desktop is installed but stopped, so the live container
 probe has not run and real-model repository tools are unavailable. The next
-platform action is to start the existing Colima profile and provide a reviewed
+platform action is to start Docker Desktop and provide a reviewed
 Node 22+ and Git image digest for the live boundary probe. Two trusted,
 dependency-free check profiles now run the candidate's `review-runner` or
 `optchat` syntax check as well as `git diff --check`; model edits are confined

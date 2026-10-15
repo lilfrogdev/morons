@@ -126,8 +126,11 @@ then checks file, symlink, environment, network, subprocess escape, and
 approval-write boundaries in a disposable container. Startup fails if a probe
 fails. A real model without this verified runner has no repository tools.
 
-The worker container mounts the source repository read-only, its own code
-read-only, and the account's review directory writable. It has no provider
+The Docker Desktop workspace is provisioned once per administrator account and
+reconnected across operations. Server shutdown stops its container while the
+account's `computer-home` and review directories remain on disk. The worker
+container mounts the source repository read-only, its own code read-only, and
+only that account's `computer-home` and review directories writable. It has no provider
 credentials, account database, or Docker socket; network is disabled. It
 clones committed source into the review directory, creates a proposal branch
 there, applies only allowlisted paths, runs the fixed checks, and
@@ -141,18 +144,24 @@ provider-key files located in the source. For now the source must have an embedd
 points outside the read-only source mount. Review intents pin the source base
 commit so recovery still works if the source branch advances.
 
-On this Mac, Docker and Colima are installed but the Colima profiles are
-stopped, so no local runner image or digest could be inspected. A proposed
+The CLI explicitly targets Docker Desktop's `desktop-linux` context and does
+not change the operator's current Docker context. Docker Desktop is installed
+on this Mac but stopped, so no local runner image or digest could be inspected.
+A proposed
 upstream is the official `docker.io/library/node:22.23.3-bookworm` arm64 tag,
-whose buildpack-deps base includes Git. After permission to start Colima and
-pull the image, inspect its local `RepoDigests` and select its immutable
+whose buildpack-deps base includes Git. Once Docker Desktop is running, pull
+the image, inspect its local `RepoDigests`, and select its immutable
 `docker.io/library/node@sha256:...` reference; never substitute a guessed
-digest. The proposed commands are `colima start default`,
-`docker pull --platform linux/arm64 docker.io/library/node:22.23.3-bookworm`,
-and `docker image inspect docker.io/library/node:22.23.3-bookworm --format '{{json .RepoDigests}}'`.
-Starting Colima uses its configured four CPUs, 8 GiB RAM limit, and 30 GiB
-virtual disk; the image pull consumes network bandwidth and space in that
-disk. No custom image build is needed for the two dependency-free profiles.
+digest. Use `docker --context desktop-linux pull --platform linux/arm64
+docker.io/library/node:22.23.3-bookworm` and `docker --context desktop-linux
+image inspect docker.io/library/node:22.23.3-bookworm --format '{{json .RepoDigests}}'`.
+The image pull consumes network bandwidth and Docker Desktop disk space. No
+custom image build is needed for the two dependency-free profiles.
+The persistent computer lifecycle follows Rakazo's provider model; this
+implementation currently supports repository read and isolated proposals,
+not Rakazo's browser, desktop, or file-transfer actions. See
+https://github.com/elie222/rakazo/blob/main/docs/computer-runtime.md and
+https://github.com/elie222/rakazo/blob/main/LICENSE.
 Then start the server with that digest in a disposable local configuration
 and inspect its live boundary probe result. Only after it passes should
 `MORONS_RUNNER_IMAGE` be added to the server launch environment together with
