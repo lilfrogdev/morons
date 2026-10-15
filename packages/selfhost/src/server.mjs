@@ -9,7 +9,8 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/e
 import { AssistantEntry, createRegistry, Harness } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { openNodeOptChat } from "@morons/optchat/node";
-import { moronMemoryAccess, moronMemorySource } from "@morons/optchat/morons";
+import { createMemoryRuntime, createPiMemoryCompressor } from "./memory-runtime.mjs";
+import { createHandoffExtension, openHandoffStore } from "./handoff-runtime.mjs";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
 import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
@@ -45,8 +46,10 @@ function fixtureModels() {
     const input = typeof last?.content === "string" ? last.content : "";
     const source = /^\/source ([^\n]+)$/.exec(input);
     const patch = input.startsWith('/review\n') ? input.slice('/review\n'.length) : null;
+    const ask = /^Please ask @([a-z][a-z0-9-]{1,39}) about ([^\n]+?)(?:\n\n\[OptChat memory[\s\S]*)?\.?$/i.exec(input);
     const tool = latest?.role === 'toolResult' ? null : source ? { name: 'source_read', arguments: { path: source[1] } } :
-      patch ? { name: 'prepare_review', arguments: { patch } } : null;
+      patch ? { name: 'prepare_review', arguments: { patch } } : ask ?
+        { name: 'ask_moron', arguments: { targetMoronId: ask[1], question: ask[2] } } : null;
     const resultText = latest?.role === 'toolResult'
       ? latest.content?.filter((part) => part.type === 'text').map((part) => part.text).join('') ?? ''
       : (input === '/viz' || input.startsWith('/viz\n\n[OptChat memory')) ? `${VIZ_PREFIX}${JSON.stringify({ kind: 'bar', title: 'Repository checks', xLabel: 'Check', yLabel: 'Passed', points: [{ label: 'Diff', value: 1 }, { label: 'Tests', value: 1 }] })}` : `Fixture: ${input}`;
@@ -123,10 +126,11 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
-  let catalog, harness, root, optchat, repoExtension, selectedModel, models;
+  let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
+    handoffStore = openHandoffStore(`${databasePath}.model-handoffs.sqlite`);
     const registry = createRegistry();
     if (repositoryPlan?.runnerImage) {
       trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
@@ -138,6 +142,44 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (repoExtension) registry.install(repoExtension);
     models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
+    memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
+      piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models) });
+    handoffExtension = createHandoffExtension({ store: handoffStore, catalog,
+      getSourceUserEntryId: async ({ source }) => {
+        const conversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
+        const entries = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
+        const user = entries.find((entry) => entry.kind === 'pi.user');
+        if (!user) throw new Error('handoff_user_turn_missing');
+        return String(user.id);
+      },
+      getUserGrant: async ({ source, sourceUserEntryId }) => {
+        const conversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
+        const entries = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
+        const entry = entries.find((item) => item.kind === 'pi.user' && String(item.id) === sourceUserEntryId);
+        if (!entry) return null;
+        return catalog.listReplies(source.id).find((reply) => reply.text === entryText(entry))?.display_text ?? null;
+      },
+      authorizeTarget: async ({ source, target }) => source.moronId !== target.id,
+      ensureTargetSession: async ({ id, target, source }) => {
+        const existing = catalog.getSession(id);
+        if (existing) {
+          if (existing.moronId !== target.id) throw new Error('handoff_target_conflict');
+          return existing;
+        }
+        const sourceConversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
+        const sourceModel = (await sourceConversation.agent(BACKGROUND_CONTEXT)).model;
+        return createNamedSession(target, id, { handoff: true, model: sourceModel });
+      },
+      askTarget: async ({ targetSessionId, targetMoronId, question, requestId }) => {
+        const targetSession = catalog.getSession(targetSessionId);
+        if (!targetSession || targetSession.moronId !== targetMoronId) throw new Error('handoff_target_missing');
+        const targetConversation = await harness.conversation(targetSession.conversationId, BACKGROUND_CONTEXT);
+        const result = await chat(targetConversation, targetSession, { requestId, text: question });
+        if (result.status !== 200) throw new Error('handoff_target_failed');
+        return result.body.answer;
+      },
+    });
+    registry.install(handoffExtension);
     if (providerModelId && !providerModels?.getProvider('openai')?.getModels().some((model) => model.id === providerModelId))
       throw new Error('configured_provider_model_not_in_catalog');
     selectedModel = providerModelId ? { provider: 'openai', modelId: providerModelId } :
@@ -148,12 +190,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       BACKGROUND_CONTEXT,
     );
     root = await harness.root(BACKGROUND_CONTEXT, {
-      agent: { model: selectedModel },
+      agent: { model: selectedModel, extensions: [] },
     });
   } catch (error) {
     await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
     catalog?.close();
     optchat?.database.close();
+    handoffStore?.close();
     await ownerLock.close();
     throw error;
   }
@@ -175,6 +218,21 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const handoffFlight = new Map();
   const sessionTail = new Map();
   const modelChanges = new Set();
+  const handoffConfigured = new Set();
+  function isHandoffTarget(session) {
+    return catalog.isHandoffTarget(session.id) || handoffStore.isTargetSession(session.id);
+  }
+  function extensionsFor(session, model) {
+    if (isHandoffTarget(session)) return [];
+    return [handoffExtension, ...(session.moronId === 'repo' && repoExtension &&
+      (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])];
+  }
+  async function ensureHandoffTool(conversation, session) {
+    if (handoffConfigured.has(session.id)) return;
+    const model = (await conversation.agent(BACKGROUND_CONTEXT)).model;
+    await conversation.configure({ extensions: extensionsFor(session, model) }, BACKGROUND_CONTEXT);
+    handoffConfigured.add(session.id);
+  }
   let modelRefreshAt = 0;
   async function modelCatalog(conversation) {
     if (providerModels && await models.checkAuth('openai')) {
@@ -195,40 +253,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     return { selected: selected && { provider: selected.provider, id: selected.modelId },
       models: known, favorites: catalog.listModelFavorites() };
   }
-  const memoryAccess = (session) => moronMemoryAccess({
-    accountId: "local-owner", moronId: session.moronId, sessionId: session.id,
-    allowedSessionIds: [session.id], aclRevision: "local-owner-v1",
-  });
-  const authorizeMemory = (source, access) => source.projectId === access.projectId &&
-    source.repository === access.repository && (source.threadId === null ||
-    (source.threadId === access.threadId && access.allowedThreadIds.includes(source.threadId)));
-  async function syncMemory(conversation, session) {
-    const entries = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
-    const access = memoryAccess(session);
-    for (const entry of entries.reverse()) {
-      if (entry.kind !== "pi.assistant") continue;
-      const sourceId = `pi:${session.id}:${entry.id}`;
-      const raw = entryText(entry);
-      const text = Buffer.byteLength(raw) > 131072 ? Buffer.from(raw).subarray(0, 130000).toString("utf8") : raw;
-      optchat.memory.append(moronMemorySource(access, {
-        sourceId, kind: text === raw ? "assistant" : "assistant_excerpt", date: catalog.memoryDate(sourceId), text,
-      }));
-    }
-  }
-  async function memoryContext(conversation, session, requestId) {
-    await syncMemory(conversation, session);
-    const access = memoryAccess(session);
-    optchat.memory.beginTurn(`${session.id}:${requestId}`, access);
-    const page = optchat.memory.view(`${session.id}:${requestId}`, "initial", access, authorizeMemory, { limit: 8 });
-    const text = page.items.map((item) => item.text).join("\n").slice(0, 2048);
-    return text ? `\n\n[OptChat memory from this session:\n${text}\n]` : "";
-  }
   async function chat(conversation, session, body, displayText = body?.text) {
     const sessionId = session.id;
     if (typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
       return { status: 400, body: { error: "invalid_text" } };
     if (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))
       return { status: 400, body: { error: "invalid_request_id" } };
+    await ensureHandoffTool(conversation, session);
     const key = `${sessionId}:${body.requestId}`;
     if (inFlight.has(key)) {
       const active = inFlight.get(key);
@@ -242,7 +273,9 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return { status: 200, body: { requestId: body.requestId, answer: previous.answer } };
       // Reserve request text before Pi admission. After a crash, Pi's durable
       // requestId returns the same settled entry; a changed text is rejected.
-      const submitted = previous ? previous.text : body.text + await memoryContext(conversation, session, body.requestId);
+      const modelRef = previous ? null : (await conversation.agent(BACKGROUND_CONTEXT)).model;
+      const prepared = previous ? null : await memoryRuntime.prepareTurn(conversation, session, body.requestId, modelRef);
+      const submitted = previous ? previous.text : body.text + prepared.text;
       if (!previous) catalog.reserveReply(sessionId, body.requestId, submitted, displayText);
       const reserved = catalog.getReply(sessionId, body.requestId);
       if (reserved.display_text !== displayText) return { status: 409, body: { error: "request_id_conflict" } };
@@ -263,7 +296,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       await afterPiSettled();
       catalog.saveReply(sessionId, body.requestId, displayAnswer(text));
-      await syncMemory(conversation, session);
+      await memoryRuntime.sync(conversation, session);
       return { status: 200, body: { requestId: body.requestId, answer: displayAnswer(text) } };
     };
     // One active task owner per conversation. Distinct requests queue; repeated
@@ -281,8 +314,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   async function history(conversation, sessionId, moronId) {
     const items = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
     const session = catalog.getSession(sessionId);
-    await syncMemory(conversation, session);
+    await memoryRuntime.sync(conversation, session);
     const handoffs = catalog.listHandoffs(sessionId).filter((handoff) => handoff.answer !== null);
+    const modelHandoffs = new Map(handoffStore.list(sessionId).filter((handoff) => handoff.answer !== null)
+      .map((handoff) => [handoff.source_user_entry_id, handoff]));
     const replies = catalog.listReplies(sessionId);
     return { sessionId, moronId, messages: items.reverse().filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")
       .map((entry) => {
@@ -290,20 +325,24 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const raw = entryText(entry);
         const display = role === "user" ? replies.find((reply) => reply.text === raw)?.display_text : undefined;
         const handoff = role === "user" && handoffs.find((item) => display === `@${item.target_moron_id} ${item.question}`);
+        const modelHandoff = role === "user" ? modelHandoffs.get(String(entry.id)) : null;
         return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : displayAnswer(raw)),
-          ...(handoff ? { handoff: { targetMoronId: handoff.target_moron_id, answer: handoff.answer } } : {}) };
+          ...(handoff || modelHandoff ? { handoff: { targetMoronId: (handoff ?? modelHandoff).target_moron_id,
+            answer: (handoff ?? modelHandoff).answer } } : {}) };
       }).filter((entry) => entry.role === 'user' || entry.text.length > 0) };
   }
   function scopedHandoffText(handoff) {
     return `@${handoff.target_moron_id} ${handoff.question}\n\n[Scoped answer from @${handoff.target_moron_id}: ${handoff.answer}]`;
   }
-  async function createNamedSession(moron, id) {
+  async function createNamedSession(moron, id, { handoff = false, model = selectedModel } = {}) {
     const instructions = [moron.rules, moron.preferences].filter(Boolean).join("\n\n");
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: providerModelId ? { provider: 'openai', modelId: providerModelId } : { provider: 'morons-fixture', modelId: 'fixture' }, instructions,
-        ...(moron.id === 'repo' && repoExtension ? { extensions: [repoExtension] } : {}) },
+      agent: { model, instructions,
+        extensions: handoff ? [] : [handoffExtension, ...(moron.id === 'repo' && repoExtension &&
+          (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])] },
     }, BACKGROUND_CONTEXT);
+    handoffConfigured.add(id);
     return catalog.createSession(id, moron.id, conversation.id);
   }
   async function executeDelegatedChat(source, body) {
@@ -320,7 +359,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (handoff && (handoff.target_moron_id !== targetId || handoff.question !== question))
       return { status: 409, body: { error: "request_id_conflict" } };
     if (!handoff) {
-      const targetSession = await createNamedSession(target, `handoff-${randomBytes(8).toString("hex")}`);
+      const sourceConversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
+      const sourceModel = (await sourceConversation.agent(BACKGROUND_CONTEXT)).model;
+      const targetSession = await createNamedSession(target, `handoff-${randomBytes(8).toString("hex")}`,
+        { handoff: true, model: sourceModel });
       catalog.createHandoff(source.id, body.requestId, targetId, question, targetSession.id);
       handoff = catalog.getHandoff(source.id, body.requestId);
     }
@@ -424,7 +466,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (!validId(body?.id) || typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
           return send(response, 400, { error: "invalid_memory" });
         const sourceId = `decision:${moronId}:${body.id}`;
-        optchat.memory.append({ sourceId, projectId: "local-owner", repository: moronId, threadId: null,
+        optchat.memory.append({ sourceId, projectId: accountId, repository: moronId, threadId: null,
           kind: "decision", date: catalog.memoryDate(sourceId), text: body.text });
         return send(response, 201, { id: body.id, moronId });
       }
@@ -466,9 +508,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
                 model.id === body.id && model.available))
               return send(response, 403, { error: 'model_unavailable' });
             await conversation.configure({ model: { provider: body.provider, modelId: body.id },
-              ...(repoExtension && !repositoryPlan?.runnerImage
-                ? { extensions: body.provider === 'morons-fixture'
-                  ? { add: [repoExtension] } : { remove: [repoExtension] } } : {}) }, BACKGROUND_CONTEXT);
+              extensions: extensionsFor(session, { provider: body.provider, modelId: body.id }) }, BACKGROUND_CONTEXT);
+            handoffConfigured.add(session.id);
             return send(response, 200, await modelCatalog(conversation));
           } finally { modelChanges.delete(session.id); }
         }
@@ -523,6 +564,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   } catch (error) {
     await harness.close(BACKGROUND_CONTEXT);
     catalog.close();
+    optchat.database.close();
+    handoffStore.close();
     await ownerLock.close();
     throw error;
   }
@@ -534,6 +577,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       await harness.close(BACKGROUND_CONTEXT);
       catalog.close();
       optchat.database.close();
+      handoffStore.close();
       await ownerLock.close();
     },
   };

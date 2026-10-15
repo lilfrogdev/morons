@@ -95,7 +95,8 @@ for interactive selection. Pi's catalog does not remotely verify each model's
 account entitlement, so a chosen real model may fail on the first call. No
 actual provider login or paid model call was made during development.
 
-GPUI starts OAuth only when a person presses **Connect ChatGPT**. It opens the
+GPUI starts OAuth only when a person selects **Set up provider** and starts
+ChatGPT sign-in. It opens the
 Pi-generated `auth.openai.com` URL in a browser only when the person presses
 the browser button. Pi runs its loopback callback on port 1455 on the server
 Mac. If the browser cannot reach it, the person can paste the final redirect

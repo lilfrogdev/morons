@@ -962,8 +962,8 @@ async fn mock(mut commands: mpsc::Receiver<Command>, publisher: Publisher) {
                         let id = uuid::Uuid::new_v4().to_string();
                         state.accepted = Some((id.clone(), text.clone()));
                         state.snapshot.tasks.push(Task { id:id.clone(), status:TaskStatus::Running, input:text.clone(), created_at:0, updated_at:0, error:None });
-                        state.snapshot.messages.push(Message { id:uuid::Uuid::new_v4().to_string(), task_id:id.clone(), role:Role::User, text, partial:false });
-                        state.snapshot.messages.push(Message { id:uuid::Uuid::new_v4().to_string(), task_id:id.clone(), role:Role::Assistant, text:String::new(), partial:true });
+                        state.snapshot.messages.push(Message { id:uuid::Uuid::new_v4().to_string(), task_id:id.clone(), role:Role::User, text, partial:false, handoff:None });
+                        state.snapshot.messages.push(Message { id:uuid::Uuid::new_v4().to_string(), task_id:id.clone(), role:Role::Assistant, text:String::new(), partial:true, handoff:None });
                         state.snapshot.active_task_id = Some(id);
                         words = "Hello! I’m Moron. This is a local demo of streaming chat. Connect a backend to keep your tasks and history across devices. You can close this window without stopping accepted backend work.".split_inclusive(' ').map(str::to_owned).collect(); words.reverse();
                     }

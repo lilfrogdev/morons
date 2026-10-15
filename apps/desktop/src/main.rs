@@ -359,6 +359,7 @@ impl Render for Chat {
             .iter()
             .map(|message| {
                 let text = message.text.clone();
+                let handoff = message.handoff.clone();
                 let role = match message.role {
                     Role::User => "You",
                     Role::Assistant => "Moron",
@@ -413,6 +414,21 @@ impl Render for Chat {
                             message.text.clone()
                         },
                     ))
+                    .when_some(handoff, |d, handoff| {
+                        d.child(div()
+                            .mt_2()
+                            .p_3()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(rgb(0xCAD9E4))
+                            .bg(rgb(0xF7FAFC))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(div().text_xs().font_weight(FontWeight::BOLD)
+                                .child(format!("↗ @{}", handoff.target_moron_id)))
+                            .child(div().text_sm().child(handoff.answer)))
+                    })
                     .when(
                         message.role == Role::User
                             && matches!(
@@ -610,7 +626,7 @@ impl Render for Chat {
                         .flex()
                         .flex_col()
                         .pt(px(14.)).px(px(14.)).pb(px(10.))
-                        .rounded(px(8.))
+                        .rounded(px(20.))
                         .border_1().border_color(rgb(0xE3E5E8))
                         .bg(rgb(0xFFFFFF))
                         .shadow(vec![
@@ -654,12 +670,12 @@ impl Render for Chat {
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
                             .child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
-                                .w(px(32.)).h(px(32.)).rounded(px(6.))
+                                .w(px(32.)).h(px(32.)).rounded_full()
                                 .flex().items_center().justify_center()
                                 .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
                             .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
-                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
+                                    .w(px(28.)).h(px(28.)).rounded_full()
                                     .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
                                     .flex().items_center().justify_center()
                                     .child(svg().data(ICON_SEND).w(px(16.)).h(px(16.)).text_color(rgb(0xFFFFFF)))

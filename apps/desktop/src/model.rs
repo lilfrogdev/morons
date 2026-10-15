@@ -40,6 +40,15 @@ pub struct Message {
     pub role: Role,
     pub text: String,
     pub partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<Handoff>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Handoff {
+    pub target_moron_id: String,
+    pub answer: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]

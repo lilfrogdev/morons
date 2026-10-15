@@ -69,13 +69,20 @@ The account server binds loopback only. For remote devices, configure and
 qualify authenticated TLS ingress, token storage on each client, and session
 revocation behavior. The Mac app currently asks for login each launch. Windows
 build/UI testing and the separate native iPhone client remain later milestones.
-OptChat model-backed compression and recall evaluation remain open.
+OptChat now captures both sides of named turns and uses the selected available
+Pi model for bounded native summary claims. It retains the raw source if a
+compression call fails. Offline fixture sessions keep raw recall without
+claiming model compression. A named Moron can use Pi's `ask_moron` tool only
+when the current user explicitly names a target; a one-call ledger saves the
+target's isolated answer across restart. GPUI shows that scoped handoff in
+history. Recall quality and real provider behavior still need human testing.
 
 Tests cover account isolation, two device sessions, restarts, source/review
 proposals, pending review reconciliation, mocked Pi provider login and model
 responses, and visualization provenance. Native transport tests cover account
 setup/sign-in/logout, provider handoff, visualization parsing, review actions,
-composer and stream behavior. A live Mac run with a disposable offline server
+composer and stream behavior. The offline Pi handoff runs through the real
+durable tool path in a restart test. A live Mac run with a disposable offline server
 showed both the in-app login and the signed-in review/chart UI. The local
 tryout instructions are in `packages/selfhost/README.md`.
 

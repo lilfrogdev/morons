@@ -52,6 +52,7 @@ export function openCatalog(path) {
     },
     getHandoff: (sourceSessionId, requestId) => db.prepare("SELECT * FROM handoffs WHERE source_session_id = ? AND request_id = ?").get(sourceSessionId, requestId),
     listHandoffs: (sourceSessionId) => db.prepare("SELECT * FROM handoffs WHERE source_session_id = ?").all(sourceSessionId),
+    isHandoffTarget: (sessionId) => !!db.prepare("SELECT 1 FROM handoffs WHERE target_session_id = ? LIMIT 1").get(sessionId),
     createHandoff: (sourceSessionId, requestId, targetMoronId, question, targetSessionId) => db.prepare("INSERT OR IGNORE INTO handoffs VALUES (?, ?, ?, ?, ?, NULL)").run(sourceSessionId, requestId, targetMoronId, question, targetSessionId),
     saveHandoffAnswer: (sourceSessionId, requestId, answer) => db.prepare("UPDATE handoffs SET answer = ? WHERE source_session_id = ? AND request_id = ?").run(answer, sourceSessionId, requestId),
     saveReview({ id, sessionId, branch, baseRevision, diff, checks }) {

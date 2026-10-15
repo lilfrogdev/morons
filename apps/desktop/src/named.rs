@@ -1,7 +1,7 @@
 //! Bounded adapter for the self-hosted named-session HTTP contract.
 //! The server remains authoritative; this only supplies the existing chat view.
 
-use crate::model::{Message, Role, Snapshot, Task, TaskStatus};
+use crate::model::{Handoff, Message, Role, Snapshot, Task, TaskStatus};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -18,6 +18,7 @@ pub struct NamedMessage {
     pub id: String,
     pub role: Role,
     pub text: String,
+    pub handoff: Option<Handoff>,
 }
 
 impl NamedHistory {
@@ -28,7 +29,8 @@ impl NamedHistory {
             || self
                 .messages
                 .iter()
-                .any(|m| m.id.len() > 128 || m.text.len() > 1_048_576)
+                .any(|m| m.id.len() > 128 || m.text.len() > 1_048_576 || m.handoff.as_ref().is_some_and(|h|
+                    h.target_moron_id.len() > 40 || h.answer.len() > 4096))
         {
             return Err("Invalid named history");
         }
@@ -60,6 +62,7 @@ impl NamedHistory {
                 role: item.role,
                 text: item.text,
                 partial: false,
+                handoff: item.handoff,
             });
         }
         snapshot.validate()?;
@@ -96,5 +99,18 @@ mod tests {
         }))
         .unwrap();
         assert!(history.into_snapshot().is_err());
+    }
+
+    #[test]
+    fn preserves_bounded_handoff_provenance() {
+        let history: NamedHistory = serde_json::from_value(serde_json::json!({
+            "sessionId":"s1", "moronId":"repo", "messages":[
+                {"id":"m1","role":"user","text":"Ask @freddy", "handoff":{
+                    "targetMoronId":"freddy", "answer":"Use a small patch."}},
+                {"id":"m2","role":"assistant","text":"Freddy suggests a small patch."}
+            ]
+        })).unwrap();
+        let snapshot = history.into_snapshot().unwrap();
+        assert_eq!(snapshot.messages[0].handoff.as_ref().unwrap().target_moron_id, "freddy");
     }
 }

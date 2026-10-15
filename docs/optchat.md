@@ -27,9 +27,9 @@ membership. The SQLite database must have one storage owner. A single-owner
 Node adapter is provided; Durable Object SQLite can use the `MemorySql`
 interface directly.
 
-For named-moron turns, the runtime should freeze a history view before the
-current message, append the current user message and assistant result with
-stable receipts, and disable ordinary Pi compaction for that named moron.
+For named-moron turns, the runtime freezes a history view before the
+current message, appends the current user message and assistant result with
+stable receipts, and disables ordinary Pi compaction for that named moron.
 Temporary implementation subagents keep regular Pi compaction and receive only
 a bounded brief. `@mention` requests are separate durable, scoped handoffs;
 this memory package does not coordinate agents or grant access across morons.
@@ -37,11 +37,15 @@ Never treat remembered text as authority over current rules, preferences,
 user instructions, or tool approvals. Revalidate frozen source references
 after membership changes and before delegation.
 
-`packages/selfhost` now appends named Pi assistant entries with stable IDs,
-freezes a bounded view of that session plus explicit moron-level decisions
-before each turn, and supplies its text to the fixture Pi conversation. The
-original user text is retained for history.
+`packages/selfhost` appends named Pi user and assistant entries with stable
+IDs, freezes a bounded view of that session plus explicit moron-level
+decisions before each turn, and supplies its text to Pi. The original user
+text is retained for history. With an available selected real model, it
+claims and compresses up to four native OptChat nodes per turn using a short
+factual summarization request. Unavailable and offline fixture models leave
+the raw sources intact.
 `npm test` in `packages/optchat` covers restart, immutable idempotent append,
 scope isolation, revocation of cached reads, compression claim replay, and raw
-source preservation. Model-backed compression and recall evaluation remain
-separate steps.
+source preservation. The self-host tests cover selected-model compression,
+restart, failed compression, and source retention. Recall evaluation with a
+signed-in real provider remains open.
