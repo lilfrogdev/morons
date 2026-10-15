@@ -626,7 +626,7 @@ impl Render for Chat {
                         .flex()
                         .flex_col()
                         .pt(px(14.)).px(px(14.)).pb(px(10.))
-                        .rounded(px(20.))
+                        .rounded(px(8.))
                         .border_1().border_color(rgb(0xE3E5E8))
                         .bg(rgb(0xFFFFFF))
                         .shadow(vec![
@@ -670,12 +670,12 @@ impl Render for Chat {
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
                             .child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
-                                .w(px(32.)).h(px(32.)).rounded_full()
+                                .w(px(32.)).h(px(32.)).rounded(px(6.))
                                 .flex().items_center().justify_center()
                                 .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
                             .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
-                                    .w(px(28.)).h(px(28.)).rounded_full()
+                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
                                     .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
                                     .flex().items_center().justify_center()
                                     .child(svg().data(ICON_SEND).w(px(16.)).h(px(16.)).text_color(rgb(0xFFFFFF)))
