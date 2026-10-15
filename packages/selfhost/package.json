@@ -9,7 +9,10 @@
     "@earendil-works/chord": "1.0.0",
     "@earendil-works/pi-ai": "1.2.0",
     "@earendil-works/pi-durable": "1.2.0",
+    "@morons/credential-store": "file:../credential-store",
     "@morons/optchat": "file:../optchat",
+    "@morons/provider-auth": "file:../auth",
+    "@morons/visualization": "file:../visualization",
     "typebox": "1.3.27"
   },
   "scripts": {

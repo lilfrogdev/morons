@@ -214,6 +214,7 @@ pub struct VisualizationLease {
 }
 
 impl VisualizationLease {
+    pub fn expires_at(&self) -> Instant { self.expires_at }
     pub fn parse(bytes: &[u8], account_id: &str, thread_id: &str, now: Instant) -> Option<Self> {
         if bytes.len() > 524_288 {
             return None;
@@ -409,15 +410,16 @@ mod tests {
     #[test]
     fn short_lease_is_scoped_and_expires() {
         let envelope = format!(
-            r#"{{"accountId":"a","threadId":"t","accessEpoch":"e1","leaseMs":5000,"documents":[{GOOD}]}}"#
+            r#"{{"accountId":"a","threadId":"t","accessEpoch":"e1","leaseMs":1000,"documents":[{GOOD}]}}"#
         );
         let now = Instant::now();
         let lease = VisualizationLease::parse(envelope.as_bytes(), "a", "t", now).unwrap();
+        assert_eq!(lease.expires_at(), now + Duration::from_secs(1));
         assert_eq!(lease.documents("a", "t", "e1", now).unwrap().len(), 1);
         assert!(lease.documents("a", "t", "e2", now).is_none());
         assert!(
             lease
-                .documents("a", "t", "e1", now + Duration::from_secs(5))
+                .documents("a", "t", "e1", now + Duration::from_secs(1))
                 .is_none()
         );
         assert!(VisualizationLease::parse(envelope.as_bytes(), "other", "t", now).is_none());

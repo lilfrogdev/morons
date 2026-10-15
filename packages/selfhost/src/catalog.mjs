@@ -12,7 +12,8 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS memory_entry_dates (entry_id TEXT PRIMARY KEY, date TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS handoffs (source_session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, target_moron_id TEXT NOT NULL REFERENCES morons(id), question TEXT NOT NULL, target_session_id TEXT NOT NULL REFERENCES sessions(id), answer TEXT, PRIMARY KEY(source_session_id, request_id));
     CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, base_revision TEXT NOT NULL, diff TEXT NOT NULL, checks TEXT NOT NULL, decision TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS visualizations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), document TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);`);
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
@@ -58,6 +59,14 @@ export function openCatalog(path) {
         throw new Error('review_intent_conflict');
     },
     pendingReviews: () => db.prepare("SELECT * FROM review_intents ORDER BY created_at, id").all(),
+    saveVisualization(sessionId, document) {
+      db.prepare("INSERT OR IGNORE INTO visualizations VALUES (?, ?, ?, 0, ?)")
+        .run(document.id, sessionId, JSON.stringify(document), Date.now());
+    },
+    listVisualizations(sessionId) {
+      return db.prepare("SELECT document FROM visualizations WHERE session_id = ? AND revoked = 0 ORDER BY created_at DESC, id DESC LIMIT 10")
+        .all(sessionId).map((row) => JSON.parse(row.document));
+    },
     getReview(id) { return review(db.prepare("SELECT * FROM reviews WHERE id = ?").get(id)); },
     listReviews(sessionId) { return db.prepare("SELECT id, session_id, branch, base_revision, checks, decision, created_at FROM reviews WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 64").all(sessionId).map(reviewSummary); },
     decideReview(id, decision) {

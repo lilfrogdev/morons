@@ -14,6 +14,10 @@ use morons_desktop::{
 actions!(morons, [SendMessage, Quit]);
 struct Chat {
     input: Entity<input::TextInput>,
+    login_name: Entity<input::TextInput>,
+    login_password: Entity<input::TextInput>,
+    bootstrap_token: Entity<input::TextInput>,
+    provider_callback: Entity<input::TextInput>,
     worker: Worker,
     state: State,
     // Keep the foreground listener alive for exactly the view lifetime.
@@ -26,6 +30,10 @@ struct Chat {
 impl Chat {
     fn new(config: Config, cx: &mut Context<Self>) -> Self {
         let input = cx.new(input::TextInput::new);
+        let login_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("account-name"); field.set_placeholder("Account name"); field });
+        let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
+        let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("First-account setup code"); field });
+        let provider_callback = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("provider-callback"); field.set_placeholder("Paste final callback URL if needed"); field });
         let (worker, updates) = Worker::start(config);
         let task = cx.spawn(async move |view, cx| {
             while let Ok(state) = updates.recv().await {
@@ -43,6 +51,18 @@ impl Chat {
                             });
                         }
                         let follow = view.scroll.max_offset().y + view.scroll.offset().y < px(60.);
+                        if view.state.account_login && !state.account_login {
+                            view.login_password.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                            view.bootstrap_token.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                        }
+                        if !view.state.account_login && state.account_login {
+                            for field in [&view.input, &view.login_name, &view.login_password,
+                                &view.bootstrap_token, &view.provider_callback] {
+                                field.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                            }
+                            view.last_ack = None;
+                            view.local_error = None;
+                        }
                         view.state = state;
                         if follow {
                             view.scroll.scroll_to_bottom();
@@ -57,6 +77,10 @@ impl Chat {
         });
         Self {
             input,
+            login_name,
+            login_password,
+            bootstrap_token,
+            provider_callback,
             worker,
             state: State::default(),
             _updates: task,
@@ -67,6 +91,10 @@ impl Chat {
         }
     }
     fn send(&mut self, _: &SendMessage, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.account_login {
+            self.account_action(false, cx);
+            return;
+        }
         if !self.state.ready {
             self.local_error = Some("Backend not ready");
             cx.notify();
@@ -100,6 +128,21 @@ impl Chat {
         self.local_error = self.worker.send(command).err();
         cx.notify();
     }
+    fn account_action(&mut self, create: bool, cx: &mut Context<Self>) {
+        let name = self.login_name.read(cx).text().trim().to_owned();
+        let password = self.login_password.read(cx).text().to_owned();
+        let command = if create {
+            Command::AccountCreate { name, password, bootstrap: self.bootstrap_token.read(cx).text().to_owned() }
+        } else { Command::AccountLogin { name, password } };
+        self.command(command, cx);
+        self.login_password.update(cx, |field, cx| { field.reset(); cx.notify(); });
+        self.bootstrap_token.update(cx, |field, cx| { field.reset(); cx.notify(); });
+    }
+    fn submit_provider_callback(&mut self, cx: &mut Context<Self>) {
+        let url = self.provider_callback.read(cx).text().to_owned();
+        self.command(Command::ProviderCallback(url), cx);
+        self.provider_callback.update(cx, |field, cx| { field.reset(); cx.notify(); });
+    }
 }
 fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
     div()
@@ -132,6 +175,11 @@ impl Render for Chat {
         };
         let model = self.state.model.as_deref().unwrap_or("No model connected");
         let review = self.state.review.clone();
+        let provider_url = self.state.provider_url.clone();
+        let provider_state = self.state.provider_state.clone();
+        let visualizations = if self.state.visualization_expires_at.is_some_and(|until| std::time::Instant::now() < until) {
+            self.state.visualizations.clone()
+        } else { Vec::new() };
         let messages = self
             .state
             .snapshot
@@ -248,10 +296,29 @@ impl Render for Chat {
                             )
                             .child(div().text_sm().text_color(rgb(0x667786)).child(status)),
                     )
-                    .child(button("reconnect", "Reconnect").on_click(
-                        cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
-                    )),
+                    .child(div().flex().gap_2()
+                        .when(!self.state.account_login, |d| d.child(button("reconnect", "Reconnect").on_click(
+                            cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
+                        )))
+                        .when(self.state.selected_moron.is_some(), |d| d.child(button("account-sign-out", "Sign out").on_click(
+                            cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)),
+                        )))),
             )
+            .when(self.state.account_login, |d| d.child(
+                div().id("account-form").role(gpui::Role::Region)
+                    .aria_label("Morons account setup and sign in")
+                    .w_full().max_w(px(580.)).mx_auto().mt_8().p_6()
+                    .rounded_sm().border_1().border_color(rgb(0xBAC8D3))
+                    .bg(rgb(0xFFFFFF)).flex().flex_col().gap_3()
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Sign in"))
+                    .child(div().text_sm().child("Your account keeps named Morons and sessions in sync."))
+                    .child(self.login_name.clone())
+                    .child(self.login_password.clone())
+                    .child(button("account-sign-in", "Sign in").on_click(cx.listener(|view, _, _, cx| view.account_action(false, cx))))
+                    .child(div().mt_3().text_sm().child("Setting up the first account? Enter the private setup code supplied by your server."))
+                    .child(self.bootstrap_token.clone())
+                    .child(button("account-create", "Create first account").on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
+            ))
             .when(!self.state.named_morons.is_empty(), |d| {
                 d.child(
                     div()
@@ -288,7 +355,31 @@ impl Render for Chat {
                         })),
                 )
             })
-            .child(
+            .when(self.state.selected_moron.is_some(), |d| d.child(
+                div().id("provider-panel").role(gpui::Role::Region)
+                    .aria_label("ChatGPT provider connection")
+                    .px_6().py_2().border_b_1().border_color(rgb(0xE0E6EC))
+                    .flex().flex_col().gap_2().text_sm()
+                    .child(if self.state.provider_available {
+                        format!("ChatGPT connection: {}", provider_state.as_deref().unwrap_or("disconnected"))
+                    } else { "ChatGPT login needs an unlocked private provider store. Offline chat remains available.".to_owned() })
+                    .when(self.state.provider_available && provider_state.as_deref() != Some("connected"), |d| d.child(
+                        button("provider-start", "Connect ChatGPT").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderStart, cx)))
+                    ))
+                    .when_some(provider_url, |d, url| d.child(
+                        button("provider-browser", "Open ChatGPT sign-in in browser").on_click(move |_, _, cx| cx.open_url(&url))
+                    ))
+                    .when(self.state.provider_available && matches!(provider_state.as_deref(), Some("awaiting_callback" | "open_browser")), |d| d
+                        .child(div().text_xs().child("Complete sign-in in the browser. If it cannot return to this Mac, paste its final redirect URL below."))
+                        .child(self.provider_callback.clone())
+                        .child(button("provider-callback-submit", "Submit callback URL").on_click(cx.listener(|view, _, _, cx| view.submit_provider_callback(cx))))
+                        .child(button("provider-cancel", "Cancel sign-in").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderCancel, cx))))
+                    )
+                    .when(provider_state.as_deref() == Some("connected"), |d| d.child(
+                        button("provider-logout", "Disconnect ChatGPT").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderLogout, cx)))
+                    ))
+            ))
+            .when(!self.state.account_login, |d| d.child(
                 div()
                     .id("history")
                     .role(gpui::Role::List)
@@ -314,9 +405,7 @@ impl Render for Chat {
                                         .child("One Moron. A conversation that stays with you."),
                                 )
                             })
-                            .children(messages),
-                    ),
-            )
+                            .children(messages)
             .when_some(review, |d, review| {
                 let approve_id = review.id.clone();
                 let reject_id = review.id.clone();
@@ -348,6 +437,15 @@ impl Render for Chat {
                         )),
                 )
             })
+            .when(!visualizations.is_empty(), |d| d.child(
+                div().id("visualizations").role(gpui::Role::Region)
+                    .aria_label("Structured visualizations")
+                    .mx_6().mb_3().max_h(px(260.)).overflow_y_scroll()
+                    .flex().flex_col().gap_2()
+                    .children(visualizations.iter().map(morons_desktop::visualization::render_native))
+            ))
+                    ),
+            ))
             .when_some(error, |d, error| {
                 d.child(
                     div()
@@ -358,7 +456,7 @@ impl Render for Chat {
                         .child(error),
                 )
             })
-            .child(
+            .when(!self.state.account_login, |d| d.child(
                 div().px_6().pb_5().pt_2().child(
                     div()
                         .w_full()
@@ -485,7 +583,7 @@ impl Render for Chat {
                                 .child("Enter to send · Shift-Enter for newline"),
                         ),
                 ),
-            )
+            ))
     }
 }
 fn main() {
@@ -496,6 +594,7 @@ fn main() {
             return;
         }
     };
+    let login_initial = matches!(config, Config::NamedLogin { .. });
     gpui_platform::application().run(move |cx: &mut App| {
         input::bind_keys(cx);
         cx.bind_keys([
@@ -522,7 +621,7 @@ fn main() {
             .expect("open Morons window");
         window
             .update(cx, |view, window, cx| {
-                window.focus(&view.input.focus_handle(cx), cx);
+                window.focus(&if login_initial { view.login_name.focus_handle(cx) } else { view.input.focus_handle(cx) }, cx);
                 cx.activate(true);
             })
             .expect("focus composer");

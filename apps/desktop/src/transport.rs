@@ -2,10 +2,11 @@ use crate::{
     model::{Message, Role, Snapshot, Status, Task, TaskStatus},
     named::NamedHistory,
     sse::Decoder,
+    visualization::{VisualizationDocument, VisualizationLease},
 };
 use futures_util::StreamExt;
 use reqwest::{Client, Url};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -22,6 +23,12 @@ pub struct State {
     pub pending: bool,
     pub accepted: Option<(String, String)>,
     pub request_error: Option<&'static str>,
+    pub account_login: bool,
+    pub provider_available: bool,
+    pub provider_state: Option<String>,
+    pub provider_url: Option<String>,
+    pub visualizations: Vec<VisualizationDocument>,
+    pub visualization_expires_at: Option<Instant>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -37,6 +44,12 @@ impl Default for State {
             pending: false,
             accepted: None,
             request_error: None,
+            account_login: false,
+            provider_available: false,
+            provider_state: None,
+            provider_url: None,
+            visualizations: Vec::new(),
+            visualization_expires_at: None,
         }
     }
 }
@@ -51,6 +64,13 @@ pub enum Command {
         id: String,
         decision: ReviewDecision,
     },
+    AccountLogin { name: String, password: String },
+    AccountCreate { name: String, password: String, bootstrap: String },
+    AccountLogout,
+    ProviderStart,
+    ProviderCallback(String),
+    ProviderCancel,
+    ProviderLogout,
 }
 
 #[derive(Clone, Copy)]
@@ -88,6 +108,7 @@ pub enum Config {
     Mock,
     Http { url: Url, bearer: Option<String> },
     Named { url: Url, bearer: String },
+    NamedLogin { url: Url },
 }
 impl Config {
     pub fn from_env() -> Result<Self, &'static str> {
@@ -110,15 +131,10 @@ impl Config {
         let bearer = std::env::var("MORONS_BACKEND_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
-        if bearer.is_none() {
-            return Err("Backend application bearer is required");
-        }
         if std::env::var("MORONS_BACKEND_MODE").ok().as_deref() == Some("named") {
-            return Ok(Self::Named {
-                url,
-                bearer: bearer.expect("checked above"),
-            });
+            return Ok(match bearer { Some(bearer) => Self::Named { url, bearer }, None => Self::NamedLogin { url } });
         }
+        if bearer.is_none() { return Err("Backend application bearer is required"); }
         Ok(Self::Http { url, bearer })
     }
 }
@@ -128,7 +144,7 @@ pub struct Worker {
 }
 impl Worker {
     pub fn start(config: Config) -> (Self, async_channel::Receiver<State>) {
-        let (commands, receiver) = mpsc::channel(16);
+        let (commands, mut receiver) = mpsc::channel(16);
         let (updates, view) = async_channel::bounded(1);
         let stale = view.clone();
         // Networking and timers live on a dedicated runtime thread. Closing the
@@ -144,8 +160,11 @@ impl Worker {
                     Config::Mock => mock(receiver, publisher).await,
                     Config::Http { url, bearer } => http(url, bearer, receiver, publisher).await,
                     Config::Named { url, bearer } => {
-                        named_http(url, bearer, receiver, publisher).await
+                        if named_http(url.clone(), bearer, &mut receiver, &publisher).await {
+                            named_account(url, &mut receiver, &publisher).await;
+                        }
                     }
+                    Config::NamedLogin { url } => named_account(url, &mut receiver, &publisher).await,
                 }
             });
         });
@@ -450,6 +469,9 @@ async fn handle(
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) => Err("Named morons require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
+        Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
+        Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
+        Command::ProviderLogout => Err("Account and provider login require the named backend"),
     };
     state.request_error = result.err();
     // Only uncertain failures retain the idempotency key. Definite rejection
@@ -583,19 +605,96 @@ impl NamedApi {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSession {
+    token: String,
+    expires_at: u64,
+}
+#[derive(serde::Deserialize)]
+struct ProviderResponse {
+    available: bool,
+    provider: ProviderStatus,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderStatus {
+    state: String,
+    authorization_url: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct AccountMe { account: AccountIdentity }
+#[derive(serde::Deserialize)]
+struct AccountIdentity { id: String }
+
+async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publisher: &Publisher) {
+    let client = match Client::builder().redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10)).build() {
+        Ok(client) => client,
+        Err(_) => return,
+    };
+    let mut state = State { account_login: true, status: "Sign in to Morons", ..State::default() };
+    publisher.publish(&state);
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::AccountLogin { name, password } if valid_named_id(&name) && password.len() >= 12 && password.len() <= 256 => {
+                state.status = "Signing in…";
+                state.error = None;
+                publisher.publish(&state);
+                let result = async {
+                    let response = client.post(url.join("v1/session/login").expect("static route"))
+                        .json(&serde_json::json!({"name":name,"password":password}))
+                        .timeout(Duration::from_secs(15)).send().await.map_err(|_| "Cannot reach account server")?;
+                    if !response.status().is_success() { return Err("Account name or password was not accepted"); }
+                    let session: AccountSession = serde_json::from_slice(&bounded_body_with_limit(response, 4096).await?)
+                        .map_err(|_| "Invalid account login response")?;
+                    if session.token.len() < 32 || session.token.len() > 256 || session.expires_at == 0 {
+                        return Err("Invalid account login response");
+                    }
+                    Ok(session.token)
+                }.await;
+                match result {
+                    Ok(token) => {
+                        if !named_http(url.clone(), token, commands, publisher).await { return; }
+                        state = State { account_login: true, status: "Signed out", ..State::default() };
+                    }
+                    Err(error) => { state.status = "Sign in to Morons"; state.error = Some(error); }
+                }
+            }
+            Command::AccountCreate { name, password, bootstrap } if valid_named_id(&name) && password.len() >= 12 && password.len() <= 256 && bootstrap.len() >= 32 && bootstrap.len() <= 256 => {
+                state.status = "Creating account…";
+                state.error = None;
+                publisher.publish(&state);
+                let result = client.post(url.join("v1/accounts/bootstrap").expect("static route"))
+                    .header("X-Morons-Bootstrap", bootstrap)
+                    .json(&serde_json::json!({"name":name,"password":password}))
+                    .timeout(Duration::from_secs(15)).send().await;
+                match result {
+                    Ok(response) if response.status().is_success() => state.status = "Account created. Sign in.",
+                    Ok(_) => { state.status = "Sign in to Morons"; state.error = Some("Account setup unavailable or rejected"); }
+                    Err(_) => { state.status = "Sign in to Morons"; state.error = Some("Cannot reach account server"); }
+                }
+            }
+            Command::AccountLogin { .. } | Command::AccountCreate { .. } => state.error = Some("Enter a valid account name and password (12+ characters)"),
+            _ => {},
+        }
+        publisher.publish(&state);
+    }
+}
+
 async fn named_http(
     url: Url,
     bearer: String,
-    mut commands: mpsc::Receiver<Command>,
-    publisher: Publisher,
-) {
+    commands: &mut mpsc::Receiver<Command>,
+    publisher: &Publisher,
+) -> bool {
     let client = match Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let api = NamedApi {
         client,
@@ -655,16 +754,32 @@ async fn named_http(
                 }
                 Some(detail.review)
             } else { None };
-            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog, review))
+            let me: AccountMe = api.get("v1/session/me").await?;
+            let visual: serde_json::Value = api.get(&format!("v1/sessions/{session}/visualizations")).await?;
+            let now = Instant::now();
+            let epoch = visual.get("accessEpoch").and_then(|v| v.as_str()).unwrap_or("");
+            let lease = VisualizationLease::parse(&serde_json::to_vec(&visual).unwrap_or_default(),
+                &me.account.id, &session, now);
+            let documents = lease.as_ref().and_then(|lease| lease.documents(&me.account.id, &session, epoch, now))
+                .map(|docs| docs.to_vec()).unwrap_or_default();
+            let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
+            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
         }
         .await;
         let session = match refreshed {
-            Ok((model, snapshot, session, catalog, review)) => {
+            Ok((model, snapshot, session, catalog, review, provider, documents, expires_at)) => {
                 state.model = Some(model);
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
                 state.review = review;
+                state.visualizations = documents;
+                state.visualization_expires_at = expires_at;
+                state.provider_available = provider.as_ref().is_some_and(|p| p.available);
+                state.provider_state = provider.as_ref().map(|p| p.provider.state.clone());
+                state.provider_url = provider.and_then(|p| p.provider.authorization_url)
+                    .filter(|value| Url::parse(value).ok().is_some_and(|url|
+                        url.scheme() == "https" && url.host_str() == Some("auth.openai.com") && value.len() <= 4096));
                 state.status = "Connected";
                 state.ready = true;
                 state.error = None;
@@ -676,9 +791,17 @@ async fn named_http(
                 state.ready = false;
                 state.status = "Disconnected";
                 state.error = Some(error);
+                state.visualizations.clear();
+                state.visualization_expires_at = None;
                 publisher.publish(&state);
                 tokio::select! {
-                    command = commands.recv() => { if command.is_none() { return; } },
+                    command = commands.recv() => {
+                        match command {
+                            None => return false,
+                            Some(Command::AccountLogout) => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return true; },
+                            _ => {},
+                        }
+                    },
                     _ = tokio::time::sleep(Duration::from_secs(3)) => {}
                 }
                 continue;
@@ -686,7 +809,7 @@ async fn named_http(
         };
         tokio::select! {
             command = commands.recv() => {
-                let Some(command) = command else { return; };
+                let Some(command) = command else { return false; };
                 let should_submit = matches!(command, Command::Submit(_) | Command::Retry);
                 match command {
                     Command::Submit(text) => {
@@ -711,6 +834,37 @@ async fn named_http(
                         } else { state.request_error = Some("Review is no longer pending"); }
                     }
                     Command::Stop(_) => { state.request_error = Some("Named task stop is not available yet"); }
+                    Command::AccountLogout => {
+                        let _ = api.post("v1/session/logout", serde_json::json!({})).await;
+                        state.snapshot = Snapshot::empty();
+                        state.review = None;
+                        state.named_morons.clear();
+                        state.ready = false;
+                        state.account_login = true;
+                        state.provider_url = None;
+                        state.provider_state = None;
+                        state.visualizations.clear();
+                        state.visualization_expires_at = None;
+                        publisher.publish(&state);
+                        return true;
+                    }
+                    Command::AccountLogin { .. } | Command::AccountCreate { .. } => {},
+                    Command::ProviderStart if state.provider_available => {
+                        state.request_error = api.post("v1/provider/openai/start", serde_json::json!({})).await.err();
+                    }
+                    Command::ProviderCallback(url) if state.provider_available => {
+                        if url.len() > 4096 { state.request_error = Some("Callback URL is too long"); }
+                        else { state.request_error = api.post("v1/provider/openai/callback", serde_json::json!({"url":url})).await.err(); }
+                    }
+                    Command::ProviderCancel if state.provider_available => {
+                        state.request_error = api.post("v1/provider/openai/cancel", serde_json::json!({})).await.err();
+                    }
+                    Command::ProviderLogout if state.provider_available => {
+                        state.request_error = api.post("v1/provider/openai/logout", serde_json::json!({})).await.err();
+                    }
+                    Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel | Command::ProviderLogout => {
+                        state.request_error = Some("ChatGPT login requires an unlocked private provider store");
+                    }
                 }
                 if should_submit {
                   if let Some((id, text)) = &pending {

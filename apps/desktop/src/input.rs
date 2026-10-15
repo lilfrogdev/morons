@@ -48,6 +48,8 @@ pub struct TextInput {
     is_selecting: bool,
     scroll: gpui::ScrollHandle,
     content_height: Pixels,
+    secret: bool,
+    id: &'static str,
 }
 
 struct TextLayout {
@@ -102,8 +104,20 @@ impl TextInput {
             is_selecting: false,
             scroll: gpui::ScrollHandle::new(),
             content_height: px(24.),
+            secret: false,
+            id: "composer",
         }
     }
+    pub fn new_secret(cx: &mut Context<Self>) -> Self {
+        let mut input = Self::new(cx);
+        input.secret = true;
+        input.placeholder = "Password".into();
+        input
+    }
+    pub fn set_placeholder(&mut self, value: &'static str) {
+        self.placeholder = value.into();
+    }
+    pub fn set_id(&mut self, value: &'static str) { self.id = value; }
     pub fn text(&self) -> &str {
         &self.content
     }
@@ -250,6 +264,7 @@ impl TextInput {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        if self.secret { return; }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -257,6 +272,7 @@ impl TextInput {
         }
     }
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
+        if self.secret { return; }
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.content[self.selected_range.clone()].to_string(),
@@ -574,6 +590,8 @@ impl Element for TextElement {
 
         let (display_text, text_color) = if content.is_empty() {
             (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+        } else if input.secret {
+            ("*".repeat(content.len()).into(), style.color)
         } else {
             (content, style.color)
         };
@@ -723,10 +741,10 @@ impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
-            .id("composer")
+            .id(self.id)
             .role(gpui::Role::MultilineTextInput)
-            .aria_label("Message your Moron")
-            .aria_value(self.content.clone())
+            .aria_label(if self.secret { self.placeholder.clone() } else if self.id == "composer" { "Message your Moron".into() } else { self.placeholder.clone() })
+            .aria_value(if self.secret { "".into() } else { self.content.clone() })
             .aria_placeholder(self.placeholder.clone())
             .key_context("TextInput")
             .track_focus(&self.focus_handle(cx))
@@ -758,9 +776,9 @@ impl Render for TextInput {
             .text_size(px(14.))
             .child(
                 div()
-                    .id("composer-scroll")
+                    .id(SharedString::from(format!("{}-scroll", self.id)))
                     .track_scroll(&self.scroll)
-                    .h(px(76.))
+                    .h(px(if self.id == "composer" { 76. } else { 34. }))
                     .overflow_y_scroll()
                     .w_full()
                     .p(px(2.))

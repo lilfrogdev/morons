@@ -14,6 +14,16 @@ import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
+import { sealDocument, canReadDocument } from '@morons/visualization';
+
+const VIZ_PREFIX = 'morons.visualization.v1\n';
+function displayAnswer(raw) {
+  if (!raw.startsWith(VIZ_PREFIX)) return raw;
+  try {
+    const draft = JSON.parse(raw.slice(VIZ_PREFIX.length));
+    return typeof draft.title === 'string' && draft.title.length <= 120 ? `Visualization ready: ${draft.title}` : raw;
+  } catch { return raw; }
+}
 
 // A deterministic fixture provider: this server cannot make paid inference calls.
 function fixtureModels() {
@@ -36,7 +46,7 @@ function fixtureModels() {
       patch ? { name: 'prepare_review', arguments: { patch } } : null;
     const resultText = latest?.role === 'toolResult'
       ? latest.content?.filter((part) => part.type === 'text').map((part) => part.text).join('') ?? ''
-      : `Fixture: ${input}`;
+      : (input === '/viz' || input.startsWith('/viz\n\n[OptChat memory')) ? `${VIZ_PREFIX}${JSON.stringify({ kind: 'bar', title: 'Repository checks', xLabel: 'Check', yLabel: 'Passed', points: [{ label: 'Diff', value: 1 }, { label: 'Tests', value: 1 }] })}` : `Fixture: ${input}`;
     const answer = {
       role: "assistant", content: tool ? [{ type: 'toolCall',
         id: createHash('sha256').update(`${conversation.messages.length}:${input}`).digest('hex').slice(0, 24),
@@ -96,7 +106,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, providerModels = null, providerModelId = null, accountId = 'local-owner' }) {
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
@@ -109,15 +119,21 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
     const registry = createRegistry();
-    repoExtension = repoTools(catalog, repositoryPlan);
+    repoExtension = providerModelId ? null : repoTools(catalog, repositoryPlan);
     if (repoExtension) registry.install(repoExtension);
+    const models = providerModels ?? fixtureModels();
+    if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
+    if (providerModelId && !providerModels?.getProvider('openai')?.getModels().some((model) => model.id === providerModelId))
+      throw new Error('configured_provider_model_not_in_catalog');
+    const selectedModel = providerModelId ? { provider: 'openai', modelId: providerModelId } :
+      { provider: 'morons-fixture', modelId: 'fixture' };
     harness = await Harness.open(
       await openNodeSqliteStorage(databasePath),
-      { models: fixtureModels(), registry, settings: { compaction: { enabled: false, backgroundTokens: 0 } } },
+      { models, registry, settings: { compaction: { enabled: false, backgroundTokens: 0 } } },
       BACKGROUND_CONTEXT,
     );
     root = await harness.root(BACKGROUND_CONTEXT, {
-      agent: { model: { provider: "morons-fixture", modelId: "fixture" } },
+      agent: { model: selectedModel },
     });
   } catch (error) {
     await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
@@ -199,10 +215,20 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (settled.status !== "done" || settled.type !== "input") return { status: 500, body: { error: "generation_failed" } };
       const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
       const text = entryText(answer);
+      if (text.startsWith(VIZ_PREFIX)) {
+        try {
+          const document = sealDocument(JSON.parse(text.slice(VIZ_PREFIX.length)), {
+            id: `viz-${answer.id}`, accountId, threadId: session.id,
+            sourceMessageId: String(answer.id),
+            sourceRevision: createHash('sha256').update(text).digest('hex'), createdAt: Date.now(),
+          });
+          catalog.saveVisualization(session.id, document);
+        } catch { /* Invalid generated data remains plain text. */ }
+      }
       await afterPiSettled();
-      catalog.saveReply(sessionId, body.requestId, text);
+      catalog.saveReply(sessionId, body.requestId, displayAnswer(text));
       await syncMemory(conversation, session);
-      return { status: 200, body: { requestId: body.requestId, answer: text } };
+      return { status: 200, body: { requestId: body.requestId, answer: displayAnswer(text) } };
     };
     // One active task owner per conversation. Distinct requests queue; repeated
     // request IDs share the same promise rather than submitting twice.
@@ -228,7 +254,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const raw = entryText(entry);
         const display = role === "user" ? replies.find((reply) => reply.text === raw)?.display_text : undefined;
         const handoff = role === "user" && handoffs.find((item) => display === `@${item.target_moron_id} ${item.question}`);
-        return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : raw),
+        return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : displayAnswer(raw)),
           ...(handoff ? { handoff: { targetMoronId: handoff.target_moron_id, answer: handoff.answer } } : {}) };
       }).filter((entry) => entry.role === 'user' || entry.text.length > 0) };
   }
@@ -239,7 +265,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const instructions = [moron.rules, moron.preferences].filter(Boolean).join("\n\n");
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
-      agent: { model: { provider: "morons-fixture", modelId: "fixture" }, instructions,
+      agent: { model: providerModelId ? { provider: 'openai', modelId: providerModelId } : { provider: 'morons-fixture', modelId: 'fixture' }, instructions,
         ...(moron.id === 'repo' && repoExtension ? { extensions: [repoExtension] } : {}) },
     }, BACKGROUND_CONTEXT);
     return catalog.createSession(id, moron.id, conversation.id);
@@ -297,9 +323,29 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
       if (request.method === "GET" && path === "/v1/models")
-        return send(response, 200, { models: [{ provider: "morons-fixture", id: "fixture", label: "Offline fixture", available: true }] });
+        return send(response, 200, { models: [providerModelId ? { provider: 'openai', id: providerModelId,
+          label: `Configured Pi model: ${providerModelId} (sign-in required)`, available: true } :
+          { provider: 'morons-fixture', id: 'fixture', label: 'Offline fixture', available: true }] });
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons() });
+      const visualList = /^\/v1\/sessions\/([^/]+)\/visualizations$/.exec(path);
+      if (visualList && request.method === 'GET') {
+        const session = catalog.getSession(decodeURIComponent(visualList[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+        const entries = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
+        const current = new Map(entries.filter((entry) => entry.kind === 'pi.assistant')
+          .map((entry) => [String(entry.id), createHash('sha256').update(entryText(entry)).digest('hex')]));
+        const documents = catalog.listVisualizations(session.id).filter((document) =>
+          canReadDocument(document, { accountId, threadId: session.id, threadOwnerAccountId: accountId,
+            sourceMessageId: document.sourceMessageId,
+            currentSourceRevision: current.get(document.sourceMessageId) ?? '',
+            activeSession: true, sourceMessageExists: current.has(document.sourceMessageId),
+            documentRevoked: false }));
+        return send(response, 200, { accountId, threadId: session.id,
+          accessEpoch: createHash('sha256').update(`${accountId}:${session.id}`).digest('hex'),
+          leaseMs: 5000, documents });
+      }
       const reviewList = /^\/v1\/sessions\/([^/]+)\/reviews$/.exec(path);
       if (reviewList && request.method === 'GET') {
         const session = catalog.getSession(decodeURIComponent(reviewList[1]));

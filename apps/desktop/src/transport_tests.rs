@@ -82,11 +82,6 @@ fn serve(
             break (headers, data[end + 4..end + 4 + length].to_vec());
         }
     };
-    assert!(
-        headers
-            .to_lowercase()
-            .contains("authorization: bearer fixture-only")
-    );
     let route = headers
         .lines()
         .next()
@@ -95,6 +90,10 @@ fn serve(
         .nth(1)
         .unwrap()
         .to_owned();
+    if route != "/v1/session/login" && route != "/v1/accounts/bootstrap" {
+        assert!(headers.to_lowercase().contains("authorization: bearer fixture-only") ||
+            headers.to_lowercase().contains("authorization: bearer fixture-only-account-token-00000000"));
+    }
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     let mut records = requests.lock().unwrap();
     records.push((route.clone(), body.clone()));
@@ -110,6 +109,11 @@ fn serve(
     drop(records);
     if route.starts_with("/v1/") && !route.starts_with("/v1/root/") {
         let reply = match route.as_str() {
+            "/v1/session/login" => serde_json::json!({"token":"fixture-only-account-token-00000000","expiresAt":9999999999999_u64}),
+            "/v1/accounts/bootstrap" => serde_json::json!({"account":{"id":"fixture-account","name":"owner"}}),
+            "/v1/session/logout" => serde_json::json!({"signedOut":true}),
+            "/v1/session/me" => serde_json::json!({"account":{"id":"fixture-account","name":"owner"}}),
+            "/v1/provider/openai/status" => serde_json::json!({"available":true,"provider":{"state":"awaiting_callback","authorizationUrl":"https://auth.openai.com/api/accounts/authorize?state=mock"}}),
             "/v1/models" => {
                 serde_json::json!({"models":[{"provider":"morons-fixture","id":"fixture","label":"Offline fixture","available":true}]})
             }
@@ -126,6 +130,11 @@ fn serve(
                 if named_submit.as_ref().is_some_and(|body| body["text"].as_str().is_some_and(|text| text.starts_with("/review"))) {
                     serde_json::json!({"reviews":[{"id":"aaaaaaaaaaaaaaaa","branch":"morons-review/aaaaaaaaaaaaaaaa","baseRevision":"1111111111111111111111111111111111111111","checks":[{"ok":true}],"decision":"pending"}]})
                 } else { serde_json::json!({"reviews":[]}) }
+            }
+            "/v1/sessions/main/visualizations" => {
+                if named_submit.as_ref().is_some_and(|body| body["text"] == "/viz") {
+                    serde_json::json!({"accountId":"fixture-account","threadId":"main","accessEpoch":"test-epoch","leaseMs":5000,"documents":[{"version":1,"id":"viz-1","accountId":"fixture-account","threadId":"main","sourceMessageId":"assistant-1","sourceRevision":"r","createdAt":1,"content":{"kind":"bar","title":"Checks","xLabel":"Run","yLabel":"Passed","points":[{"label":"one","value":3}]}}]})
+                } else { serde_json::json!({"accountId":"fixture-account","threadId":"main","accessEpoch":"test-epoch","leaseMs":5000,"documents":[]}) }
             }
             "/v1/reviews/aaaaaaaaaaaaaaaa" => serde_json::json!({"review":{"id":"aaaaaaaaaaaaaaaa","branch":"morons-review/aaaaaaaaaaaaaaaa","baseRevision":"1111111111111111111111111111111111111111","diff":"+after","checks":[{"ok":true}],"decision":"pending"}}),
             "/v1/sessions/main/chat" => {
@@ -338,6 +347,119 @@ fn named_review_arrives_with_diff_and_records_human_decision() {
                 if fixture.requests.lock().unwrap().iter().any(|(route, body)|
                     route == "/v1/reviews/aaaaaaaaaaaaaaaa/decision" && body["decision"] == "approve") { break; }
                 tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+    });
+}
+
+#[test]
+fn named_account_setup_signin_and_logout_use_in_app_credentials() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::NamedLogin { url: fixture.url.clone() });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let signed_out = tokio::time::timeout(Duration::from_secs(10), async {
+            loop { let state = updates.recv().await.unwrap(); if state.account_login { break state; } }
+        }).await.unwrap();
+        assert!(!signed_out.ready);
+        worker.send(Command::AccountCreate { name: "owner".into(), password: "offline-password-123".into(),
+            bootstrap: "offline-bootstrap-token-for-test-123".into() }).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let state = updates.recv().await.unwrap();
+                if state.status == "Account created. Sign in." { break; }
+            }
+        }).await.unwrap();
+        worker.send(Command::AccountLogin { name: "owner".into(), password: "offline-password-123".into() }).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop { let state = updates.recv().await.unwrap(); if state.ready { assert!(!state.account_login); break; } }
+        }).await.unwrap();
+        worker.send(Command::AccountLogout).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop { let state = updates.recv().await.unwrap(); if state.account_login { break; } }
+        }).await.unwrap();
+        let requests = fixture.requests.lock().unwrap();
+        assert!(requests.iter().any(|(route, _)| route == "/v1/accounts/bootstrap"));
+        assert!(requests.iter().any(|(route, _)| route == "/v1/session/login"));
+        assert!(requests.iter().any(|(route, _)| route == "/v1/session/logout"));
+    });
+}
+
+#[test]
+fn named_bearer_launch_can_sign_in_again_after_logout() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::Named {
+        url: fixture.url.clone(), bearer: "fixture-only".into(),
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        async fn until(updates: &async_channel::Receiver<State>, predicate: impl Fn(&State) -> bool) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop { let state = updates.recv().await.unwrap(); if predicate(&state) { break; } }
+            }).await.unwrap();
+        }
+        until(&updates, |state| state.ready).await;
+        worker.send(Command::AccountLogout).unwrap();
+        until(&updates, |state| state.account_login).await;
+        worker.send(Command::AccountLogin { name: "owner".into(), password: "offline-password-123".into() }).unwrap();
+        until(&updates, |state| state.ready && !state.account_login).await;
+    });
+}
+
+#[test]
+fn named_provider_handoff_sends_only_user_selected_actions() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::Named { url: fixture.url.clone(), bearer: "fixture-only".into() });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let state = updates.recv().await.unwrap();
+                if state.ready {
+                    assert!(state.provider_available);
+                    assert_eq!(state.provider_url.as_deref(), Some("https://auth.openai.com/api/accounts/authorize?state=mock"));
+                    break;
+                }
+            }
+        }).await.unwrap();
+        worker.send(Command::ProviderStart).unwrap();
+        let callback = "http://127.0.0.1:1455/auth/callback?code=mock&state=mock";
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if fixture.requests.lock().unwrap().iter().any(|(route, _)| route == "/v1/provider/openai/start") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        worker.send(Command::ProviderCallback(callback.into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if fixture.requests.lock().unwrap().iter().any(|(route, body)|
+                    route == "/v1/provider/openai/callback" && body["url"] == callback) { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+    });
+}
+
+#[test]
+fn named_visualization_is_parsed_for_the_authenticated_session() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::Named { url: fixture.url.clone(), bearer: "fixture-only".into() });
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop { if updates.recv().await.unwrap().ready { break; } }
+        }).await.unwrap();
+        worker.send(Command::Submit("/viz".into())).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let state = updates.recv().await.unwrap();
+                if !state.visualizations.is_empty() {
+                    assert_eq!(state.visualizations[0].account_id, "fixture-account");
+                    assert_eq!(state.visualizations[0].thread_id, "main");
+                    assert!(state.visualization_expires_at.unwrap() > Instant::now());
+                    break;
+                }
             }
         }).await.unwrap();
     });

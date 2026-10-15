@@ -2,6 +2,7 @@
   "name": "@morons/visualization",
   "private": true,
   "type": "module",
+  "exports": { ".": "./index.ts" },
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },

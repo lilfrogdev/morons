@@ -38,16 +38,27 @@ test('two accounts isolate named Pi state while two device sessions share one ac
     }, aliceMac.token);
     assert.equal(message.status, 200);
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, alicePc.token)).messages[0].text, 'Alice private decision');
+    const visualTurn = await call('POST', '/v1/sessions/repo-main/chat', {
+      requestId: 'abababab-abab-4bab-8bab-abababababab', text: '/viz',
+    }, aliceMac.token);
+    assert.equal(visualTurn.answer, 'Visualization ready: Repository checks');
+    const aliceVisuals = await call('GET', '/v1/sessions/repo-main/visualizations', null, alicePc.token);
+    assert.equal(aliceVisuals.documents.length, 1);
+    assert.equal(aliceVisuals.documents[0].content.kind, 'bar');
+    assert.equal(aliceVisuals.documents[0].accountId, aliceMac.account.id);
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).status, 404);
     await call('POST', '/v1/morons', { id: 'repo', name: 'Bob Repo', rules: '', preferences: '' }, bob.token);
     await call('POST', '/v1/morons/repo/sessions', { id: 'repo-main' }, bob.token);
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).messages.length, 0);
+    assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, bob.token)).documents.length, 0);
     await server.close();
     server = await openAccountServer({ dataDir, bootstrapToken });
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, alicePc.token)).messages[0].text, 'Alice private decision');
     assert.equal((await call('GET', '/v1/sessions/repo-main/history', null, bob.token)).messages.length, 0);
+    assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, alicePc.token)).documents.length, 1);
     await call('POST', '/v1/session/logout', {}, aliceMac.token);
     assert.equal((await call('GET', '/v1/morons', null, aliceMac.token)).status, 401);
+    assert.equal((await call('GET', '/v1/sessions/repo-main/visualizations', null, aliceMac.token)).status, 401);
     assert.equal((await call('GET', '/v1/morons', null, alicePc.token)).status, 200);
   } finally {
     await server?.close().catch(() => {});

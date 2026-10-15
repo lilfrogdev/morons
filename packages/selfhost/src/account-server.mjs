@@ -1,11 +1,13 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, lstat, mkdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, lstat, mkdir, readFile } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openAccounts } from './accounts.mjs';
 import { openFixtureServer } from './server.mjs';
 import { acquireOwnerLock } from './owner-lock.mjs';
+import { createProviderFlow } from './provider-flow.mjs';
+import { openProviderRuntime } from './provider-runtime.mjs';
 
 function send(response, status, body) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -33,12 +35,23 @@ function bearer(request) {
   const value = request.headers.authorization;
   return typeof value === 'string' && value.startsWith('Bearer ') ? value.slice(7) : null;
 }
+async function privateFile(path) {
+  if (!isAbsolute(path ?? '')) throw new Error('private_file_path_required');
+  const info = await lstat(path);
+  if (!info.isFile() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid()))
+    throw new Error('private_file_required');
+  return readFile(path);
+}
 
 /** Loopback app gateway. Each account gets a separate Pi/OptChat storage owner. */
-export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, host = '127.0.0.1', port = 0 }) {
+export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0 }) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('tls_ingress_required');
   if (typeof bootstrapToken !== 'string' || bootstrapToken.length < 32 || bootstrapToken.length > 256)
     throw new Error('bootstrap_token_required');
+  if (providerKey !== null && (!Buffer.isBuffer(providerKey) || providerKey.length !== 32))
+    throw new Error('provider_unlock_key_required');
+  const activeProviderFactory = providerFactory ?? (providerKey ? (account, directory) =>
+    openProviderRuntime({ directory, accountId: account.id, masterKey: providerKey }) : null);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   if (!(await lstat(dataDir)).isDirectory() || (await lstat(dataDir)).isSymbolicLink())
     throw new Error('private_data_directory_required');
@@ -61,9 +74,15 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       const internalToken = randomBytes(32).toString('hex');
       const accountPlan = account.administrator && repositoryPlan ?
         { ...repositoryPlan, reviewRoot: join(directory, 'reviews') } : null;
-      const server = await openFixtureServer({ databasePath: join(directory, 'pi.sqlite'),
-        ownerToken: internalToken, repositoryPlan: accountPlan });
-      return { server, internalToken };
+      const providerRuntime = activeProviderFactory ? await activeProviderFactory(account, directory) : null;
+      let server;
+      try {
+        server = await openFixtureServer({ databasePath: join(directory, 'pi.sqlite'),
+          ownerToken: internalToken, repositoryPlan: accountPlan, accountId: account.id,
+          providerModels: providerRuntime?.models ?? null, providerModelId });
+        return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
+          providerRuntime };
+      } catch (error) { await server?.close(); await providerRuntime?.close?.(); throw error; }
     })();
     runtimes.set(account.id, pending);
     try { return await pending; }
@@ -107,6 +126,23 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         const body = json(await bytes(request, 2048));
         return send(response, 201, { account: await accounts.create(body.name, body.password) });
       }
+      if (path.startsWith('/v1/provider/openai/')) {
+        const target = await runtime(account);
+        if (path === '/v1/provider/openai/status' && request.method === 'GET')
+          return send(response, 200, { provider: await target.provider.status(), available: Boolean(activeProviderFactory) });
+        if (!activeProviderFactory) return send(response, 503, { error: 'provider_store_unavailable' });
+        if (path === '/v1/provider/openai/start' && request.method === 'POST')
+          return send(response, 202, { provider: target.provider.start() });
+        if (path === '/v1/provider/openai/callback' && request.method === 'POST') {
+          const body = json(await bytes(request, 8192));
+          return send(response, 200, { provider: target.provider.submitCallback(body?.url) });
+        }
+        if (path === '/v1/provider/openai/cancel' && request.method === 'POST')
+          return send(response, 200, { provider: target.provider.cancel() });
+        if (path === '/v1/provider/openai/logout' && request.method === 'POST')
+          return send(response, 200, { provider: await target.provider.logout() });
+        return send(response, 404, { error: 'not_found' });
+      }
       if (!path.startsWith('/v1/')) return send(response, 404, { error: 'not_found' });
       const target = await runtime(account);
       const body = ['POST', 'PUT', 'PATCH'].includes(request.method) ? await bytes(request) : undefined;
@@ -114,12 +150,13 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         headers: { Authorization: `Bearer ${target.internalToken}`, 'Content-Type': 'application/json' },
         body, redirect: 'manual' });
       const output = Buffer.from(await upstream.arrayBuffer());
+      if (accounts.session(token)?.id !== account.id) return send(response, 401, { error: 'unauthorized' });
       if (output.length > 512 * 1024) return send(response, 502, { error: 'upstream_too_large' });
       response.writeHead(upstream.status, { 'Content-Type': 'application/json; charset=utf-8',
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(output);
     } catch (error) {
-      const status = error?.message === 'invalid_json' || error?.message === 'invalid_account' ? 400 :
+      const status = error?.message === 'invalid_json' || error?.message === 'invalid_account' || error?.message === 'invalid_callback' ? 400 :
         error?.message === 'request_too_large' ? 413 : error?.code === 'SQLITE_CONSTRAINT_UNIQUE' ? 409 : 500;
       send(response, status, { error: status === 500 ? 'internal' : error.message });
     }
@@ -131,7 +168,12 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
     async close() {
       closing = true;
       await new Promise((resolve) => server.close(resolve));
-      for (const pending of runtimes.values()) await (await pending).server.close();
+      for (const pending of runtimes.values()) {
+        const target = await pending;
+        await target.provider.close();
+        await target.server.close();
+        await target.providerRuntime?.close?.();
+      }
       accounts.close();
       await lock.close();
     },
@@ -139,11 +181,15 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const { MORONS_DATA_DIR: dataDir, MORONS_BOOTSTRAP_TOKEN: bootstrapToken,
-    MORONS_REPOSITORY: repository, MORONS_SOURCE_PATHS: sourcePaths } = process.env;
+  const { MORONS_DATA_DIR: dataDir, MORONS_BOOTSTRAP_TOKEN_FILE: bootstrapFile,
+    MORONS_PROVIDER_KEY_FILE: providerFile, MORONS_REPOSITORY: repository,
+    MORONS_SOURCE_PATHS: sourcePaths, MORONS_PROVIDER_MODEL_ID: providerModelId } = process.env;
   const repositoryPlan = repository && sourcePaths ?
     { repository, allowedPaths: sourcePaths.split(',').filter(Boolean) } : null;
-  openAccountServer({ dataDir, bootstrapToken, repositoryPlan, port: Number(process.env.PORT ?? 8787) })
+  Promise.all([privateFile(bootstrapFile), providerFile ? privateFile(providerFile) : Promise.resolve(null)])
+    .then(([bootstrap, providerKey]) => openAccountServer({ dataDir,
+      bootstrapToken: bootstrap.toString('utf8').trim(), providerKey, providerModelId, repositoryPlan,
+      port: Number(process.env.PORT ?? 8787) }))
     .then(({ url }) => process.stdout.write(`Morons local account server listening at ${url}\n`))
-    .catch(() => { process.stderr.write('Morons account server startup failed. Check private data directory and bootstrap configuration.\n'); process.exitCode = 1; });
+    .catch(() => { process.stderr.write('Morons account server startup failed. Check private file ownership, data directory, and lock state.\n'); process.exitCode = 1; });
 }

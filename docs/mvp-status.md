@@ -1,67 +1,68 @@
 # Morons local MVP status
 
-This branch builds on the newer Pi-based `lilfrogdev/morons` application. The
-older Rust CLI is excluded from reuse. The chosen clients are installed GPUI
-Mac and Windows desktop applications, followed by a separate native iPhone
-client. No PWA decision remains.
+This branch builds on the newer Pi-based `lilfrogdev/morons` repository. The
+older `morons.dev` Rust CLI is excluded from reuse. Installed GPUI Mac and
+Windows apps are the desktop direction, followed by a separate native iPhone
+app. The current local tryout is on Mac.
 
-## Working offline path
+## Working local path
 
-A GPUI client with a Morons device-session bearer connects to the loopback
-self-hosted server. The server maps that token to an account and opens that
-account's own Pi Durable and OptChat SQLite files under one process owner.
-Named morons have durable conversations, rules, preferences, same-session
-OptChat context, explicit moron-level decisions, and scoped `@mention`
-question/answer handoffs. Other account databases and other morons' private
-session transcripts are not available through a session bearer.
+GPUI can create the first account and sign in within the app. Its password and
+first-account setup fields are masked; the device bearer stays in app memory
+and can be revoked by Sign out. A loopback account gateway maps the bearer to
+an account-private Pi Durable and OptChat owner. Named morons keep rules,
+preferences, durable sessions, bounded memory, and scoped `@mention` question
+and answer handoffs. Multiple device sessions see the same account history;
+other accounts have separate databases.
 
-The repository moron can use two synthetic Pi tool calls:
+The offline fixture model can call `/source PATH` for one exact allowlisted
+committed file and `/review` followed by a unified diff. The latter commits a
+proposal on an isolated branch, checks approved paths and `git diff --check`,
+then presents the diff and Approve/Reject record controls in GPUI. Review
+intents reconcile after restart. The source checkout and its uncommitted work
+stay intact. Decisions do not merge, apply, push, deploy, or update Morons.
 
-- `/source PATH` reads only an operator-allowlisted committed file from a
-  configured repository, excluding its uncommitted working tree.
-- `/review` followed by a unified diff commits on an isolated proposal branch,
-  checks exact allowed patch paths, runs fixed `git diff --check`, and records
-  the diff and check result. GPUI shows the review and lets a human record
-  Approve or Reject. Either decision is a review record only; it never merges,
-  deploys, or changes the running app.
+A bounded data-only visualization from `/viz` is sealed to the server's
+account, session, assistant message, and revision. Authorized reads issue a
+five-second lease; GPUI renders the chart with native primitives in the
+conversation scroll area and clears it on logout or refresh failure. Invalid
+model-supplied visualization data remains ordinary text.
 
-The worker is a separate process without provider credentials. Its macOS
-`sandbox-exec` profile denies network access. The current profile does **not**
-confine all filesystem reads; deployment with untrusted repository content
-still needs a stronger platform-specific runner boundary. The self-hosted
-account server binds loopback only, for use behind a separately configured
-authenticated TLS ingress. No external listener is opened by this branch.
-Review intents are saved before branch creation and retried after restart;
-unexpected worktree states remain for operator inspection. The review list is
-bounded and the selected diff is fetched separately.
+Pi 1.2's ChatGPT OAuth interaction has a human-triggered GPUI lifecycle:
+start, inspect the server-returned authorization URL, open the browser, paste
+a final redirect URL if needed, cancel, status, and disconnect. The server
+requires an owner-private 32-byte unlock key before exposing this path, keeps
+provider credentials in an encrypted per-account store, and never returns
+them to GPUI. The real Pi model path passed mocked responses through durable
+chat; repository tools are absent in that mode. The default remains offline
+even with a provider key; selecting a real model also requires an explicit
+catalog model ID from the operator. Account entitlement and remote token
+validity have not been verified. No actual OAuth or paid call was made. Local
+credential metadata restores provider status after a restart.
 
-The first full backend acceptance test in `packages/selfhost/test/repository.test.mjs`
-boots an account, logs in, exercises Pi source and review tools, records a
-human decision, restarts, and verifies the decision persists while the source
-checkout retains its HEAD and uncommitted edit. Separate tests cover two
-account namespaces, two device sessions for one account, OptChat isolation,
-request retries, interrupted review reconciliation, process-lock recovery,
-concurrent bootstrap, login throttling, and `@mention` coordination. GPUI transport tests cover
-review data and decision requests. A live macOS run also showed the chat,
-diff, check result, and decision controls with a synthetic model; the captured
-screenshot is a disposable QA artifact, not a production design qualification.
+## Trust boundary and remaining milestones
 
-## Still required for real use
+The review worker is a separate process without provider credentials and with
+macOS network access denied. Its current sandbox **does not confine filesystem
+reads**. Real-provider sessions therefore have no repository tools. A stronger
+filesystem/process runner and explicit trusted check and apply workflow are
+required before model-directed code execution.
 
-- Human-initiated ChatGPT login UI and credential handoff to Pi 1.2. The mock
-  provider adapter and encrypted single-owner store are ready, but no live
-  OAuth or paid inference was invoked.
-- A native in-app Morons account login and private device-token storage. The
-  account login API and expiring, revocable device sessions work; the current
-  GPUI client receives its token through `MORONS_BACKEND_TOKEN`.
-- A stronger filesystem sandbox for reviewing untrusted repositories, a
-  trusted check plan beyond `git diff --check`, and an explicit reviewed apply
-  or merge workflow. Approve currently records intent only.
-- Windows build and UI qualification, TLS ingress and remote-device testing,
-  and the separate native iPhone client.
-- Model-backed OptChat compression and recall evaluation. This code is a port
-  of OptChat v0.7.2, not an upstream package; revision and licenses are recorded
-  in `docs/optchat.md` and `packages/optchat/NOTICE`.
+The account server binds loopback only. For remote devices, configure and
+qualify authenticated TLS ingress, token storage on each client, and session
+revocation behavior. The Mac app currently asks for login each launch. Windows
+build/UI testing and the separate native iPhone client remain later milestones.
+OptChat model-backed compression and recall evaluation remain open.
 
-The local branch is a tested synthetic flow, not an autonomous updater or a
-production multi-device release.
+Tests cover account isolation, two device sessions, restarts, source/review
+proposals, pending review reconciliation, mocked Pi provider login and model
+responses, and visualization provenance. Native transport tests cover account
+setup/sign-in/logout, provider handoff, visualization parsing, review actions,
+composer and stream behavior. A live Mac run with a disposable offline server
+showed both the in-app login and the signed-in review/chart UI. The local
+tryout instructions are in `packages/selfhost/README.md`.
+
+OptChat v0.7.2 and Pitcrew adaptation revision/license details are in
+`docs/optchat.md` and `packages/optchat/NOTICE`. The native visualization
+adaptation attribution is in `docs/visualizations.md` and
+`packages/visualization/NOTICE`.
