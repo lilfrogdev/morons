@@ -1,4 +1,4 @@
-/** SQL contract shared by Cloudflare Durable Object SQLite and node:sqlite adapters. */
+
 export interface MemorySql {
   exec<T extends Record<string, string | number | null>>(
     query: string,
@@ -20,8 +20,8 @@ export const REPO_MEMORY_LIMITS = {
   pageItems: 32,
   referenceLimit: 256,
   searchScan: 128,
-  // At most 32 authorized scopes with 4,096 raw sources each. This remains
-  // finite when a long Morons session rolls into another scope.
+
+
   authorizationScan: 135168,
   storedScopes: 128,
   nodeAttempts: 2,
@@ -33,7 +33,7 @@ export interface RepoMemorySourceRef {
   threadId: string | null;
   kind: string;
   date: string;
-  /** Authoritative storage sequence when evaluating access, never ingest-supplied. */
+
   sequence?: number;
 }
 export interface RepoMemorySource extends RepoMemorySourceRef {
@@ -164,7 +164,7 @@ function canonicalAccess(access: RepoMemoryAccess) {
   });
 }
 function summary(value: unknown): value is string {
-  // Reject lone UTF-16 surrogates: encoding them replaces original data with U+FFFD.
+
   return (
     typeof value === "string" &&
     !!value.trim() &&
@@ -388,7 +388,7 @@ export class RepoMemory {
       return { index: count, nodeId: leafId };
     });
   }
-  /** Bounded inventory for migrating a legacy session without moving its immutable sources. */
+
   sourceInventory(access: RepoMemoryAccess, authorize: RepoMemoryAuthorize) {
     const scopes = this.scopes(access).slice(1);
     const rows = this.rows<{ source_id: string; metadata: string; seq: number }>(
@@ -542,8 +542,8 @@ export class RepoMemory {
   ) {
     this.assertReferences(access, this.turnAuthorize(this.turn(turnId, access), authorize), refs);
   }
-  /** Revalidate a saved brief for a currently authorized collaborator. This grants
-   * no access to the original actor's tools, compression claims, or budget. */
+
+
   assertSnapshotReferences(
     turnId: string,
     currentAccess: RepoMemoryAccess,
@@ -562,8 +562,8 @@ export class RepoMemory {
       original.revision !== currentAccess.revision
     )
       throw Error("memory_snapshot_conflict");
-    // A saved brief can disclose only scopes admitted to that original snapshot,
-    // even if its new reader is now a member of additional discussions.
+
+
     const admittedScopes = this.scopes(original);
     if (!Array.isArray(refs) || refs.length > REPO_MEMORY_LIMITS.referenceLimit)
       throw Error("invalid_memory_reference");
@@ -647,8 +647,8 @@ export class RepoMemory {
           error instanceof Error && /^(?:invalid_memory_|memory_)[a-z_]+$/.test(error.message)
             ? error.message
             : "memory_read_failed";
-        // Failed reads consume their durable tool/input allowance as well. A replay
-        // returns the same stable failure and cannot restart an expensive scan.
+
+
         if (!old)
           this.sql.exec(
             "INSERT INTO repo_memory_calls(turn_id,call_id,args,result) VALUES(?,?,?,?)",
@@ -980,8 +980,8 @@ export class RepoMemory {
         merge: current.level > 0,
         sourceRefs: [reference(current)],
       };
-      // Charge dispatch before returning input to the configured model. Lost responses
-      // consume the claim; future turns can retry without resetting this turn's budget.
+
+
       this.charge(turnId, turn, utf8(frozenSource), REPO_MEMORY_LIMITS.nodeBytes, true);
       this.sql.exec("UPDATE repo_memory_nodes SET attempts=attempts+1 WHERE id=?", current.id);
       this.sql.exec(

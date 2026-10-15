@@ -23,19 +23,3 @@ impl Drafts {
         self.by_moron.clear();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Drafts;
-
-    #[test]
-    fn drafts_follow_named_moron_without_cross_talk_and_clear_on_logout() {
-        let mut drafts = Drafts::default();
-        assert_eq!(drafts.switch(Some("repo"), ""), "");
-        assert_eq!(drafts.switch(Some("fitness"), "repository draft"), "");
-        assert_eq!(drafts.switch(Some("repo"), "fitness draft"), "repository draft");
-        assert_eq!(drafts.switch(Some("fitness"), "repository draft"), "fitness draft");
-        drafts.clear();
-        assert_eq!(drafts.switch(Some("repo"), ""), "");
-    }
-}

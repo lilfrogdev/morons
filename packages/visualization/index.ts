@@ -1,4 +1,4 @@
-/** Data-only visualization contract. Model output may only enter through parseDraft. */
+
 export const VISUALIZATION_VERSION = 1 as const;
 const MAX_DOCUMENT_BYTES = 32768;
 const encoder = new TextEncoder();
@@ -16,7 +16,7 @@ export type TableDraft = {
   columns: string[];
   rows: string[][];
 };
-/** A native-renderable subset of Pitcrew's Apache-2.0 structured document dialect. */
+
 export type DocumentNode = { text: string } | {
   tag: "section" | "p" | "span" | "h2" | "h3" | "strong" | "em" | "small" |
     "code" | "pre" | "ul" | "ol" | "li" | "br" | "hr";
@@ -36,10 +36,10 @@ export type VisualizationDocument = {
   content: VisualizationDraft;
 };
 
-/** These fields must come from authenticated server state, never from model output. */
+
 export type TrustedOrigin = Omit<VisualizationDocument, "version" | "content">;
 
-/** Values must be loaded afresh from the account/thread/document store on every read. */
+
 export type ReadAuthority = {
   accountId: string;
   threadId: string;
@@ -49,7 +49,7 @@ export type ReadAuthority = {
   activeSession: boolean;
   sourceMessageExists: boolean;
   documentRevoked: boolean;
-  /** Changes on logout, membership change, or session replacement. */
+
   accessEpoch?: string;
 };
 
@@ -94,7 +94,7 @@ function parseNode(value: unknown, depth: number, count: { value: number }): Doc
     }) };
 }
 
-/** Rejects executable formats, unknown fields, nonfinite numbers, and excessive payloads. */
+
 export function parseDraft(value: unknown): VisualizationDraft {
   if (!record(value)) fail();
   if (encoder.encode(JSON.stringify(value)).byteLength > MAX_DOCUMENT_BYTES) fail();
@@ -136,7 +136,7 @@ export function parseDraft(value: unknown): VisualizationDraft {
   return fail();
 }
 
-/** Only the server can attach provenance after checking the source message. */
+
 export function sealDocument(input: unknown, origin: TrustedOrigin): VisualizationDocument {
   const content = parseDraft(input);
   if (!record(origin) ||
@@ -147,7 +147,7 @@ export function sealDocument(input: unknown, origin: TrustedOrigin): Visualizati
   return { ...origin, version: VISUALIZATION_VERSION, content };
 }
 
-/** Fail closed; caller must fetch ReadAuthority from trusted storage, never the request body. */
+
 export function canReadDocument(doc: VisualizationDocument, auth: ReadAuthority): boolean {
   return doc.version === VISUALIZATION_VERSION &&
     auth.activeSession === true && auth.sourceMessageExists === true &&
@@ -159,7 +159,7 @@ export function canReadDocument(doc: VisualizationDocument, auth: ReadAuthority)
     doc.sourceRevision === auth.currentSourceRevision;
 }
 
-/** Short-lived server authority; generated content never grants its own visibility. */
+
 export type VisualizationEnvelope = {
   accountId: string;
   threadId: string;
@@ -190,7 +190,7 @@ export function parseEnvelope(value: unknown): VisualizationEnvelope {
     accessEpoch: value.accessEpoch, leaseMs: value.leaseMs as number, documents };
 }
 
-/** Ephemeral display cache: caller clears it on logout, context change, and failed refresh. */
+
 export class VisualizationLease {
   private current?: { envelope: VisualizationEnvelope; expiresAt: number };
   clear(): void { this.current = undefined; }

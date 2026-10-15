@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { RepoMemory, type MemorySql } from "./repo-memory.ts";
 
-/** A single-owner, synchronous SQLite adapter for the OptChat memory tree. */
+
 export function openNodeOptChat(path: string) {
   const database = new DatabaseSync(path);
   const sql: MemorySql = {

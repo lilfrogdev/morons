@@ -18,7 +18,7 @@ function boundedText(text) {
     : { text: bytes.subarray(0, SOURCE_LIMIT - 8).toString('utf8'), kindSuffix: '_excerpt' };
 }
 
-/** A model invocation is charged only after OptChat has durably claimed the input. */
+
 export function createPiMemoryCompressor(models) {
   if (!models?.getModel || !models?.getAvailable || !models?.completeSimple)
     throw new Error('invalid_memory_models');
@@ -46,15 +46,15 @@ export function createPiMemoryCompressor(models) {
   return compress;
 }
 
-/** Account-owned OptChat coordinator. The caller keeps its SQLite owner lock. */
+
 export function createMemoryRuntime({ memory, catalog, accountId, piContext, compressor = null }) {
   if (!memory || !catalog || typeof accountId !== 'string' || !accountId)
     throw new Error('invalid_memory_runtime');
   const shardId = (sessionId, index) => index === 0 ? sessionId : `${sessionId}~${index}`;
   const accessFor = (session) => moronMemoryAccess({
     accountId, moronId: session.moronId, sessionId: session.id,
-    // Keep the access identity stable for frozen turns, including after a
-    // later page opens another shard. OptChat bounds this list to 32 scopes.
+
+
     allowedSessionIds: Array.from({ length: REPO_MEMORY_LIMITS.scopes }, (_, index) => shardId(session.id, index)),
     aclRevision: `${accountId}-v1`,
   });
@@ -66,13 +66,13 @@ export function createMemoryRuntime({ memory, catalog, accountId, piContext, com
     const access = accessFor(session);
     let lastEntryId = catalog.memoryCursor(session.id);
     let sourceCount = catalog.memorySourceCount(session.id);
-    // Before the cursor existed, older builds persisted assistant sources in
-    // OptChat. Count and retain them in place while backfilling Pi user entries.
+
+
     const legacy = lastEntryId ? null : memory.sourceInventory(access, authorize);
     if (legacy) sourceCount = legacy.count;
     while (true) {
-      // Pi's inclusive minEntryId lets each page start from a durable high-water
-      // mark. No opaque scan cursor needs to survive a restart.
+
+
       const page = await conversation.entries({ order: 'ascending',
         ...(lastEntryId ? { minEntryId: lastEntryId + 1 } : {}) }, PAGE_SIZE, undefined, piContext);
       for (const entry of page.items) {
@@ -96,8 +96,8 @@ export function createMemoryRuntime({ memory, catalog, accountId, piContext, com
         const nextEntryId = page.items.at(-1).id;
         if (!Number.isSafeInteger(nextEntryId) || nextEntryId <= lastEntryId)
           throw new Error('invalid_memory_page');
-        // Advance only after every OptChat source in this page is committed.
-        // A crash before this write replays the page through idempotent append.
+
+
         catalog.advanceMemoryCursor(session.id, nextEntryId, sourceCount);
         lastEntryId = nextEntryId;
       }
@@ -121,8 +121,8 @@ export function createMemoryRuntime({ memory, catalog, accountId, piContext, com
           if (summary) memory.acceptSummary(turnId, callId, access, authorize,
             { nodeId: job.nodeId, inputId: job.inputId, text: summary });
         } catch {
-          // A failed generation leaves the immutable source and pending node intact.
-          // The claimed attempt stays charged; a later turn may retry.
+
+
         }
       }
     }

@@ -45,12 +45,12 @@ async function ensurePrivateDirectory(path) {
   if (!info.isDirectory() || (info.mode & 0o077) !== 0 || (process.getuid && info.uid !== process.getuid())) throw new Error("insecure_credential_directory");
 }
 
-/**
- * Open the single storage-owner credential store. The host supplies a 32-byte
- * secret key via its own secure key handoff; this module never persists the key.
- * Its exclusive lock is intentionally fail-closed after a crash until an
- * operator checks that the former owner has stopped and removes the lock.
- */
+
+
+
+
+
+
 export async function openEncryptedCredentialStore({ filePath, key }) {
   if (!isAbsolute(filePath ?? "")) throw new Error("absolute_file_path_required");
   if (!Buffer.isBuffer(key) || key.length !== 32) throw new Error("32_byte_key_required");

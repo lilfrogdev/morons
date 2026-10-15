@@ -53,8 +53,5 @@ text is retained for history. With an available selected real model, it
 claims and compresses up to four native OptChat nodes per turn using a short
 factual summarization request. Unavailable and offline fixture models leave
 the raw sources intact.
-`npm test` in `packages/optchat` covers restart, immutable idempotent append,
-scope isolation, revocation of cached reads, compression claim replay, and raw
-source preservation. The self-host tests cover selected-model compression,
-restart, failed compression, and source retention. Recall evaluation with a
+`npm run check` in `packages/optchat` checks syntax. Recall evaluation with a
 signed-in real provider remains open.

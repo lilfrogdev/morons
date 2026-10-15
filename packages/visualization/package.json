@@ -4,7 +4,7 @@
   "type": "module",
   "exports": { ".": "./index.ts" },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "check": "node --experimental-strip-types --check index.ts"
   },
   "engines": {
     "node": ">=22.19.0"

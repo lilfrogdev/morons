@@ -15,8 +15,8 @@ export function validRunnerImage(image) {
 
 export async function assertRunnerPathSeparation(repository, privateRoot) {
   const [source, privatePath] = await Promise.all([realpath(repository), realpath(privateRoot)]);
-  // Linked worktrees point .git outside /source. A read-only bind of only the
-  // worktree would break Git, so reject rather than silently weaken mounts.
+
+
   const gitDir = await lstat(join(source, '.git')).catch(() => null);
   if (!gitDir?.isDirectory()) throw new Error('runner_source_must_have_embedded_git');
   if (source === privatePath || source.startsWith(`${privatePath}${sep}`) ||
@@ -51,8 +51,8 @@ export function containerArgs({ image, repository, reviewRoot, workerRoot = runn
 function docker(args, input = '', timeout = 180_000) {
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { stdio: ['pipe', 'pipe', 'pipe'],
-      // The host CLI needs its selected Docker context. This environment is
-      // never forwarded into the container; only explicit --env values are.
+
+
       env: { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME ?? '/tmp',
         ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}),
         ...(process.env.DOCKER_CONTEXT ? { DOCKER_CONTEXT: process.env.DOCKER_CONTEXT } : {}) }, windowsHide: true });
@@ -80,7 +80,7 @@ function docker(args, input = '', timeout = 180_000) {
   });
 }
 
-/** Local-only preflight; never pulls an image or starts a container engine. */
+
 export async function verifyContainerRunner(image) {
   if (!validRunnerImage(image)) throw new Error('runner_image_digest_required');
   const daemon = await docker(['info', '--format', '{{.ServerVersion}}'], '', 10_000);
@@ -93,8 +93,8 @@ export async function verifyContainerRunner(image) {
       image, '--version'], '', 15_000);
     if (check.code !== 0 || !expected.test(check.output)) throw new Error('runner_image_missing_node_or_git');
   }
-  // Confirm the engine honors this invocation's mounts, environment and
-  // network boundary before a real model receives repository tools.
+
+
   const probeRoot = await mkdtemp(join(tmpdir(), 'morons-runner-probe-'));
   const source = join(probeRoot, 'source');
   const reviews = join(probeRoot, 'reviews');

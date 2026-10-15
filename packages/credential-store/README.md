@@ -20,8 +20,7 @@ or copy a rotating OAuth session into independent owners.
 
 This protects credentials at rest only while the host key remains separate.
 It does not provide Morons account identity or remote OAuth session revocation.
-Pi login remains a human-initiated provider operation. Offline tests use fake
-tokens; no model or OAuth calls are made.
+Pi login remains a human-initiated provider operation.
 
 On Windows, POSIX file modes do not prove the ACL is private. A Windows host
 must provide a user-private directory and enforce its ACL before opening this

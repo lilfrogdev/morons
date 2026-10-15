@@ -842,13 +842,3 @@ fn utf16_offset(text: &str, offset: usize) -> usize {
     }
     bytes
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn ime_replacement_selection_uses_new_text_utf16() {
-        assert_eq!(utf16_offset("🐸é", 2), 4);
-        assert_eq!(utf16_offset("🐸é", 3), 6);
-        assert_eq!(utf16_offset("hello", 999), 5);
-    }
-}

@@ -25,6 +25,6 @@ requires the separately verified container runner described in
 under the account's review directory so the source checkout and its Git
 metadata remain read-only. The connected server requires an operator-selected
 profile for exact `review-runner/src` or `optchat/src` paths and runs both
-`git diff --check` and the package's Node test suite on the candidate. Test
-scripts and test files remain outside the model's path allowlist. Other
+`git diff --check` and the package's fixed syntax check on the candidate. Check
+scripts remain outside the model's path allowlist. Other
 packages need their own reviewed dependency and check policy.

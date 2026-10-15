@@ -28,7 +28,7 @@ function displayAnswer(raw) {
   } catch { return raw; }
 }
 
-// A deterministic fixture provider: this server cannot make paid inference calls.
+
 function fixtureModels() {
   const models = createModels();
   const model = {
@@ -122,7 +122,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (sourceRoot === storagePath || sourceRoot.startsWith(`${storagePath}${sep}`) ||
         storagePath.startsWith(`${sourceRoot}${sep}`)) throw new Error('runner_private_path_overlaps_source');
   }
-  // Pi Durable's Node adapter has no cross-process lock. One server process must own this file.
+
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
@@ -209,7 +209,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         catalog.saveReview({ id: intent.id, sessionId: intent.session_id, branch: intent.branch,
           baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
       } catch {
-        // Keep the intent for operator inspection or a later restart.
+
       }
     }
   }
@@ -271,8 +271,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (previous && previous.display_text !== displayText) return { status: 409, body: { error: "request_id_conflict" } };
       if (previous?.answer !== null && previous?.answer !== undefined)
         return { status: 200, body: { requestId: body.requestId, answer: previous.answer } };
-      // Reserve request text before Pi admission. After a crash, Pi's durable
-      // requestId returns the same settled entry; a changed text is rejected.
+
+
       const modelRef = previous ? null : (await conversation.agent(BACKGROUND_CONTEXT)).model;
       const prepared = previous ? null : await memoryRuntime.prepareTurn(conversation, session, body.requestId, modelRef);
       const submitted = previous ? previous.text : body.text + prepared.text;
@@ -292,15 +292,15 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
             sourceRevision: createHash('sha256').update(text).digest('hex'), createdAt: Date.now(),
           });
           catalog.saveVisualization(session.id, document);
-        } catch { /* Invalid generated data remains plain text. */ }
+        } catch {}
       }
       await afterPiSettled();
       catalog.saveReply(sessionId, body.requestId, displayAnswer(text));
       await memoryRuntime.sync(conversation, session);
       return { status: 200, body: { requestId: body.requestId, answer: displayAnswer(text) } };
     };
-    // One active task owner per conversation. Distinct requests queue; repeated
-    // request IDs share the same promise rather than submitting twice.
+
+
     const previous = sessionTail.get(sessionId) ?? Promise.resolve();
     const work = previous.catch(() => {}).then(execute);
     sessionTail.set(sessionId, work);

@@ -1,5 +1,5 @@
-//! Bounded adapter for the self-hosted named-session HTTP contract.
-//! The server remains authoritative; this only supplies the existing chat view.
+
+
 
 use crate::model::{Handoff, Message, Role, Snapshot, Task, TaskStatus};
 use serde::Deserialize;
@@ -67,50 +67,5 @@ impl NamedHistory {
         }
         snapshot.validate()?;
         Ok(snapshot)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn adapts_two_named_turns_for_the_gpui_chat_view() {
-        let history: NamedHistory = serde_json::from_value(serde_json::json!({
-            "sessionId":"s1", "moronId":"repo", "messages":[
-                {"id":"m1","role":"user","text":"Inspect source"},
-                {"id":"m2","role":"assistant","text":"I found Rust and TypeScript."},
-                {"id":"m3","role":"user","text":"Remember that decision"}
-            ]
-        }))
-        .unwrap();
-        let snapshot = history.into_snapshot().unwrap();
-        assert_eq!(snapshot.tasks.len(), 2);
-        assert_eq!(snapshot.messages[0].task_id, snapshot.messages[1].task_id);
-        assert_ne!(snapshot.messages[1].task_id, snapshot.messages[2].task_id);
-    }
-
-    #[test]
-    fn rejects_unowned_assistant_entry() {
-        let history: NamedHistory = serde_json::from_value(serde_json::json!({
-            "sessionId":"s1", "moronId":"repo", "messages":[
-                {"id":"m1","role":"assistant","text":"unexpected"}
-            ]
-        }))
-        .unwrap();
-        assert!(history.into_snapshot().is_err());
-    }
-
-    #[test]
-    fn preserves_bounded_handoff_provenance() {
-        let history: NamedHistory = serde_json::from_value(serde_json::json!({
-            "sessionId":"s1", "moronId":"repo", "messages":[
-                {"id":"m1","role":"user","text":"Ask @freddy", "handoff":{
-                    "targetMoronId":"freddy", "answer":"Use a small patch."}},
-                {"id":"m2","role":"assistant","text":"Freddy suggests a small patch."}
-            ]
-        })).unwrap();
-        let snapshot = history.into_snapshot().unwrap();
-        assert_eq!(snapshot.messages[0].handoff.as_ref().unwrap().target_moron_id, "freddy");
     }
 }

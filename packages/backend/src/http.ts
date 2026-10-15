@@ -31,7 +31,7 @@ export async function authorized(
   if (!token || token.length < 32 || token.length > 256) return false;
   const supplied = request.headers.get("Authorization");
   if (!supplied || supplied.length > 264) return false;
-  // Compare fixed length digests so a matching prefix does not affect timing.
+
   const digest = (value: string) =>
     crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   const [a, b] = await Promise.all([

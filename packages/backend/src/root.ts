@@ -168,7 +168,7 @@ export class RootChat extends DurableObject<Env> {
     return result;
   }
   async onStart() {
-    // An admission saved before Pi submission is recovered with the same durable operation ID.
+
     this.ctx.waitUntil(
       this.serial(async () => {
         const active = this.active();
@@ -211,7 +211,7 @@ export class RootChat extends DurableObject<Env> {
           : row.stopRequested
             ? "stopped"
             : "failed";
-      // Provider error text may contain credentials. Only fixed messages cross our boundary.
+
       const error =
         status === "failed"
           ? "Model execution failed or exceeded its limits."

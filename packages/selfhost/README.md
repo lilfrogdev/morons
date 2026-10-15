@@ -7,7 +7,6 @@ The server binds `127.0.0.1` only. Build from this checkout:
 ```sh
 cd packages/selfhost
 npm ci
-npm test
 ```
 
 Create a private data directory and first-account setup code. The code is read
@@ -115,8 +114,8 @@ The model receives repository read and proposal tools only when the operator
 sets `MORONS_REPOSITORY`, `MORONS_SOURCE_PATHS`, `MORONS_RUNNER_IMAGE`, and
 `MORONS_REVIEW_CHECK_PROFILE`. The supported profiles are `review-runner` and
 `optchat`. Each accepts exact allowlisted files only under its package's
-`src/` directory, keeps its test script and tests outside the edit allowlist,
-and runs `git diff --check` plus that package's Node test suite on the
+`src/` directory, keeps its check script outside the edit allowlist,
+and runs `git diff --check` plus that package's fixed syntax check on the
 candidate checkout. The same checks rerun after intent recovery. Other paths
 or an absent/mismatched profile fail closed. The dependency-heavy self-host
 backend and GPUI need separately provisioned dependencies and check policies.
@@ -154,8 +153,8 @@ and `docker image inspect docker.io/library/node:22.23.3-bookworm --format '{{js
 Starting Colima uses its configured four CPUs, 8 GiB RAM limit, and 30 GiB
 virtual disk; the image pull consumes network bandwidth and space in that
 disk. No custom image build is needed for the two dependency-free profiles.
-Then run `npm test` with `MORONS_TEST_RUNNER_IMAGE` set to that digest and
-inspect the live boundary test result. Only after it passes should
+Then start the server with that digest in a disposable local configuration
+and inspect its live boundary probe result. Only after it passes should
 `MORONS_RUNNER_IMAGE` be added to the server launch environment together with
 an approved check profile and exact source-path list. No real login or paid
 inference is needed for this boundary test.

@@ -56,9 +56,9 @@ clones committed source rather than writing Git metadata in the original
 checkout. On this Mac both Colima profiles are stopped, so the live container
 probe has not run and real-model repository tools are unavailable. The next
 platform action is to start the existing Colima profile and provide a reviewed
-Node 22+ and Git image digest for the live adversarial test. Two trusted,
+Node 22+ and Git image digest for the live boundary probe. Two trusted,
 dependency-free check profiles now run the candidate's `review-runner` or
-`optchat` Node suite as well as `git diff --check`; model edits are confined
+`optchat` syntax check as well as `git diff --check`; model edits are confined
 to the selected package's source paths. The self-host backend and GPUI need
 separate dependency images and build policies. An explicit reviewed apply
 workflow remains to be added before any self-update claim.
@@ -77,13 +77,10 @@ when the current user explicitly names a target; a one-call ledger saves the
 target's isolated answer across restart. GPUI shows that scoped handoff in
 history. Recall quality and real provider behavior still need human testing.
 
-Tests cover account isolation, two device sessions, restarts, source/review
-proposals, pending review reconciliation, mocked Pi provider login and model
-responses, and visualization provenance. Native transport tests cover account
-setup/sign-in/logout, provider handoff, visualization parsing, review actions,
-composer and stream behavior. The offline Pi handoff runs through the real
-durable tool path in a restart test. A live Mac run with a disposable offline server
-showed both the in-app login and the signed-in review/chart UI. The local
+Automated test files were removed at the owner's request. The repository keeps
+syntax checks, type checks, dry-run builds, and manual app verification. A
+previous live Mac run with a disposable offline server showed both the in-app
+login and the signed-in review/chart UI. The local
 tryout instructions are in `packages/selfhost/README.md`.
 
 OptChat v0.7.2 and Pitcrew adaptation revision/license details are in

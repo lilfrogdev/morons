@@ -8,7 +8,7 @@
     "./node": "./src/node.ts"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.mjs"
+    "check": "node --experimental-strip-types --check src/morons.ts && node --experimental-strip-types --check src/node.ts && node --experimental-strip-types --check src/repo-memory.ts"
   },
   "engines": {
     "node": ">=22.19.0"

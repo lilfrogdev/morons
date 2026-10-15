@@ -52,8 +52,8 @@ export interface Failure {
   version: typeof VERSION;
   error: { code: string; message: string };
 }
-// The catalog is owner-scoped. A named moron's rules and preferences are durable,
-// while a session selects which moron owns a conversation on each device.
+
+
 export interface Moron {
   id: string;
   name: string;

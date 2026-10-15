@@ -21,7 +21,7 @@ export function productionModels(key?: string) {
       : AbortSignal.timeout(120000);
   const bounded: Provider = {
     ...provider,
-    // Curated API-key model; this OpenAI Responses model supports max_output_tokens.
+
     getModels: () =>
       provider.getModels().filter((model) => model.id === "gpt-5-mini"),
     stream: (model, context, options) =>

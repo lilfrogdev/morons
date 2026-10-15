@@ -45,7 +45,7 @@ async function privateFile(path) {
   return readFile(path);
 }
 
-/** Loopback app gateway. Each account gets a separate Pi/OptChat storage owner. */
+
 export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0 }) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('tls_ingress_required');
   if (typeof bootstrapToken !== 'string' || bootstrapToken.length < 32 || bootstrapToken.length > 256)

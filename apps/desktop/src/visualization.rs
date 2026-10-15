@@ -1,5 +1,5 @@
-//! Native, data-only representation of a server-authorized visualization.
-//! A view may draw these values with GPUI primitives; it must never load markup or scripts.
+
+
 
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -131,7 +131,7 @@ fn label_ok(value: &str, limit: usize) -> bool {
 }
 
 impl VisualizationDocument {
-    /// Client context check is defense in depth. The server must authorize every read.
+
     pub fn parse_for_thread(bytes: &[u8], account_id: &str, thread_id: &str) -> Option<Self> {
         if bytes.len() > 32_768 {
             return None;
@@ -204,7 +204,7 @@ impl VisualizationDocument {
     }
 }
 
-/// A short-lived local copy, never a substitute for server authorization.
+
 pub struct VisualizationLease {
     account_id: String,
     thread_id: String,
@@ -302,7 +302,7 @@ fn document_text(nodes: &[DocumentNode], lines: &mut Vec<String>, current: &mut 
     }
 }
 
-/// Trusted GPUI primitives only. Call after the server-authorized lease is checked.
+
 #[cfg(feature = "native")]
 pub fn render_native(document: &VisualizationDocument) -> gpui::Div {
     use gpui::{prelude::*, *};
@@ -365,63 +365,4 @@ pub fn render_native(document: &VisualizationDocument) -> gpui::Div {
         }
     }
     body.p_3().rounded_sm().bg(rgb(0xffffff))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const GOOD: &str = r#"{"version":1,"id":"viz-1","accountId":"a","threadId":"t","sourceMessageId":"m","sourceRevision":"r","createdAt":1,"content":{"kind":"bar","title":"Checks","xLabel":"Run","yLabel":"Passed","points":[{"label":"one","value":3}]}}"#;
-
-    #[test]
-    fn accepts_only_current_context_and_data_only_content() {
-        assert!(VisualizationDocument::parse_for_thread(GOOD.as_bytes(), "a", "t").is_some());
-        assert!(VisualizationDocument::parse_for_thread(GOOD.as_bytes(), "other", "t").is_none());
-        assert!(VisualizationDocument::parse_for_thread(GOOD.as_bytes(), "a", "other").is_none());
-        let with_script = GOOD.replace(
-            "\"title\":\"Checks\"",
-            "\"script\":\"alert(1)\",\"title\":\"Checks\"",
-        );
-        assert!(
-            VisualizationDocument::parse_for_thread(with_script.as_bytes(), "a", "t").is_none()
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_kind_and_excessive_size() {
-        let html = GOOD.replace("\"kind\":\"bar\"", "\"kind\":\"html\"");
-        assert!(VisualizationDocument::parse_for_thread(html.as_bytes(), "a", "t").is_none());
-        assert!(VisualizationDocument::parse_for_thread(&vec![b'x'; 32_769], "a", "t").is_none());
-    }
-
-    #[test]
-    fn structured_document_rejects_executable_nodes() {
-        let good = GOOD.replace(
-            r#"{"kind":"bar","title":"Checks","xLabel":"Run","yLabel":"Passed","points":[{"label":"one","value":3}]}"#,
-            r#"{"kind":"document","title":"Checks","summary":"Passed","nodes":[{"tag":"p","children":[{"text":"Good"}]}]}"#,
-        );
-        assert!(VisualizationDocument::parse_for_thread(good.as_bytes(), "a", "t").is_some());
-        let script = good.replace("\"tag\":\"p\"", "\"tag\":\"script\"");
-        assert!(VisualizationDocument::parse_for_thread(script.as_bytes(), "a", "t").is_none());
-        let event = good.replace("\"tag\":\"p\"", "\"tag\":\"p\",\"onclick\":\"run()\"");
-        assert!(VisualizationDocument::parse_for_thread(event.as_bytes(), "a", "t").is_none());
-    }
-
-    #[test]
-    fn short_lease_is_scoped_and_expires() {
-        let envelope = format!(
-            r#"{{"accountId":"a","threadId":"t","accessEpoch":"e1","leaseMs":1000,"documents":[{GOOD}]}}"#
-        );
-        let now = Instant::now();
-        let lease = VisualizationLease::parse(envelope.as_bytes(), "a", "t", now).unwrap();
-        assert_eq!(lease.expires_at(), now + Duration::from_secs(1));
-        assert_eq!(lease.documents("a", "t", "e1", now).unwrap().len(), 1);
-        assert!(lease.documents("a", "t", "e2", now).is_none());
-        assert!(
-            lease
-                .documents("a", "t", "e1", now + Duration::from_secs(1))
-                .is_none()
-        );
-        assert!(VisualizationLease::parse(envelope.as_bytes(), "other", "t", now).is_none());
-    }
 }

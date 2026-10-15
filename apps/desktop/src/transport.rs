@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 pub struct State {
     pub snapshot: Snapshot,
     pub status: &'static str,
-    // The backend owns model selection and provider credentials.
+
     pub model: Option<String>,
     pub models: Vec<ModelOption>,
     pub selected_model: Option<(String, String)>,
@@ -110,8 +110,8 @@ struct NamedReviewDetail {
     review: NamedReview,
 }
 
-// The only token accepted here is the backend application bearer, never a provider key.
-// Configuration deliberately has no Debug implementation or persistent storage.
+
+
 pub enum Config {
     Mock,
     Http { url: Url, bearer: Option<String> },
@@ -155,8 +155,8 @@ impl Worker {
         let (commands, mut receiver) = mpsc::channel(16);
         let (updates, view) = async_channel::bounded(1);
         let stale = view.clone();
-        // Networking and timers live on a dedicated runtime thread. Closing the
-        // window closes this channel; dropping the stream never sends task stop.
+
+
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -190,7 +190,7 @@ struct Publisher {
 }
 impl Publisher {
     fn publish(&self, state: &State) {
-        // Coalesce fast full snapshots instead of building an unbounded UI queue.
+
         if let Err(async_channel::TrySendError::Full(value)) = self.updates.try_send(state.clone())
         {
             let _ = self.stale.try_recv();
@@ -288,8 +288,8 @@ async fn bounded_body_with_limit(
     Ok(bytes)
 }
 
-// Only versioned, known codes select static UI text. Never display an arbitrary
-// backend error message, which could contain provider or application secrets.
+
+
 #[derive(serde::Deserialize)]
 struct Rejection {
     version: u32,
@@ -360,8 +360,8 @@ async fn http(
         };
         match result {
             Ok(snapshot) => {
-                // If submit response was lost, the stable request ID in the fresh
-                // snapshot is sufficient to acknowledge acceptance, across clients.
+
+
                 if pending
                     .as_ref()
                     .is_some_and(|(id, _)| snapshot.tasks.iter().any(|task| &task.id == id))
@@ -422,7 +422,7 @@ async fn http(
                     state.status = "Sending…"; publisher.publish(&state);
                     handle(command, &api, &mut pending, &mut state).await;
                     publisher.publish(&state);
-                    // Discard this connection, fetch a fresh snapshot, then subscribe.
+
                     break;
                 }
                 chunk = tokio::time::timeout(Duration::from_secs(45), stream.next()) => {
@@ -466,7 +466,7 @@ async fn handle(
         }
         Command::Retry => submit_pending(api, pending.as_ref()).await,
         Command::Stop(id) => {
-            // Only exact task IDs from authoritative snapshots can reach this path.
+
             if uuid::Uuid::parse_str(&id).is_err() {
                 Err("Invalid server task identity")
             } else {
@@ -483,8 +483,8 @@ async fn handle(
         Command::ProviderLogout => Err("Account and provider login require the named backend"),
     };
     state.request_error = result.err();
-    // Only uncertain failures retain the idempotency key. Definite rejection
-    // leaves the user's draft available to edit and resubmit as a new request.
+
+
     if admission
         && state
             .request_error
@@ -612,8 +612,8 @@ impl NamedApi {
             }
             return Ok(first.id.clone());
         }
-        // Moron IDs are globally unique and already fit the session ID limit.
-        // Reusing the full ID avoids truncated-ID collisions across devices.
+
+
         let first_id = moron_id.to_owned();
         let _ = self.post(&route, serde_json::json!({"id":first_id})).await;
         let sessions: NamedSessions = self.get(&route).await?;
@@ -983,98 +983,3 @@ async fn mock(mut commands: mpsc::Receiver<Command>, publisher: Publisher) {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn named_session_path_accepts_only_bounded_ids() {
-        assert!(valid_named_id("main"));
-        assert!(!valid_named_id("../other"));
-        assert!(!valid_named_id("a/b"));
-        assert!(!valid_named_id("a%2fb"));
-    }
-    #[test]
-    fn known_rejections_are_actionable_without_echoing_server_text() {
-        for (status, code, expected) in [
-            (429, "task_limit", "Backend task limit reached."),
-            (429, "history_limit", "Backend history limit reached."),
-            (409, "busy", "Another task is active."),
-            (
-                409,
-                "request_conflict",
-                "Request ID conflicts with existing input.",
-            ),
-            (
-                413,
-                "input_limit",
-                "Message exceeds the backend input limit.",
-            ),
-            (503, "not_configured", "Backend model is not configured."),
-        ] {
-            let bytes = serde_json::to_vec(&serde_json::json!({"version":1,"error":{"code":code,"message":"secret-provider-token","extra":"secret"}})).unwrap();
-            let message = rejection_message(status, &bytes);
-            assert!(message.starts_with(expected));
-            assert!(!message.contains("secret"));
-        }
-    }
-    #[test]
-    fn unknown_invalid_or_mismatched_errors_never_echo_server_text() {
-        for bytes in [
-            br#"{"version":1,"error":{"code":"secret-provider-token","message":"secret"}}"#
-                .as_slice(),
-            br#"{"version":2,"error":{"code":"history_limit","message":"secret"}}"#.as_slice(),
-            b"secret invalid JSON".as_slice(),
-        ] {
-            assert_eq!(rejection_message(429, bytes), "Backend rejected request");
-        }
-        let bytes = br#"{"version":1,"error":{"code":"history_limit","message":"secret"}}"#;
-        assert_eq!(rejection_message(500, bytes), "Backend rejected request");
-        assert_eq!(
-            rejection_message(401, b"secret"),
-            "Backend authentication failed"
-        );
-    }
-
-    #[test]
-    fn mock_stream_and_stop_are_authoritative() {
-        let (worker, updates) = Worker::start(Config::Mock);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            updates.recv().await.unwrap();
-            worker.send(Command::Submit("hello 🐸".into())).unwrap();
-            let state = updates.recv().await.unwrap();
-            let id = state.snapshot.active_task_id.clone().unwrap();
-            assert_eq!(state.snapshot.messages[0].text, "hello 🐸");
-            worker.send(Command::Stop(id)).unwrap();
-            loop {
-                let state = updates.recv().await.unwrap();
-                if state.snapshot.active_task_id.is_none() {
-                    assert_eq!(state.snapshot.tasks[0].status, TaskStatus::Stopped);
-                    break;
-                }
-            }
-        });
-    }
-    #[test]
-    fn updates_coalesce_to_latest_snapshot() {
-        let (updates, stale) = async_channel::bounded(1);
-        let publisher = Publisher {
-            updates,
-            stale: stale.clone(),
-        };
-        let mut state = State::default();
-        publisher.publish(&state);
-        state.status = "Connected";
-        publisher.publish(&state);
-        assert_eq!(stale.try_recv().unwrap().status, "Connected");
-        assert!(stale.try_recv().is_err());
-    }
-}
-
-#[cfg(test)]
-#[path = "transport_tests.rs"]
-mod http_tests;

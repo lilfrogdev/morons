@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-// Protocol-only types: the backend owns persistence, task execution and identity.
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {

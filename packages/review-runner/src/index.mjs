@@ -9,8 +9,8 @@ const MAX_PATCH_BYTES = 256 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 function runnerEnv() {
-  // The runner must be launched in a separate, credential-free process. This
-  // allowlist is defense in depth; it is not an OS sandbox.
+
+
   return {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     LANG: 'C',
@@ -55,7 +55,7 @@ function validSourcePath(value) {
     value.split('/').every((part) => part && part !== '.' && part !== '..' && part !== '.git');
 }
 
-/** Read one operator-allowlisted committed file; never offer unrestricted Git reads to a model. */
+
 export async function readSourceAtHead(repository, relativePath, allowedPaths) {
   if (!validSourcePath(relativePath)) throw new Error('Invalid source path');
   if (!Array.isArray(allowedPaths) || !allowedPaths.includes(relativePath))
@@ -81,12 +81,12 @@ export async function inspectSource(repository) {
   return { baseRevision: head.stdout.trim() };
 }
 
-/**
- * Trusted-caller boundary. The model may supply a patch, but branch name,
- * repository, and check commands must come from an operator-approved plan.
- * This commits only on the isolated proposal branch. It never pushes, merges,
- * or changes the source checkout.
- */
+
+
+
+
+
+
 export async function prepareReview({ repository, branch, patch, allowedPaths, checks = [], requiredScript = null, reviewRoot = null, isolatedClone = false, baseRevision = null }) {
   if (!validBranch(branch)) throw new Error('Invalid review branch');
   if (typeof patch !== 'string' || !patch || Buffer.byteLength(patch) > MAX_PATCH_BYTES)
@@ -102,7 +102,8 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     !Array.isArray(c.args) || c.args.length > 24 || c.args.some((a) => typeof a !== 'string' || a.length > 256)))
     throw new Error('Invalid trusted checks');
   if (requiredScript !== null && (!validSourcePath(requiredScript.manifest) ||
-      typeof requiredScript.script !== 'string' || requiredScript.script.length > 256))
+      requiredScript.scriptName !== 'check' ||
+      typeof requiredScript.script !== 'string' || requiredScript.script.length > 512))
     throw new Error('Invalid trusted script');
 
   const root = await realpath(resolve(repository));
@@ -133,8 +134,8 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     const present = await stat(worktree).then((item) => item.isDirectory()).catch(() => false);
     if (!present) {
       if (isolatedClone) {
-        // A container sees the source read-only. Clone into its account-private
-        // output mount so Git never writes source .git/worktrees or refs.
+
+
         const clone = await command('git', ['clone', '--no-local', '--no-checkout', '--quiet', root, worktree], directory, 120_000);
         if (!clone.ok) throw new Error(`Cannot clone committed source: ${clone.stderr}`);
         created = true;
@@ -150,7 +151,7 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     if (!checkedBranch.ok || checkedBranch.stdout.trim() !== branch) throw new Error('Review worktree branch mismatch');
     if (requiredScript) {
       const manifest = JSON.parse(await readFile(join(worktree, requiredScript.manifest), 'utf8'));
-      if (manifest?.scripts?.test !== requiredScript.script) throw new Error('review_check_script_changed');
+      if (manifest?.scripts?.[requiredScript.scriptName] !== requiredScript.script) throw new Error('review_check_script_changed');
     }
     const base = await command('git', ['rev-parse', `${branch}^`], worktree);
     const finished = base.ok && base.stdout.trim() === revision.stdout.trim();
@@ -176,7 +177,7 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
       const apply = await command('git', ['apply', patchPath], worktree);
       if (!apply.ok) throw new Error(`Patch failed: ${apply.stderr}`);
     }
-    // Intent-to-add makes new files visible to both path validation and diff.
+
     const intent = await command('git', ['add', '-N', '--', '.'], worktree);
     if (!intent.ok) throw new Error('Cannot inspect patch paths');
     const changed = await command('git', ['diff', '--name-only', '-z', '--no-ext-diff', '--'], worktree);

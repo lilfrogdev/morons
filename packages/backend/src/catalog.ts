@@ -41,7 +41,7 @@ function string(
   return value;
 }
 
-/** Metadata only. Execution remains on the legacy root until isolated Pi sessions exist. */
+
 export class Catalog {
   constructor(private readonly sql: Sql) {
     sql.exec(`CREATE TABLE IF NOT EXISTS named_morons (

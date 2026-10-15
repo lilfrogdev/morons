@@ -29,7 +29,7 @@ export const worker = {
       !response.body
     )
       return response;
-    // Bind the outer HTTP disconnect to cancellation of the DO response stream.
+
     const body = response.body.pipeThrough(new TransformStream(), {
       signal: request.signal,
     });

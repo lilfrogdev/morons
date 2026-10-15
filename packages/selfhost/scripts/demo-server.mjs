@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openAccountServer } from '../src/account-server.mjs';
 
-// Disposable, fully offline native UI demonstration. No provider login or inference.
+
 const dir = await mkdtemp(join(tmpdir(), 'morons-ui-demo-'));
 const repository = join(dir, 'source');
 await mkdir(repository);

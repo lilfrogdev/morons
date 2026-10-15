@@ -31,7 +31,7 @@ export async function openAccounts(path) {
     async login(name, password) {
       if (!validName(name) || typeof password !== 'string' || Buffer.byteLength(password) > 256) return null;
       const row = findName.get(name);
-      // Keep the costly check even for an unknown account to reduce enumeration.
+
       const salt = row?.salt ?? Buffer.alloc(16);
       const expected = row?.password_hash ?? Buffer.alloc(64);
       const actual = await scrypt(password, salt, 64);

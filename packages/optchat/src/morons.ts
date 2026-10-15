@@ -1,10 +1,10 @@
 import type { RepoMemoryAccess, RepoMemorySource } from "./repo-memory.ts";
 
-/**
- * OptChat's `repository` column is an opaque namespace in Morons. It contains
- * the named moron ID for repository, fitness, finance, and other morons alike.
- * Session visibility is supplied by the current account ACL, never by memory.
- */
+
+
+
+
+
 export function moronMemoryAccess(input: {
   accountId: string;
   moronId: string;

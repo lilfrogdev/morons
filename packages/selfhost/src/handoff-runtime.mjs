@@ -20,9 +20,9 @@ export function userGrantsHandoff(userText, targetMoronId) {
   return grants.exec(userText.trim())?.[1].toLowerCase() === targetMoronId;
 }
 
-// This is intentionally a separate ledger from the user-initiated @mention
-// table. One model tool call is permitted for each source user entry. The
-// owner lock held by the server prevents a second process from writing it.
+
+
+
 export function openHandoffStore(path) {
   const db = new DatabaseSync(path, { timeout: 5000 });
   db.exec(`PRAGMA journal_mode=WAL;
@@ -70,15 +70,15 @@ export function openHandoffStore(path) {
   };
 }
 
-/**
- * Install only on normal named-Moron conversations. ensureTargetSession MUST
- * create/reuse the deterministic id with target rules but without this tool,
- * repository tools, or another Moron's history. askTarget MUST use its supplied
- * deterministic requestId with Pi Durable submission and return only text.
- * getUserGrant MUST return the original user-visible text, not Pi's submitted
- * text with OptChat memory appended. authorizeTarget MUST check account
- * ownership and explicit target policy.
- */
+
+
+
+
+
+
+
+
+
 export function createHandoffExtension({ store, catalog, getSourceUserEntryId, getUserGrant, authorizeTarget, ensureTargetSession, askTarget }) {
   if (!store || !catalog || !getSourceUserEntryId || !getUserGrant || !authorizeTarget || !ensureTargetSession || !askTarget)
     throw new Error('handoff_dependencies_required');
@@ -98,8 +98,8 @@ export function createHandoffExtension({ store, catalog, getSourceUserEntryId, g
       const sourceUserEntryId = String(await getSourceUserEntryId({ source, callId: api.callId }));
       const userText = await getUserGrant({ source, sourceUserEntryId });
       if (!userGrantsHandoff(userText, targetMoronId)) throw new Error('handoff_not_user_granted');
-      // A replay of the same call uses the original target and question; a
-      // different call in this user turn is rejected before contacting anyone.
+
+
       const existing = store.getTurn(source.id, sourceUserEntryId);
       if (existing && (existing.source_call_id !== api.callId ||
           existing.target_moron_id !== targetMoronId || existing.question !== question))

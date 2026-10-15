@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rmdir, stat, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 
-/** A stale process lock may be reclaimed only when its recorded PID is gone. */
+
 export async function acquireOwnerLock(path, errorMessage) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -14,7 +14,7 @@ export async function acquireOwnerLock(path, errorMessage) {
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
       if (attempt) throw new Error(errorMessage);
-      // Serialize reclaimers so one cannot unlink a newer owner's lock.
+
       const reclaimPath = `${path}.reclaim`;
       try { await mkdir(reclaimPath, { mode: 0o700 }); }
       catch { throw new Error(errorMessage); }

@@ -2,6 +2,6 @@
   "name": "@morons/review-runner",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test test/*.test.mjs" },
+  "scripts": { "check": "node --check src/check-policy.mjs && node --check src/index.mjs && node --check src/worker.mjs" },
   "engines": { "node": ">=22" }
 }

@@ -1,8 +1,8 @@
 import { inspectSource, readSourceAtHead, prepareReview } from './index.mjs';
 import { trustedCheckPlan } from './check-policy.mjs';
 
-// One request per short-lived process. The host supplies this plan, never the model.
-// The worker has no provider credentials and accepts only two fixed operations.
+
+
 let input = '';
 for await (const chunk of process.stdin) {
   input += chunk;
@@ -24,7 +24,7 @@ try {
     if (plan.checkProfile !== undefined) {
       const policy = trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
       checks = policy.checks;
-      requiredScript = { manifest: policy.manifest, script: policy.script };
+      requiredScript = { manifest: policy.manifest, scriptName: policy.scriptName, script: policy.script };
     }
     result = await prepareReview({
       repository: plan.repository,

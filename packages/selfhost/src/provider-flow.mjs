@@ -1,4 +1,4 @@
-/** Human-operated bridge to Pi's OAuth interaction. Never returns credentials. */
+
 export function createProviderFlow(auth) {
   let current = { state: 'disconnected' };
   let pendingPrompt = null;

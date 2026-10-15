@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { openEncryptedCredentialStore } from '@morons/credential-store';
 import { createPiProviderAuth } from '@morons/provider-auth/src/pi-models.mjs';
 
-/** Real Pi provider remains opt-in. The caller supplies a 32-byte unlock key outside argv/logs. */
+
 export async function openProviderRuntime({ directory, accountId, masterKey }) {
   if (!Buffer.isBuffer(masterKey) || masterKey.length !== 32) throw new Error('provider_unlock_key_required');
   const derived = Buffer.from(hkdfSync('sha256', masterKey, Buffer.from(accountId), Buffer.from('morons-provider-v1'), 32));

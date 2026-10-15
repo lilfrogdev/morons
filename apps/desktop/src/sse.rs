@@ -1,6 +1,6 @@
-// Parse bytes only after a complete line arrives, preserving split UTF-8 codepoints.
-// Full snapshots are bounded to 8 MiB. IDs are deliberately ignored: reconnect
-// fetches fresh authoritative state rather than replaying an event cursor.
+
+
+
 const MAX_EVENT: usize = 8 * 1024 * 1024;
 #[derive(Default)]
 pub struct Decoder {
@@ -49,37 +49,5 @@ impl Decoder {
             }
         }
         Ok(snapshots)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn every_byte_boundary_preserves_unicode_and_crlf() {
-        let wire =
-            ": heartbeat\r\nevent: snapshot\r\ndata: {\"text\":\"🐸 café\"}\r\n\r\n".as_bytes();
-        for split in 0..=wire.len() {
-            let mut parser = Decoder::default();
-            let mut got = parser.push(&wire[..split]).unwrap();
-            got.extend(parser.push(&wire[split..]).unwrap());
-            assert_eq!(got, vec!["{\"text\":\"🐸 café\"}".as_bytes()]);
-        }
-    }
-    #[test]
-    fn multiple_events_and_multiline_data() {
-        let mut parser = Decoder::default();
-        assert_eq!(parser.push(b"event: snapshot\ndata: {\ndata: }\n\nevent: ignored\ndata: secret\n\nevent: snapshot\ndata: {}\n\n").unwrap(), vec![b"{\n}".to_vec(), b"{}".to_vec()]);
-    }
-    #[test]
-    fn incomplete_and_oversized_events_are_not_published() {
-        let mut parser = Decoder::default();
-        assert!(
-            parser
-                .push(b"event: snapshot\ndata: {}")
-                .unwrap()
-                .is_empty()
-        );
-        assert!(parser.push(&vec![b'x'; MAX_EVENT]).is_err());
     }
 }

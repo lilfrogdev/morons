@@ -46,7 +46,7 @@ struct Chat {
     provider_callback: Entity<input::TextInput>,
     worker: Worker,
     state: State,
-    // Keep the foreground listener alive for exactly the view lifetime.
+
     _updates: Task<()>,
     local_error: Option<&'static str>,
     last_ack: Option<String>,
