@@ -59,13 +59,21 @@ stops at server shutdown. Each proposal uses a separate persistent container,
 home, and review directory; it stops after the operation and reconnects for
 recovery. This adopts Rakazo's computer lifecycle boundary for repository
 operations; browser, desktop, and file-transfer actions are not implemented.
+Docker mounts private app-owned runtime copies under `/tmp`; completed
+operations checkpoint review and home data to the account directory. A fresh
+runtime restores those directories from that copy. Source and worker files
+are staged from the checkout into verified, read-only snapshots before
+mounting, so Docker Desktop does not need access to the Documents checkout or
+the account directory.
 On this Mac I started Docker Desktop and installed the official
 `node:22.23.3-bookworm` arm64 digest
 `sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729`.
 The boundary and two-proposal lifecycle smoke passed with disposable source
-and worker copies under `/tmp`. A bounded Docker mount of this checkout's
-worker path under Documents timed out after 20 seconds; direct checkout access
-still needs file-sharing diagnosis. Two trusted,
+and worker copies under `/tmp`. A live offline account-server smoke from this
+checkout passed login, committed source read, isolated review checks, and
+account-directory checkpointing under `~/.local/share`. Direct Docker binds of
+both the Documents checkout and account directory timed out after 20 seconds;
+the private runtime stages avoid those mounts. Two trusted,
 dependency-free check profiles now run the candidate's `review-runner` or
 `optchat` syntax check as well as `git diff --check`; model edits are confined
 to the selected package's source paths. The self-host backend and GPUI need
