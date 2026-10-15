@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { prepareReview } from '../src/index.mjs';
+import { prepareReview, readSourceAtHead } from '../src/index.mjs';
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -24,6 +24,13 @@ test('proposal changes only isolated branch and returns check evidence', async (
     const base = git(repository, 'rev-parse', 'HEAD');
     // Existing uncommitted work must remain untouched and outside the review.
     await writeFile(join(repository, 'notes.txt'), 'private local notes\n');
+    await writeFile(join(repository, 'README.md'), 'uncommitted local edit\n');
+    assert.deepEqual(await readSourceAtHead(repository, 'README.md', ['README.md']), {
+      path: 'README.md', text: 'before\n',
+    });
+    await assert.rejects(readSourceAtHead(repository, 'notes.txt', ['notes.txt']), /Committed file required/);
+    await assert.rejects(readSourceAtHead(repository, '../notes.txt', ['../notes.txt']), /Invalid source path/);
+    await assert.rejects(readSourceAtHead(repository, 'README.md', []), /Source path not approved/);
     review = await prepareReview({
       repository,
       branch: 'morons-review/fixture-1',
@@ -34,7 +41,7 @@ test('proposal changes only isolated branch and returns check evidence', async (
     assert.equal(review.sourceDirty, true);
     assert.match(review.diff, /\+after/);
     assert.equal(review.checks[0].ok, true);
-    assert.equal(await readFile(join(repository, 'README.md'), 'utf8'), 'before\n');
+    assert.equal(await readFile(join(repository, 'README.md'), 'utf8'), 'uncommitted local edit\n');
     assert.equal(await readFile(join(repository, 'notes.txt'), 'utf8'), 'private local notes\n');
     assert.equal(await readFile(join(review.worktree, 'README.md'), 'utf8'), 'after\n');
     assert.equal(git(repository, 'rev-parse', 'HEAD'), base);

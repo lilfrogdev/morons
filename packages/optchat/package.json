@@ -1,0 +1,16 @@
+{
+  "name": "@morons/optchat",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/repo-memory.ts",
+    "./morons": "./src/morons.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

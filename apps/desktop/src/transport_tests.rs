@@ -102,7 +102,40 @@ fn serve(
         .iter()
         .filter(|(r, _)| r == "/v1/root/tasks")
         .count();
+    let named_submit = records
+        .iter()
+        .rev()
+        .find(|(r, _)| r == "/v1/sessions/main/chat")
+        .map(|(_, body)| body.clone());
     drop(records);
+    if route.starts_with("/v1/") && !route.starts_with("/v1/root/") {
+        let reply = match route.as_str() {
+            "/v1/models" => {
+                serde_json::json!({"models":[{"provider":"morons-fixture","id":"fixture","label":"Offline fixture","available":true}]})
+            }
+            "/v1/morons" => serde_json::json!({"morons":[{"id":"repo","name":"Repository"}]}),
+            "/v1/morons/repo/sessions" => serde_json::json!({"sessions":[{"id":"main"}]}),
+            "/v1/sessions/main/history" => {
+                let messages = named_submit.as_ref().map(|body| vec![
+                    serde_json::json!({"id":"user-1","role":"user","text":body["text"]}),
+                    serde_json::json!({"id":"assistant-1","role":"assistant","text":"Fixture answer"}),
+                ]).unwrap_or_default();
+                serde_json::json!({"sessionId":"main","moronId":"repo","messages":messages})
+            }
+            "/v1/sessions/main/chat" => {
+                serde_json::json!({"requestId":body["requestId"],"answer":"Fixture answer"})
+            }
+            _ => serde_json::json!({"error":"not_found"}),
+        };
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        );
+        let _ = stream.write_all(&bytes);
+        return;
+    }
     if route == "/v1/root/tasks" {
         // First request loses its response without acceptance. Retry must reuse ID.
         if submits == 1 {
@@ -214,4 +247,59 @@ fn uncertain_retry_reuses_identity_and_quit_never_stops_task() {
     assert_eq!(submits[0], submits[1]);
     assert!(requests.iter().all(|(route, _)| !route.ends_with("/stop")));
     assert!(requests.iter().all(|(route, _)| !route.contains("cursor")));
+}
+
+#[test]
+fn named_session_chat_reconnects_with_server_history() {
+    let fixture = Fixture::start();
+    let (worker, updates) = Worker::start(Config::Named {
+        url: fixture.url.clone(),
+        bearer: "fixture-only".into(),
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        async fn until(
+            updates: &async_channel::Receiver<State>,
+            predicate: impl Fn(&State) -> bool,
+        ) -> State {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let state = updates.recv().await.unwrap();
+                    if predicate(&state) {
+                        return state;
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+        let initial = until(&updates, |s| s.status == "Connected").await;
+        assert_eq!(initial.model.as_deref(), Some("Offline fixture"));
+        assert_eq!(initial.selected_moron.as_deref(), Some("repo"));
+        worker
+            .send(Command::Submit("Inspect this repo".into()))
+            .unwrap();
+        until(&updates, |s| s.accepted.is_some()).await;
+        let resumed = until(&updates, |s| s.snapshot.messages.len() == 2).await;
+        assert_eq!(resumed.snapshot.messages[0].text, "Inspect this repo");
+        assert_eq!(resumed.snapshot.messages[1].text, "Fixture answer");
+    });
+    drop(worker);
+    drop(updates);
+    let requests = fixture.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|(route, _)| route == "/v1/morons/repo/sessions")
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(route, _)| route == "/v1/sessions/main/chat")
+            .count(),
+        1
+    );
 }

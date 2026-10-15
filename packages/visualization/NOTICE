@@ -1,0 +1,11 @@
+Morons visualization contract adapts the structured-document vocabulary and bounded,
+revocable authority model from Pitcrew's visualization implementation.
+
+Pitcrew source: https://github.com/lilfrogdev/pitcrew
+Reference commit: 2ccd63ed84f7e74ee842001b569393c651bb4f43
+Follow-up source inspected: ed4f9554f46b793a166d95a5898c141ccf8afb4f
+License: Apache License 2.0 (see repository LICENSE).
+
+The GPUI renderer is a Morons native implementation and does not embed the Pitcrew
+React renderer, iframe, or generated scripts. Pitcrew's source says T3 code was
+studied, not copied.

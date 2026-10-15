@@ -45,6 +45,29 @@ function validBranch(value) {
   return /^morons-review\/[a-z0-9][a-z0-9-]{0,63}$/.test(value);
 }
 
+function validSourcePath(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 &&
+    !value.startsWith('/') && !value.includes('\\') && !value.includes(':') &&
+    value.split('/').every((part) => part && part !== '.' && part !== '..' && part !== '.git');
+}
+
+/** Read one operator-allowlisted committed file; never offer unrestricted Git reads to a model. */
+export async function readSourceAtHead(repository, relativePath, allowedPaths) {
+  if (!validSourcePath(relativePath)) throw new Error('Invalid source path');
+  if (!Array.isArray(allowedPaths) || !allowedPaths.includes(relativePath))
+    throw new Error('Source path not approved');
+  const root = await realpath(resolve(repository));
+  const inside = await command('git', ['rev-parse', '--show-toplevel'], root);
+  if (!inside.ok || inside.stdout.trim() !== root) throw new Error('Repository root required');
+  const kind = await command('git', ['cat-file', '-t', `HEAD:${relativePath}`], root);
+  if (!kind.ok || kind.stdout.trim() !== 'blob') throw new Error('Committed file required');
+  const bytes = await command('git', ['cat-file', '-s', `HEAD:${relativePath}`], root);
+  if (!bytes.ok || Number(bytes.stdout.trim()) > MAX_OUTPUT_BYTES) throw new Error('Source file too large');
+  const source = await command('git', ['show', `HEAD:${relativePath}`], root);
+  if (!source.ok || source.stdout.includes('\0')) throw new Error('Text source required');
+  return { path: relativePath, text: source.stdout };
+}
+
 /**
  * Trusted-caller boundary. The model may supply a patch, but branch name,
  * repository, and check commands must come from an operator-approved plan.

@@ -16,7 +16,14 @@ export type TableDraft = {
   columns: string[];
   rows: string[][];
 };
-export type VisualizationDraft = ChartDraft | TableDraft;
+/** A native-renderable subset of Pitcrew's Apache-2.0 structured document dialect. */
+export type DocumentNode = { text: string } | {
+  tag: "section" | "p" | "span" | "h2" | "h3" | "strong" | "em" | "small" |
+    "code" | "pre" | "ul" | "ol" | "li" | "br" | "hr";
+  children?: DocumentNode[];
+};
+export type DocumentDraft = { kind: "document"; title: string; summary: string; nodes: DocumentNode[] };
+export type VisualizationDraft = ChartDraft | TableDraft | DocumentDraft;
 
 export type VisualizationDocument = {
   version: typeof VISUALIZATION_VERSION;
@@ -42,6 +49,8 @@ export type ReadAuthority = {
   activeSession: boolean;
   sourceMessageExists: boolean;
   documentRevoked: boolean;
+  /** Changes on logout, membership change, or session replacement. */
+  accessEpoch?: string;
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -62,6 +71,27 @@ function text(value: unknown, max: number): value is string {
 
 function fail(): never {
   throw new Error("Invalid visualization document");
+}
+
+const DOCUMENT_TAGS = new Set([
+  "section", "p", "span", "h2", "h3", "strong", "em", "small",
+  "code", "pre", "ul", "ol", "li", "br", "hr",
+]);
+function parseNode(value: unknown, depth: number, count: { value: number }): DocumentNode {
+  if (++count.value > 512 || depth > 12 || !record(value)) fail();
+  if ("text" in value) {
+    if (!keys(value, ["text"]) || typeof value.text !== "string" ||
+      value.text.length > 4096 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value.text)) fail();
+    return { text: value.text };
+  }
+  if (!keys(value, ["tag", "children"]) && !keys(value, ["tag"])) fail();
+  if (typeof value.tag !== "string" || !DOCUMENT_TAGS.has(value.tag)) fail();
+  if (value.children !== undefined && !Array.isArray(value.children)) fail();
+  if ((value.tag === "br" || value.tag === "hr") && value.children !== undefined) fail();
+  return { tag: value.tag as Exclude<DocumentNode, { text: string }>["tag"],
+    ...(value.children === undefined ? {} : {
+      children: (value.children as unknown[]).map((child) => parseNode(child, depth + 1, count)),
+    }) };
 }
 
 /** Rejects executable formats, unknown fields, nonfinite numbers, and excessive payloads. */
@@ -95,6 +125,14 @@ export function parseDraft(value: unknown): VisualizationDraft {
     });
     return { kind: "table", title: value.title, columns: [...columns], rows };
   }
+  if (value.kind === "document") {
+    if (!keys(value, ["kind", "title", "summary", "nodes"]) ||
+      !text(value.title, 120) || !text(value.summary, 2000) ||
+      !Array.isArray(value.nodes) || value.nodes.length < 1) fail();
+    const count = { value: 0 };
+    return { kind: "document", title: value.title, summary: value.summary,
+      nodes: value.nodes.map((node: unknown) => parseNode(node, 1, count)) };
+  }
   return fail();
 }
 
@@ -119,4 +157,58 @@ export function canReadDocument(doc: VisualizationDocument, auth: ReadAuthority)
     doc.threadId === auth.threadId &&
     doc.sourceMessageId === auth.sourceMessageId &&
     doc.sourceRevision === auth.currentSourceRevision;
+}
+
+/** Short-lived server authority; generated content never grants its own visibility. */
+export type VisualizationEnvelope = {
+  accountId: string;
+  threadId: string;
+  accessEpoch: string;
+  leaseMs: number;
+  documents: VisualizationDocument[];
+};
+
+export function parseEnvelope(value: unknown): VisualizationEnvelope {
+  if (!record(value) || !keys(value, ["accountId", "threadId", "accessEpoch", "leaseMs", "documents"]) ||
+    !text(value.accountId, 128) || !text(value.threadId, 128) ||
+    !text(value.accessEpoch, 128) || !Number.isInteger(value.leaseMs) ||
+    (value.leaseMs as number) < 1 || (value.leaseMs as number) > 5000 ||
+    !Array.isArray(value.documents) || value.documents.length > 10 ||
+    encoder.encode(JSON.stringify(value)).byteLength > 524288) fail();
+  const documents = (value.documents as unknown[]).map((input) => {
+    if (!record(input) || !keys(input, ["version", "id", "accountId", "threadId", "sourceMessageId", "sourceRevision", "createdAt", "content"]) ||
+      input.version !== VISUALIZATION_VERSION) fail();
+    const origin = { id: input.id, accountId: input.accountId, threadId: input.threadId,
+      sourceMessageId: input.sourceMessageId, sourceRevision: input.sourceRevision,
+      createdAt: input.createdAt } as TrustedOrigin;
+    const document = sealDocument(input.content, origin);
+    if (document.accountId !== value.accountId || document.threadId !== value.threadId) fail();
+    return document;
+  });
+  if (new Set(documents.map((document) => document.id)).size !== documents.length) fail();
+  return { accountId: value.accountId, threadId: value.threadId,
+    accessEpoch: value.accessEpoch, leaseMs: value.leaseMs as number, documents };
+}
+
+/** Ephemeral display cache: caller clears it on logout, context change, and failed refresh. */
+export class VisualizationLease {
+  private current?: { envelope: VisualizationEnvelope; expiresAt: number };
+  clear(): void { this.current = undefined; }
+  accept(value: unknown, accountId: string, threadId: string, now: number): void {
+    this.clear();
+    const envelope = parseEnvelope(value);
+    if (envelope.accountId !== accountId || envelope.threadId !== threadId ||
+      !Number.isFinite(now)) fail();
+    this.current = { envelope, expiresAt: now + envelope.leaseMs };
+  }
+  get(accountId: string, threadId: string, accessEpoch: string, now: number): VisualizationDocument[] {
+    const state = this.current;
+    if (!state || state.envelope.accountId !== accountId || state.envelope.threadId !== threadId ||
+      state.envelope.accessEpoch !== accessEpoch || !Number.isFinite(now) ||
+      now >= state.expiresAt) {
+      this.clear();
+      return [];
+    }
+    return state.envelope.documents;
+  }
 }

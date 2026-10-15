@@ -7,6 +7,11 @@ and returns the diff and check output. It never commits, pushes, merges, or
 edits the source checkout. Existing uncommitted source work stays in place and
 is explicitly reported as `sourceDirty`.
 
+`readSourceAtHead` reads one bounded committed text file from a trusted caller's
+exact `allowedPaths` list. It rejects traversal and untracked files and does
+not expose uncommitted edits. Construct the allowlist after reviewing the
+repository; tracked files can contain credentials or other private material.
+
 The repository path, branch name, and check command list must come from a
 human-approved plan, not from model text. The model may propose only the patch.
 The caller owns review-branch cleanup after the human has inspected it. A

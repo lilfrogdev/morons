@@ -1,5 +1,6 @@
 use crate::{
     model::{Message, Role, Snapshot, Status, Task, TaskStatus},
+    named::NamedHistory,
     sse::Decoder,
 };
 use futures_util::StreamExt;
@@ -13,6 +14,8 @@ pub struct State {
     pub status: &'static str,
     // Display only. The backend owns model selection and provider credentials.
     pub model: Option<String>,
+    pub named_morons: Vec<(String, String)>,
+    pub selected_moron: Option<String>,
     pub error: Option<&'static str>,
     pub ready: bool,
     pub pending: bool,
@@ -25,6 +28,8 @@ impl Default for State {
             snapshot: Snapshot::empty(),
             status: "Connecting…",
             model: None,
+            named_morons: vec![],
+            selected_moron: None,
             error: None,
             ready: false,
             pending: false,
@@ -39,6 +44,7 @@ pub enum Command {
     Stop(String),
     Reconnect,
     Retry,
+    SelectMoron(String),
 }
 
 // The only token accepted here is the backend application bearer, never a provider key.
@@ -46,6 +52,7 @@ pub enum Command {
 pub enum Config {
     Mock,
     Http { url: Url, bearer: Option<String> },
+    Named { url: Url, bearer: String },
 }
 impl Config {
     pub fn from_env() -> Result<Self, &'static str> {
@@ -71,6 +78,12 @@ impl Config {
         if bearer.is_none() {
             return Err("Backend application bearer is required");
         }
+        if std::env::var("MORONS_BACKEND_MODE").ok().as_deref() == Some("named") {
+            return Ok(Self::Named {
+                url,
+                bearer: bearer.expect("checked above"),
+            });
+        }
         Ok(Self::Http { url, bearer })
     }
 }
@@ -95,6 +108,9 @@ impl Worker {
                 match config {
                     Config::Mock => mock(receiver, publisher).await,
                     Config::Http { url, bearer } => http(url, bearer, receiver, publisher).await,
+                    Config::Named { url, bearer } => {
+                        named_http(url, bearer, receiver, publisher).await
+                    }
                 }
             });
         });
@@ -397,6 +413,7 @@ async fn handle(
             }
         }
         Command::Reconnect => Ok(()),
+        Command::SelectMoron(_) => Err("Named morons require the self-hosted backend"),
     };
     state.request_error = result.err();
     // Only uncertain failures retain the idempotency key. Definite rejection
@@ -416,6 +433,246 @@ async fn submit_pending(api: &Api, pending: Option<&(String, String)>) -> Result
             .await
     } else {
         Ok(())
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NamedMoron {
+    id: String,
+    name: String,
+}
+#[derive(serde::Deserialize)]
+struct NamedMorons {
+    morons: Vec<NamedMoron>,
+}
+#[derive(serde::Deserialize)]
+struct NamedSession {
+    id: String,
+}
+#[derive(serde::Deserialize)]
+struct NamedSessions {
+    sessions: Vec<NamedSession>,
+}
+fn valid_named_id(value: &str) -> bool {
+    (2..=40).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+#[derive(serde::Deserialize)]
+struct NamedModel {
+    provider: String,
+    id: String,
+    label: String,
+    available: bool,
+}
+#[derive(serde::Deserialize)]
+struct NamedModels {
+    models: Vec<NamedModel>,
+}
+
+struct NamedApi {
+    client: Client,
+    url: Url,
+    bearer: String,
+}
+impl NamedApi {
+    fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, self.url.join(route).expect("validated named route"))
+            .bearer_auth(&self.bearer)
+            .timeout(Duration::from_secs(120))
+    }
+    async fn get<T: serde::de::DeserializeOwned>(&self, route: &str) -> Result<T, &'static str> {
+        let response = self
+            .request(reqwest::Method::GET, route)
+            .send()
+            .await
+            .map_err(|_| "Cannot reach named backend")?;
+        if !response.status().is_success() {
+            return Err("Named backend rejected request");
+        }
+        serde_json::from_slice(&bounded_body(response).await?)
+            .map_err(|_| "Invalid named backend response")
+    }
+    async fn post(&self, route: &str, body: serde_json::Value) -> Result<(), &'static str> {
+        let response = self
+            .request(reqwest::Method::POST, route)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| "Request outcome uncertain; retry same request")?;
+        if response.status().is_success() {
+            Ok(())
+        } else if response.status().as_u16() == 409 {
+            Err("Named request conflicts with existing state")
+        } else {
+            Err("Named backend rejected request")
+        }
+    }
+    async fn selected_session(&self, moron_id: &str) -> Result<String, &'static str> {
+        if !valid_named_id(moron_id) {
+            return Err("Invalid named moron");
+        }
+        let morons: NamedMorons = self.get("v1/morons").await?;
+        if morons.morons.len() > 32 {
+            return Err("Named moron catalog exceeds client limit");
+        }
+        if !morons.morons.iter().any(|m| m.id == moron_id) {
+            return Err("Named moron not found");
+        }
+        let route = format!("v1/morons/{moron_id}/sessions");
+        let sessions: NamedSessions = self.get(&route).await?;
+        if sessions.sessions.len() > 200 {
+            return Err("Named sessions exceed client limit");
+        }
+        if let Some(first) = sessions.sessions.first() {
+            if !valid_named_id(&first.id) {
+                return Err("Invalid named session");
+            }
+            return Ok(first.id.clone());
+        }
+        // Moron IDs are globally unique and already fit the session ID limit.
+        // Reusing the full ID avoids truncated-ID collisions across devices.
+        let first_id = moron_id.to_owned();
+        let _ = self.post(&route, serde_json::json!({"id":first_id})).await;
+        let sessions: NamedSessions = self.get(&route).await?;
+        sessions
+            .sessions
+            .first()
+            .filter(|s| valid_named_id(&s.id))
+            .map(|s| s.id.clone())
+            .ok_or("Cannot select named session")
+    }
+}
+
+async fn named_http(
+    url: Url,
+    bearer: String,
+    mut commands: mpsc::Receiver<Command>,
+    publisher: Publisher,
+) {
+    let client = match Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return,
+    };
+    let api = NamedApi {
+        client,
+        url,
+        bearer,
+    };
+    let mut state = State::default();
+    let mut pending: Option<(String, String)> = None;
+    let mut selected = "repo".to_owned();
+    loop {
+        let refreshed = async {
+            let models: NamedModels = api.get("v1/models").await?;
+            if models.models.len() > 128 {
+                return Err("Model catalog exceeds client limit");
+            }
+            let model = models
+                .models
+                .iter()
+                .find(|m| m.available)
+                .ok_or("No model available")?;
+            if model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128 {
+                return Err("Invalid model catalog");
+            }
+            let mut catalog: NamedMorons = api.get("v1/morons").await?;
+            if catalog.morons.is_empty() {
+                let _ = api.post("v1/morons", serde_json::json!({
+                    "id":"repo", "name":"Repository",
+                    "rules":"Read repository source, explain evidence, and propose isolated review changes. Never merge or update the running application automatically.",
+                    "preferences":"Use concise answers and cite source paths."
+                })).await;
+                catalog = api.get("v1/morons").await?;
+            }
+            if catalog.morons.len() > 32 || catalog.morons.iter().any(|m| !valid_named_id(&m.id) || m.name.len() > 80) {
+                return Err("Invalid named moron catalog");
+            }
+            if !catalog.morons.iter().any(|m| m.id == selected) {
+                selected = catalog.morons.first().ok_or("No named moron available")?.id.clone();
+            }
+            let session = api.selected_session(&selected).await?;
+            let history: NamedHistory = api.get(&format!("v1/sessions/{session}/history")).await?;
+            if history.session_id != session || history.moron_id != selected {
+                return Err("Named session identity mismatch");
+            }
+            Ok::<_, &'static str>((model.label.clone(), history.into_snapshot()?, session, catalog))
+        }
+        .await;
+        let session = match refreshed {
+            Ok((model, snapshot, session, catalog)) => {
+                state.model = Some(model);
+                state.snapshot = snapshot;
+                state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
+                state.selected_moron = Some(selected.clone());
+                state.status = "Connected";
+                state.ready = true;
+                state.error = None;
+                state.pending = pending.is_some();
+                publisher.publish(&state);
+                session
+            }
+            Err(error) => {
+                state.ready = false;
+                state.status = "Disconnected";
+                state.error = Some(error);
+                publisher.publish(&state);
+                tokio::select! {
+                    command = commands.recv() => { if command.is_none() { return; } },
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                }
+                continue;
+            }
+        };
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { return; };
+                let should_submit = matches!(command, Command::Submit(_) | Command::Retry);
+                match command {
+                    Command::Submit(text) => {
+                        if text.trim().is_empty() || text.len() > 8192 {
+                            state.request_error = Some("Message must contain 1–8192 UTF-8 bytes");
+                        } else if pending.is_none() {
+                            pending = Some((uuid::Uuid::new_v4().to_string(), text));
+                        }
+                    }
+                    Command::Retry | Command::Reconnect => {},
+                    Command::SelectMoron(id) => {
+                        if pending.is_none() && state.named_morons.iter().any(|(known, _)| known == &id) {
+                            selected = id;
+                            state.request_error = None;
+                        }
+                    }
+                    Command::Stop(_) => { state.request_error = Some("Named task stop is not available yet"); }
+                }
+                if should_submit {
+                  if let Some((id, text)) = &pending {
+                    state.status = "Sending…";
+                    state.pending = true;
+                    publisher.publish(&state);
+                    let result = api.post(&format!("v1/sessions/{session}/chat"),
+                        serde_json::json!({"requestId":id,"text":text})).await;
+                    state.request_error = result.err();
+                    if state.request_error.is_none() {
+                        state.accepted = pending.take();
+                        state.pending = false;
+                    } else if !state.request_error.is_some_and(|e| e.starts_with("Request outcome uncertain")) {
+                        pending = None;
+                        state.pending = false;
+                    }
+                    publisher.publish(&state);
+                  }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
     }
 }
 
@@ -465,6 +722,13 @@ async fn mock(mut commands: mpsc::Receiver<Command>, publisher: Publisher) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn named_session_path_accepts_only_bounded_ids() {
+        assert!(valid_named_id("main"));
+        assert!(!valid_named_id("../other"));
+        assert!(!valid_named_id("a/b"));
+        assert!(!valid_named_id("a%2fb"));
+    }
     #[test]
     fn known_rejections_are_actionable_without_echoing_server_text() {
         for (status, code, expected) in [

@@ -1,9 +1,10 @@
 //! Native, data-only representation of a server-authorized visualization.
 //! A view may draw these values with GPUI primitives; it must never load markup or scripts.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VisualizationDocument {
     pub version: u8,
@@ -16,7 +17,7 @@ pub struct VisualizationDocument {
     pub content: VisualizationContent,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum VisualizationContent {
     Bar {
@@ -40,9 +41,83 @@ pub enum VisualizationContent {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+    Document {
+        title: String,
+        summary: String,
+        nodes: Vec<DocumentNode>,
+    },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum DocumentNode {
+    Text(DocumentText),
+    Element(DocumentElement),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentText {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentElement {
+    pub tag: String,
+    #[serde(default)]
+    pub children: Option<Vec<DocumentNode>>,
+}
+
+fn valid_nodes(nodes: &[DocumentNode], depth: usize, count: &mut usize) -> bool {
+    if depth > 12 {
+        return false;
+    }
+    for node in nodes {
+        *count += 1;
+        if *count > 512 {
+            return false;
+        }
+        match node {
+            DocumentNode::Text(value) => {
+                if value.text.len() > 4096
+                    || value.text.chars().any(|c| {
+                        c == '\0' || (c.is_control() && c != '\n' && c != '\t' && c != '\r')
+                    })
+                {
+                    return false;
+                }
+            }
+            DocumentNode::Element(element) => {
+                if !matches!(
+                    element.tag.as_str(),
+                    "section"
+                        | "p"
+                        | "span"
+                        | "h2"
+                        | "h3"
+                        | "strong"
+                        | "em"
+                        | "small"
+                        | "code"
+                        | "pre"
+                        | "ul"
+                        | "ol"
+                        | "li"
+                        | "br"
+                        | "hr"
+                ) || (matches!(element.tag.as_str(), "br" | "hr") && element.children.is_some())
+                    || !valid_nodes(element.children.as_deref().unwrap_or(&[]), depth + 1, count)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Point {
     pub label: String,
@@ -113,9 +188,182 @@ impl VisualizationDocument {
                         row.len() == columns.len() && row.iter().all(|cell| label_ok(cell, 256))
                     })
             }
+            VisualizationContent::Document {
+                title,
+                summary,
+                nodes,
+            } => {
+                let mut count = 0;
+                label_ok(title, 120)
+                    && label_ok(summary, 2000)
+                    && !nodes.is_empty()
+                    && valid_nodes(nodes, 1, &mut count)
+            }
         };
         valid.then_some(doc)
     }
+}
+
+/// A short-lived local copy, never a substitute for server authorization.
+pub struct VisualizationLease {
+    account_id: String,
+    thread_id: String,
+    access_epoch: String,
+    expires_at: Instant,
+    documents: Vec<VisualizationDocument>,
+}
+
+impl VisualizationLease {
+    pub fn parse(bytes: &[u8], account_id: &str, thread_id: &str, now: Instant) -> Option<Self> {
+        if bytes.len() > 524_288 {
+            return None;
+        }
+        let envelope: VisualizationEnvelope = serde_json::from_slice(bytes).ok()?;
+        if envelope.account_id != account_id
+            || envelope.thread_id != thread_id
+            || !label_ok(&envelope.access_epoch, 128)
+            || !(1..=5000).contains(&envelope.lease_ms)
+            || envelope.documents.len() > 10
+            || envelope
+                .documents
+                .iter()
+                .map(|document| &document.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != envelope.documents.len()
+            || envelope.documents.iter().any(|document| {
+                document.account_id != account_id
+                    || document.thread_id != thread_id
+                    || VisualizationDocument::parse_for_thread(
+                        &serde_json::to_vec(document).unwrap_or_default(),
+                        account_id,
+                        thread_id,
+                    )
+                    .is_none()
+            })
+        {
+            return None;
+        }
+        Some(Self {
+            account_id: account_id.into(),
+            thread_id: thread_id.into(),
+            access_epoch: envelope.access_epoch,
+            expires_at: now + Duration::from_millis(envelope.lease_ms),
+            documents: envelope.documents,
+        })
+    }
+    pub fn documents(
+        &self,
+        account_id: &str,
+        thread_id: &str,
+        access_epoch: &str,
+        now: Instant,
+    ) -> Option<&[VisualizationDocument]> {
+        (self.account_id == account_id
+            && self.thread_id == thread_id
+            && self.access_epoch == access_epoch
+            && now < self.expires_at)
+            .then_some(&self.documents)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VisualizationEnvelope {
+    account_id: String,
+    thread_id: String,
+    access_epoch: String,
+    lease_ms: u64,
+    documents: Vec<VisualizationDocument>,
+}
+
+#[cfg(feature = "native")]
+fn document_text(nodes: &[DocumentNode], lines: &mut Vec<String>, current: &mut String) {
+    for node in nodes {
+        match node {
+            DocumentNode::Text(text) => current.push_str(&text.text),
+            DocumentNode::Element(element) => {
+                let block = matches!(
+                    element.tag.as_str(),
+                    "section" | "p" | "h2" | "h3" | "pre" | "li"
+                );
+                if block && !current.is_empty() {
+                    lines.push(std::mem::take(current));
+                }
+                if let Some(children) = &element.children {
+                    document_text(children, lines, current);
+                }
+                if block && !current.is_empty() {
+                    lines.push(std::mem::take(current));
+                }
+            }
+        }
+    }
+}
+
+/// Trusted GPUI primitives only. Call after the server-authorized lease is checked.
+#[cfg(feature = "native")]
+pub fn render_native(document: &VisualizationDocument) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    let mut body = div().flex().flex_col().gap_2();
+    match &document.content {
+        VisualizationContent::Bar { title, points, .. }
+        | VisualizationContent::Line { title, points, .. } => {
+            body = body.child(div().font_weight(FontWeight::BOLD).child(title.clone()));
+            let max = points.iter().map(|p| p.value.abs()).fold(0.0_f64, f64::max);
+            for point in points {
+                let fraction = if max == 0.0 {
+                    0.0
+                } else {
+                    (point.value.abs() / max).clamp(0.0, 1.0)
+                };
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(format!("{}: {}", point.label, point.value))
+                        .child(
+                            div()
+                                .h(px(6.))
+                                .w(px(300. * fraction as f32))
+                                .bg(rgb(0x557080)),
+                        ),
+                );
+            }
+        }
+        VisualizationContent::Table {
+            title,
+            columns,
+            rows,
+        } => {
+            body = body
+                .child(div().font_weight(FontWeight::BOLD).child(title.clone()))
+                .child(div().child(columns.join("  |  ")));
+            for row in rows {
+                body = body.child(div().child(row.join("  |  ")));
+            }
+        }
+        VisualizationContent::Document {
+            title,
+            summary,
+            nodes,
+        } => {
+            body = body
+                .child(div().font_weight(FontWeight::BOLD).child(title.clone()))
+                .child(div().child(summary.clone()));
+            let mut lines = Vec::new();
+            let mut current = String::new();
+            document_text(nodes, &mut lines, &mut current);
+            if !current.is_empty() {
+                lines.push(current);
+            }
+            for line in lines {
+                body = body.child(div().child(line));
+            }
+        }
+    }
+    body.p_3().rounded_sm().bg(rgb(0xffffff))
 }
 
 #[cfg(test)]
@@ -143,5 +391,35 @@ mod tests {
         let html = GOOD.replace("\"kind\":\"bar\"", "\"kind\":\"html\"");
         assert!(VisualizationDocument::parse_for_thread(html.as_bytes(), "a", "t").is_none());
         assert!(VisualizationDocument::parse_for_thread(&vec![b'x'; 32_769], "a", "t").is_none());
+    }
+
+    #[test]
+    fn structured_document_rejects_executable_nodes() {
+        let good = GOOD.replace(
+            r#"{"kind":"bar","title":"Checks","xLabel":"Run","yLabel":"Passed","points":[{"label":"one","value":3}]}"#,
+            r#"{"kind":"document","title":"Checks","summary":"Passed","nodes":[{"tag":"p","children":[{"text":"Good"}]}]}"#,
+        );
+        assert!(VisualizationDocument::parse_for_thread(good.as_bytes(), "a", "t").is_some());
+        let script = good.replace("\"tag\":\"p\"", "\"tag\":\"script\"");
+        assert!(VisualizationDocument::parse_for_thread(script.as_bytes(), "a", "t").is_none());
+        let event = good.replace("\"tag\":\"p\"", "\"tag\":\"p\",\"onclick\":\"run()\"");
+        assert!(VisualizationDocument::parse_for_thread(event.as_bytes(), "a", "t").is_none());
+    }
+
+    #[test]
+    fn short_lease_is_scoped_and_expires() {
+        let envelope = format!(
+            r#"{{"accountId":"a","threadId":"t","accessEpoch":"e1","leaseMs":5000,"documents":[{GOOD}]}}"#
+        );
+        let now = Instant::now();
+        let lease = VisualizationLease::parse(envelope.as_bytes(), "a", "t", now).unwrap();
+        assert_eq!(lease.documents("a", "t", "e1", now).unwrap().len(), 1);
+        assert!(lease.documents("a", "t", "e2", now).is_none());
+        assert!(
+            lease
+                .documents("a", "t", "e1", now + Duration::from_secs(5))
+                .is_none()
+        );
+        assert!(VisualizationLease::parse(envelope.as_bytes(), "other", "t", now).is_none());
     }
 }

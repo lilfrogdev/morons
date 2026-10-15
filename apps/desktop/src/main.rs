@@ -251,6 +251,42 @@ impl Render for Chat {
                         cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
                     )),
             )
+            .when(!self.state.named_morons.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("named-morons")
+                        .role(gpui::Role::List)
+                        .aria_label("Named Morons")
+                        .flex()
+                        .gap_2()
+                        .px_6()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgb(0xE0E6EC))
+                        .children(self.state.named_morons.iter().map(|(id, name)| {
+                            let chosen = id.clone();
+                            let selected = self.state.selected_moron.as_deref() == Some(id);
+                            div()
+                                .id(SharedString::from(format!("moron-{id}")))
+                                .role(gpui::Role::Button)
+                                .aria_label(SharedString::from(format!("Open {name}")))
+                                .px_3()
+                                .py_2()
+                                .rounded_sm()
+                                .bg(if selected {
+                                    rgb(0xD9E7EF)
+                                } else {
+                                    rgb(0xE8ECEF)
+                                })
+                                .cursor_pointer()
+                                .text_sm()
+                                .child(name.clone())
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.command(Command::SelectMoron(chosen.clone()), cx)
+                                }))
+                        })),
+                )
+            })
             .child(
                 div()
                     .id("history")
