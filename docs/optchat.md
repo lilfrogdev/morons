@@ -36,18 +36,19 @@ after 4,096 entries; the 32-scope access bound permits up to 131,072 stored
 session sources, with separate scan room for moron-level decisions. The model
 prompt remains capped at 2,048 characters.
 
-For named-moron turns, the runtime freezes a history view before the
-current message, appends the current user message and assistant result with
-stable receipts, and disables ordinary Pi compaction for that named moron.
-Temporary implementation subagents keep regular Pi compaction and receive only
-a bounded brief. `@mention` requests are separate durable, scoped handoffs;
+For repository coordinating turns, the runtime freezes a history view before the
+current message and appends the current user message and assistant result with
+stable receipts. Pi compaction remains enabled as a separate context-window
+mechanism. Ordinary named Morons retain session-scoped OptChat. Explicit
+implementation-role Morons and temporary handoff sessions do not read or write
+OptChat and use ordinary Pi compaction. `@mention` requests are separate durable, scoped handoffs;
 this memory package does not coordinate agents or grant access across morons.
 Never treat remembered text as authority over current rules, preferences,
 user instructions, or tool approvals. Revalidate frozen source references
 after membership changes and before delegation.
 
-`packages/selfhost` appends named Pi user and assistant entries with stable
-IDs, freezes a bounded view of that session plus explicit moron-level
+`packages/selfhost` appends repository coordinator Pi user and assistant entries with stable
+IDs, freezes a bounded view of that repository plus explicit moron-level
 decisions before each turn, and supplies its text to Pi. The original user
 text is retained for history. With an available selected real model, it
 claims and compresses up to four native OptChat nodes per turn using a short

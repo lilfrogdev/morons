@@ -71,7 +71,7 @@ impl Drop for LocalBackend {
 fn stop(child: &mut Child) {
     #[cfg(unix)] {
         let _ = Command::new("/bin/kill").arg("-TERM").arg(child.id().to_string()).status();
-        let until = Instant::now() + Duration::from_secs(5);
+        let until = Instant::now() + Duration::from_secs(60);
         while Instant::now() < until {
             if child.try_wait().ok().flatten().is_some() { return; }
             std::thread::sleep(Duration::from_millis(50));
@@ -137,7 +137,7 @@ fn read_url(child: &mut Child) -> Result<Url, &'static str> {
         let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
         let _ = tx.send(result);
     });
-    let line = rx.recv_timeout(Duration::from_secs(15)).map_err(|_| "Local account server timed out")?
+    let line = rx.recv_timeout(Duration::from_secs(90)).map_err(|_| "Local account server timed out")?
         .map_err(|_| "Local account server failed to start")?;
     let value = line.trim().strip_prefix("Morons local account server listening at ")
         .ok_or("Local account server failed to start")?;

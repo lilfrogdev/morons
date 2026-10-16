@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
 import { execFile } from 'node:child_process';
-import { mkdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
+import { chmod, lstat, mkdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from 'node:util';
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -15,7 +15,7 @@ import { createMemoryRuntime, createPiMemoryCompressor } from "./memory-runtime.
 import { createHandoffExtension, openHandoffStore } from "./handoff-runtime.mjs";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
-import { assertRunnerPathSeparation, verifyContainerRunner } from './container-review.mjs';
+import { assertRunnerPathSeparation, stopContainerWorkspace, verifyContainerRunner } from './container-review.mjs';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
@@ -25,18 +25,50 @@ import { collectUsage, usageFilters } from './usage.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
 const execFileAsync = promisify(execFile);
-async function selectedRepositoryPath(path, storagePath) {
+async function selectedRepositoryPath(path, privateRoots) {
   if (typeof path !== 'string' || path.length > 4096 || !isAbsolute(path) || path.includes('\0'))
     throw new Error('invalid_repository_path');
   const source = await realpath(path);
   if (!(await stat(source)).isDirectory()) throw new Error('invalid_repository_path');
-  const storage = await realpath(storagePath);
-  if (source === storage || source.startsWith(`${storage}${sep}`) || storage.startsWith(`${source}${sep}`))
-    throw new Error('repository_private_path_overlap');
+  for (const privateRoot of privateRoots) {
+    const storage = await realpath(privateRoot);
+    if (source === storage || source.startsWith(`${storage}${sep}`) || storage.startsWith(`${source}${sep}`))
+      throw new Error('repository_private_path_overlap');
+  }
   const { stdout } = await execFileAsync('git', ['-C', source, 'rev-parse', '--show-toplevel'],
     { timeout: 5000, maxBuffer: 8192, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
   if (await realpath(stdout.trim()) !== source) throw new Error('repository_root_required');
   return source;
+}
+async function committedSourcePaths(repository, revision = 'HEAD') {
+  if (revision !== 'HEAD' && !/^[0-9a-f]{40}$/.test(revision)) throw new Error('invalid_review_base');
+  const { stdout } = await execFileAsync('git', ['-C', repository, '-c', 'core.fsmonitor=false',
+    '-c', 'core.hooksPath=/dev/null', 'ls-tree', '-r', '-z', revision],
+  { timeout: 10000, maxBuffer: 2 * 1024 * 1024, encoding: 'buffer',
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C', HOME: '/tmp',
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' } });
+  const paths = [];
+  for (const entry of stdout.toString('utf8').split('\0')) {
+    if (!entry) continue;
+    const match = /^(100644|100755) blob [0-9a-f]{40}\t([^\n\r]+)$/.exec(entry);
+    if (!match) continue;
+    const path = match[2];
+    if (!/\.(?:c|cc|cpp|cs|css|go|h|hpp|html|java|js|jsx|json|mjs|py|rs|sh|sql|swift|toml|ts|tsx|yaml|yml)$/.test(path) ||
+        !/^[a-zA-Z0-9_./-]{1,512}$/.test(path) ||
+        path.split('/').some((part) => !part || part === '.' || part === '..' || part.startsWith('.')) ||
+        /(^|\/)(?:.*(?:secret|credential|token|password|private|keyring).*|id_[a-z0-9_-]+)(?:\/|$)/i.test(path)) continue;
+    paths.push(path);
+  }
+  if (!paths.length) throw new Error('repository_source_allowlist_unavailable');
+  return paths.sort().slice(0, 128);
+}
+async function privateDirectory(path) {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()))
+    throw new Error('private_workspace_directory_required');
+  await chmod(path, 0o700);
+  return path;
 }
 function displayAnswer(raw) {
   if (!raw.startsWith(VIZ_PREFIX)) return raw;
@@ -130,12 +162,12 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true }) {
   const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
-  if (repositoryPlan?.runnerImage) {
+  if (runnerImage && repositoryPlan) {
     const sourceRoot = await realpath(repositoryPlan.repository);
     const storagePath = resolve(dirname(databasePath));
     if (sourceRoot === storagePath || sourceRoot.startsWith(`${storagePath}${sep}`) ||
@@ -143,6 +175,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   }
 
   await mkdir(dirname(databasePath), { recursive: true, mode: 0o700 });
+  const protectedRoots = [dirname(databasePath), ...(privateDataRoot ? [privateDataRoot] : [])];
+  const runnerPlans = new Map();
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
   let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
@@ -151,18 +185,26 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
     handoffStore = openHandoffStore(`${databasePath}.model-handoffs.sqlite`);
     const registry = createRegistry();
+    if (runnerImage) {
+      await verifyContainerRunner(runnerImage);
+    }
     if (repositoryPlan?.runnerImage) {
       trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
       await assertRunnerPathSeparation(repositoryPlan.repository, dirname(databasePath));
       await assertRunnerPathSeparation(repositoryPlan.repository, repositoryPlan.reviewRoot);
-      await verifyContainerRunner(repositoryPlan.runnerImage);
     }
-    repoExtension = providerModelId && !repositoryPlan?.runnerImage ? null : repoTools(catalog, repositoryPlan);
+    repoExtension = (providerModelId && !runnerImage) || (!runnerImage && !repositoryPlan)
+      ? null : repoTools(catalog, repositoryPlanForSession);
     if (repoExtension) registry.install(repoExtension);
     models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
+      isMemorySession: (session) => {
+        const moron = catalog.getMoron(session.moronId);
+        return Boolean(moron) && moron.role !== 'implementation' &&
+          !catalog.isHandoffTarget(session.id) && !handoffStore.isTargetSession(session.id);
+      },
       isSharedMoron: (moronId) => Boolean(catalog.repositoryForMoron(moronId)),
       piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models,
         ({ session, model, answer, callId }) => catalog.saveExternalUsage({
@@ -233,17 +275,18 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     throw error;
   }
   harness.resume();
-  if (repositoryPlan) {
-    for (const intent of catalog.pendingReviews()) {
+  for (const intent of catalog.pendingReviews()) {
       try {
-        const result = await runReviewOperation(repositoryPlan, { operation: 'review',
+        const session = catalog.getSession(intent.session_id);
+        const plan = session && await repositoryPlanForSession(session, intent.base_revision);
+        if (!plan) continue;
+        const result = await runReviewOperation(plan, { operation: 'review',
           branch: intent.branch, patch: intent.patch, baseRevision: intent.base_revision ?? null });
         catalog.saveReview({ id: intent.id, sessionId: intent.session_id, branch: intent.branch,
           baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
       } catch {
 
       }
-    }
   }
   let shuttingDown = false;
   const inFlight = new Map();
@@ -255,10 +298,41 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   function isHandoffTarget(session) {
     return catalog.isHandoffTarget(session.id) || handoffStore.isTargetSession(session.id);
   }
+  async function repositoryPlanForSession(session, baseRevision = null) {
+    const repository = catalog.repositoryForMoron(session.moronId);
+    const moron = catalog.getMoron(session.moronId);
+    if (!repository || !moron || repository.workspaceId !== moron.workspaceId) return null;
+    if (repository.id === 'configured') {
+      if (!repositoryPlan || session.moronId !== 'repo' ||
+          repository.path !== await realpath(repositoryPlan.repository).catch(() => resolve(repositoryPlan.repository))) return null;
+      return repositoryPlan;
+    }
+    if (!runnerImage || !validId(repository.id) || !validId(repository.workspaceId)) return null;
+    const source = await selectedRepositoryPath(repository.path, protectedRoots);
+    if (source !== repository.path) throw new Error('repository_path_changed');
+    const runnersRoot = await privateDirectory(join(dirname(databasePath), 'repository-runners'));
+    const workspaceDirectory = await privateDirectory(join(runnersRoot, repository.workspaceId));
+    const root = await privateDirectory(join(workspaceDirectory, repository.id));
+    const reviewRoot = await privateDirectory(join(root, 'reviews'));
+    const workspaceRoot = await privateDirectory(join(root, 'computer-home'));
+    await assertRunnerPathSeparation(source, reviewRoot);
+    await assertRunnerPathSeparation(source, workspaceRoot);
+    const allowedPaths = await committedSourcePaths(source, baseRevision ?? 'HEAD');
+    trustedCheckPlan('source-code', allowedPaths);
+    const plan = { repository: source, runnerImage, allowedPaths,
+      checkProfile: 'source-code', reviewRoot, workspaceRoot };
+    runnerPlans.set(repository.id, plan);
+    return plan;
+  }
+  function sourceToolsFor(session, model) {
+    const repository = catalog.repositoryForMoron(session.moronId);
+    return repository && repoExtension && (runnerImage ||
+      (repository.id === 'configured' && repositoryPlan && model?.provider === 'morons-fixture'))
+      ? [repoExtension] : [];
+  }
   function extensionsFor(session, model) {
     if (isHandoffTarget(session)) return [];
-    return [handoffExtension, ...(session.moronId === 'repo' && repoExtension &&
-      (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])];
+    return [handoffExtension, ...sourceToolsFor(session, model)];
   }
   async function ensureHandoffTool(conversation, session) {
     if (handoffConfigured.has(session.id)) return;
@@ -435,8 +509,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
       agent: { model, instructions,
-        extensions: handoff ? [] : [handoffExtension, ...(moron.id === 'repo' && repoExtension &&
-          (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])] },
+        extensions: handoff ? [] : [handoffExtension, ...sourceToolsFor({ moronId: moron.id }, model)] },
     }, BACKGROUND_CONTEXT);
     handoffConfigured.add(id);
     return catalog.createSession(id, moron.id, conversation.id, title);
@@ -531,7 +604,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const workspaceId = body?.workspaceId ?? 'personal';
         if (!validId(workspaceId)) return send(response, 400, { error: 'invalid_workspace' });
         let selectedPath;
-        try { selectedPath = await selectedRepositoryPath(body?.path, dirname(databasePath)); }
+        try { selectedPath = await selectedRepositoryPath(body?.path, protectedRoots); }
         catch { return send(response, 400, { error: 'invalid_repository_path' }); }
         if (catalog.listRepositories(workspaceId).some((repository) => repository.path === selectedPath))
           return send(response, 409, { error: 'repository_exists' });
@@ -610,13 +683,15 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       if (request.method === "POST" && path === "/v1/morons") {
         const body = await readBody(request);
+        if (body?.role === 'coordinator') return send(response, 400, { error: 'invalid_moron' });
         if (catalog.getMoron(body?.id)) return send(response, 409, { error: "moron_exists" });
         return send(response, 201, { moron: catalog.createMoron(body) });
       }
       const moronMemory = /^\/v1\/morons\/([^/]+)\/memory$/.exec(path);
       if (moronMemory && request.method === "POST") {
         const moronId = decodeURIComponent(moronMemory[1]);
-        if (!catalog.getMoron(moronId)) return send(response, 404, { error: "moron_not_found" });
+        const moron = catalog.getMoron(moronId);
+        if (!moron || moron.role === 'implementation') return send(response, 404, { error: "moron_not_found" });
         const body = await readBody(request);
         if (!validId(body?.id) || typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
           return send(response, 400, { error: "invalid_memory" });
@@ -786,6 +861,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     await new Promise((resolve, reject) => server.once("error", reject).listen(port, host, resolve));
   } catch (error) {
     await harness.close(BACKGROUND_CONTEXT);
+    for (const plan of runnerPlans.values()) await stopContainerWorkspace(plan).catch(() => {});
     catalog.close();
     optchat.database.close();
     handoffStore.close();
@@ -796,12 +872,17 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     url: `http://${host}:${server.address().port}`,
     async close() {
       shuttingDown = true;
-      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      await harness.close(BACKGROUND_CONTEXT);
-      catalog.close();
-      optchat.database.close();
-      handoffStore.close();
-      await ownerLock.close();
+      const failures = [];
+      for (const cleanup of [
+        () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+        () => harness.close(BACKGROUND_CONTEXT),
+        ...[...runnerPlans.values()].map((plan) => () => stopContainerWorkspace(plan)),
+        () => catalog.close(), () => optchat.database.close(),
+        () => handoffStore.close(), () => ownerLock.close(),
+      ]) {
+        try { await cleanup(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length) throw new AggregateError(failures, 'fixture_server_cleanup_failed');
     },
   };
 }

@@ -24,9 +24,12 @@ previously saved Repository Morons and their conversations are preserved.
 The Repositories view can register an existing local Git repository through the
 native folder picker. Each account and workspace keeps its own repository
 records, coordinating Moron, threads, pinned/archive state, and repository-scoped
-OptChat memory. The path stays in the local account database. Repository source
-and review tools remain limited to the separately configured and verified runner;
-registration alone does not grant file access to a model.
+OptChat memory. The path stays in the local account database. With the existing
+digest-pinned container image configured, administrator-owned repositories get
+separate runner workspaces and review areas per repository and workspace. The
+runner derives a bounded committed-code allowlist from each selected repository
+and runs a fixed diff check on proposals; it does not execute repository scripts.
+Other accounts can register repositories but do not receive source tools.
 The updated desktop bundle has not yet replaced the app in the user's active test.
 Packaged Mac launches use backend resources inside the app bundle, avoiding a
 runtime read of the development checkout in Documents. New local accounts use
@@ -70,7 +73,12 @@ actual remote model access remains unverified until a human signs in and uses
 it. No actual OAuth or paid call was made. Local
 credential metadata restores provider status after a restart.
 Pi Durable's ordinary automatic compaction policy is enabled for conversation
-context. Repository coordinating Morons also retain their shared OptChat scope.
+context across roles. Repository coordinating Morons also retain their shared
+OptChat scope. Existing ordinary named Morons retain session-scoped OptChat.
+Morons created with the implementation role and temporary handoff sessions use
+Pi compaction without reading or writing OptChat. Repository coordinating sessions
+currently own the source and proposal tools; separate implementation tool sessions
+are not yet exposed.
 Automatic compaction with a real provider has not been exercised without a human
 provider sign-in and model call.
 
@@ -103,7 +111,7 @@ and worker copies under `/tmp`. A live offline account-server smoke from this
 checkout passed login, committed source read, isolated review checks, and
 account-directory checkpointing under `~/.local/share`. Direct Docker binds of
 both the Documents checkout and account directory timed out after 20 seconds;
-the private runtime stages avoid those mounts. Two trusted,
+the private runtime stages avoid those mounts. Two specialized,
 dependency-free check profiles now run the candidate's `review-runner` or
 `optchat` syntax check as well as `git diff --check`; model edits are confined
 to the selected package's source paths. The self-host backend and GPUI need

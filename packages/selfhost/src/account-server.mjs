@@ -47,7 +47,7 @@ async function privateFile(path) {
 }
 
 
-export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0 }) {
+export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0 }) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('tls_ingress_required');
   if (typeof bootstrapToken !== 'string' || bootstrapToken.length < 32 || bootstrapToken.length > 256)
     throw new Error('bootstrap_token_required');
@@ -59,10 +59,10 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
   if (!(await lstat(dataDir)).isDirectory() || (await lstat(dataDir)).isSymbolicLink())
     throw new Error('private_data_directory_required');
   await chmod(dataDir, 0o700);
+  if (runnerImage) await verifyContainerRunner(runnerImage);
   if (repositoryPlan?.runnerImage) {
     trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
     await assertRunnerPathSeparation(repositoryPlan.repository, dataDir);
-    await verifyContainerRunner(repositoryPlan.runnerImage);
   }
   const lockPath = join(dataDir, '.owner.lock');
   const lock = await acquireOwnerLock(lockPath, 'account_server_already_owned_or_stale_lock');
@@ -98,7 +98,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       let server;
       try {
         server = await openFixtureServer({ databasePath: join(directory, 'pi.sqlite'),
-          ownerToken: internalToken, repositoryPlan: accountPlan, accountId: account.id,
+          ownerToken: internalToken, repositoryPlan: accountPlan,
+          runnerImage: account.administrator ? runnerImage : null, privateDataRoot: dataDir, accountId: account.id,
           providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
           providerRuntime, accountPlan };
@@ -254,7 +255,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         if (providerFile) await assertRunnerPathSeparation(repositoryPlan.repository, providerFile);
       }
       return openAccountServer({ dataDir,
-      bootstrapToken: bootstrap.toString('utf8').trim(), providerKey, providerModelId, repositoryPlan,
+      bootstrapToken: bootstrap.toString('utf8').trim(), providerKey, providerModelId, repositoryPlan, runnerImage,
       port: Number(process.env.PORT ?? 8787) });
     })
     .then((instance) => {

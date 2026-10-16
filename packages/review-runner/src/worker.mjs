@@ -24,7 +24,8 @@ try {
     if (plan.checkProfile !== undefined) {
       const policy = trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
       checks = policy.checks;
-      requiredScript = { manifest: policy.manifest, scriptName: policy.scriptName, script: policy.script };
+      if (policy.manifest) requiredScript = { manifest: policy.manifest,
+        scriptName: policy.scriptName, script: policy.script };
     }
     result = await prepareReview({
       repository: plan.repository,

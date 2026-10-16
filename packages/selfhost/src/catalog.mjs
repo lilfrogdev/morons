@@ -37,6 +37,8 @@ export function openCatalog(path) {
     db.exec("ALTER TABLE morons ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'personal'");
   if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'pinned'))
     db.exec("ALTER TABLE morons ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'role'))
+    db.exec("ALTER TABLE morons ADD COLUMN role TEXT NOT NULL DEFAULT 'named'");
   if (!db.prepare('PRAGMA table_info(sessions)').all().some((column) => column.name === 'title'))
     db.exec("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT 'New thread'");
   db.exec(`CREATE TABLE IF NOT EXISTS repository_sidebar (
@@ -66,6 +68,7 @@ export function openCatalog(path) {
     },
     ensureLegacyRepository(path, name) {
       db.prepare("INSERT OR IGNORE INTO repositories VALUES ('configured', 'personal', 'repo', ?, ?, ?)").run(path, name, Date.now());
+      db.prepare("UPDATE morons SET role = 'coordinator' WHERE id = 'repo' AND EXISTS (SELECT 1 FROM repositories WHERE id = 'configured' AND moron_id = 'repo')").run();
       return this.getRepository('configured');
     },
     registerRepository({ id, workspaceId, moronId, path, name }) {
@@ -75,7 +78,7 @@ export function openCatalog(path) {
         throw new Error('invalid_repository');
       db.exec('BEGIN IMMEDIATE');
       try {
-        this.createMoron({ id: moronId, name, rules: '', preferences: '', workspaceId });
+        this.createMoron({ id: moronId, name, rules: '', preferences: '', workspaceId, role: 'coordinator' });
         db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?, ?, ?)')
           .run(id, workspaceId, moronId, path, name, Date.now());
         db.exec('COMMIT');
@@ -115,12 +118,13 @@ export function openCatalog(path) {
         .run(workspaceId, repositoryId, Number(value));
       return this.repositorySidebar(workspaceId, repositoryId);
     },
-    createMoron({ id, name, rules, preferences, workspaceId = 'personal' }) {
+    createMoron({ id, name, rules, preferences, workspaceId = 'personal', role = 'named' }) {
       if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 80 ||
           typeof rules !== "string" || rules.length > 12000 ||
-          typeof preferences !== "string" || preferences.length > 12000 || !validId(workspaceId)) throw new Error("invalid_moron");
-      db.prepare("INSERT INTO morons (id, name, rules, preferences, created_at, workspace_id) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(id, name.trim(), rules, preferences, Date.now(), workspaceId);
+          typeof preferences !== "string" || preferences.length > 12000 || !validId(workspaceId) ||
+          !['named', 'implementation', 'coordinator'].includes(role)) throw new Error("invalid_moron");
+      db.prepare("INSERT INTO morons (id, name, rules, preferences, created_at, workspace_id, role) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(id, name.trim(), rules, preferences, Date.now(), workspaceId, role);
       return moron(getMoron.get(id));
     },
     listSessions: (moronId) => db.prepare("SELECT id, moron_id, conversation_id, created_at, title FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
@@ -229,7 +233,7 @@ export function openCatalog(path) {
   };
 }
 
-function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, pinned: Boolean(row.pinned) }; }
+function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, role: row.role, pinned: Boolean(row.pinned) }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id,
   conversationId: Number(row.conversation_id), createdAt: row.created_at, title: row.title ?? 'New thread' }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }

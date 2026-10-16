@@ -49,7 +49,7 @@ Launch GPUI with `MORONS_BACKEND_MODE=named` and the account server's HTTPS
 origin, or its loopback HTTP origin. This separate-server first enrollment
 still requires the operator's setup code in GPUI.
 
-The repository moron is enabled only when an operator supplies
+The legacy configured repository moron is enabled when an operator supplies
 `MORONS_REPOSITORY` and a comma-separated exact `MORONS_SOURCE_PATHS` allowlist
 to the server. `/source PATH` reads an approved committed blob. `/review`
 followed by a unified diff commits a proposal on an isolated branch, runs
@@ -122,14 +122,20 @@ process is stopped before manually clearing that lock.
 
 ## Real-model repository runner
 
-The model receives repository read and proposal tools only when the operator
-sets `MORONS_REPOSITORY`, `MORONS_SOURCE_PATHS`, `MORONS_RUNNER_IMAGE`, and
-`MORONS_REVIEW_CHECK_PROFILE`. The supported profiles are `review-runner` and
+For a configured legacy repository, the operator sets `MORONS_REPOSITORY`,
+`MORONS_SOURCE_PATHS`, `MORONS_RUNNER_IMAGE`, and
+`MORONS_REVIEW_CHECK_PROFILE`. Its supported profiles are `review-runner` and
 `optchat`. Each accepts exact allowlisted files only under its package's
 `src/` directory, keeps its check script outside the edit allowlist,
 and runs `git diff --check` plus that package's fixed syntax check on the
-candidate checkout. The same checks rerun after intent recovery. Other paths
-or an absent/mismatched profile fail closed. The dependency-heavy self-host
+candidate checkout. The same checks rerun after intent recovery. Administrator
+accounts can also select local Git roots in GPUI when `MORONS_RUNNER_IMAGE` is
+set alone. Each registered repository receives its own review and computer-home
+directories. Its `source-code` policy allows the first 128 regular, committed
+code files in sorted path order, excludes hidden and credential-named paths,
+and runs only a fixed `git diff --check` on proposals. It does not run repository
+scripts. Other paths or an absent/mismatched profile fail closed. Nonadministrator
+accounts can register repositories but cannot use source tools. The dependency-heavy self-host
 backend and GPUI need separately provisioned dependencies and check policies.
 The image must already be installed locally, be named by an immutable
 `@sha256:` digest, and contain Node 22+ and Git. The server never pulls an

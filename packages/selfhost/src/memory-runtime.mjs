@@ -53,7 +53,8 @@ export function createPiMemoryCompressor(models, onUsage = () => {}) {
 }
 
 
-export function createMemoryRuntime({ memory, catalog, accountId, piContext, compressor = null, isSharedMoron = () => false }) {
+export function createMemoryRuntime({ memory, catalog, accountId, piContext, compressor = null,
+  isMemorySession = () => true, isSharedMoron = () => false }) {
   if (!memory || !catalog || typeof accountId !== 'string' || !accountId)
     throw new Error('invalid_memory_runtime');
   const shardId = (sessionId, index) => index === 0 ? sessionId : `${sessionId}~${index}`;
@@ -71,6 +72,7 @@ export function createMemoryRuntime({ memory, catalog, accountId, piContext, com
     access.allowedThreadIds.includes(source.threadId));
 
   async function sync(conversation, session) {
+    if (!isMemorySession(session)) return;
     const access = accessFor(session);
     let lastEntryId = catalog.memoryCursor(session.id);
     let sourceCount = catalog.memorySourceCount(session.id);
@@ -114,6 +116,7 @@ export function createMemoryRuntime({ memory, catalog, accountId, piContext, com
   }
 
   async function prepareTurn(conversation, session, requestId, modelRef) {
+    if (!isMemorySession(session)) return { text: '', sourceRefs: [], turnId: null };
     await sync(conversation, session);
     const access = accessFor(session);
     const turnId = `${session.id}:${requestId}`;
