@@ -1,4 +1,5 @@
 pub mod model;
+pub mod local;
 pub mod named;
 pub mod sse;
 pub mod transport;

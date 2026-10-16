@@ -190,10 +190,7 @@ impl Chat {
             cx.notify();
             return;
         }
-        if self.input.read(cx).composing()
-            || self.state.pending
-            || self.state.snapshot.active_task_id.is_some()
-        {
+        if self.input.read(cx).composing() || self.state.pending {
             return;
         }
         let text = self.input.read(cx).text().to_owned();
@@ -257,8 +254,11 @@ impl Chat {
             .child(
                 div().flex_1().min_w_0().h_full().flex().flex_col()
                     .px_3().pt_5().pb_3()
-                    .child(div().px_2().mb_7().text_size(px(17.))
+                    .child(div().px_2().mb_2().text_size(px(17.))
                         .font_weight(FontWeight::BOLD).child("Morons"))
+                    .when_some(self.state.workspace_name.clone(), |d, workspace| d.child(
+                        div().id("workspace-label").px_2().mb_7().text_size(px(12.))
+                            .text_color(rgb(0x626772)).child(workspace)))
                     .child(div().px_2().mb_2().text_size(px(12.))
                         .font_weight(FontWeight::BOLD).text_color(rgb(0x626772))
                         .child("Your Morons"))
@@ -421,6 +421,11 @@ impl Render for Chat {
                             message.text.clone()
                         },
                     ))
+                    .when(message.role == Role::User && matches!(task_status,
+                        Some(TaskStatus::Accepted | TaskStatus::Running)), |d| {
+                        d.child(div().text_xs().text_color(rgb(0x667786)).child(
+                            if task_status == Some(TaskStatus::Accepted) { "Queued" } else { "Delivered · working" }))
+                    })
                     .when_some(handoff, |d, handoff| {
                         d.child(div()
                             .mt_2()
@@ -481,10 +486,10 @@ impl Render for Chat {
                     cx.notify();
                 }
             }))
-            .child(self.sidebar(narrow, cx))
+            .when(!self.state.account_login, |d| d.child(self.sidebar(narrow, cx)))
             .child(div().id("main-pane").flex_1().min_w_0().h_full()
                 .flex().flex_col().bg(rgb(0xFFFFFF))
-            .child(
+            .when(!self.state.account_login, |d| d.child(
                 div()
                     .flex()
                     .justify_between()
@@ -513,21 +518,57 @@ impl Render for Chat {
                         .when(self.state.selected_moron.is_some(), |d| d.child(button("account-sign-out", "Sign out").on_click(
                             cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)),
                         )))),
-            )
+            ))
             .when(self.state.account_login, |d| d.child(
                 div().id("account-form").role(gpui::Role::Region)
                     .aria_label("Morons account setup and sign in")
-                    .w_full().max_w(px(580.)).mx_auto().mt_8().p_6()
+                    .w_full().max_w(px(520.)).mx_auto().mt_8().p_6()
                     .rounded_sm().border_1().border_color(rgb(0xBAC8D3))
                     .bg(rgb(0xFFFFFF)).flex().flex_col().gap_3()
-                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Sign in"))
-                    .child(div().text_sm().child("Your account keeps named Morons and sessions in sync."))
-                    .child(self.login_name.clone())
-                    .child(self.login_password.clone())
-                    .child(button("account-sign-in", "Sign in").on_click(cx.listener(|view, _, _, cx| view.account_action(false, cx))))
-                    .child(div().mt_3().text_sm().child("Setting up the first account? Enter the private setup code supplied by your server."))
-                    .child(self.bootstrap_token.clone())
-                    .child(button("account-create", "Create first account").on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).child(
+                        if self.state.local_mode { "Welcome to Morons" } else if self.state.first_account_available { "Create your first account" } else { "Sign in" }))
+                    .child(div().text_sm().child(
+                        if self.state.local_mode {
+                            "Create your account on this Mac and open your Personal workspace."
+                        } else if self.state.account_server_reachable {
+                            "Your account keeps your Morons and conversations together."
+                        } else {
+                            "Start the local Morons account server, then check the connection."
+                        }))
+                    .when(!self.state.account_server_reachable, |d| d.child(
+                        button("account-check-server", "Check server").on_click(cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)))))
+                    .child(div().flex().flex_col().gap_1()
+                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Account name"))
+                        .child(div().px_2().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
+                            .child(self.login_name.clone()))
+                        .child(div().text_xs().text_color(rgb(0x626772))
+                            .child("3–40 lowercase letters, digits, or hyphens; start with a letter")))
+                    .child(div().flex().flex_col().gap_1()
+                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Password"))
+                        .child(div().px_2().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
+                            .child(self.login_password.clone()))
+                        .child(div().text_xs().text_color(rgb(0x626772)).child("At least 12 characters")))
+                    .when(self.state.first_account_available, |d| d
+                        .when(!self.state.local_mode, |d| d
+                            .child(div().text_sm().child("The server owner supplies a private setup code for the first account."))
+                            .child(self.bootstrap_token.clone()))
+                        .child(button("account-create", if self.state.local_mode { "Create account" } else { "Create first account" })
+                            .bg(rgb(0x24313D)).text_color(rgb(0xFFFFFF))
+                            .hover(|s| s.bg(rgb(0x35495A)))
+                            .on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
+                        .child(div().mt_3().text_sm().child("Already have an account?")))
+                    .child(button("account-sign-in", "Sign in").bg(rgb(0xFFFFFF))
+                        .border_1().border_color(rgb(0xBAC8D3))
+                        .on_click(cx.listener(|view, _, _, cx| view.account_action(false, cx))))
+            ))
+            .when(self.state.local_mode && self.state.selected_moron.is_some() && !self.state.provider_available, |d| d.child(
+                div().id("provider-local-setup").role(gpui::Role::Region)
+                    .aria_label("Provider setup")
+                    .px_6().py_3().border_b_1().border_color(rgb(0xE0E6EC))
+                    .flex().flex_col().gap_2().text_sm()
+                    .child("Personal workspace is ready. To connect ChatGPT, create private encrypted provider storage on this Mac.")
+                    .child(button("provider-unlock", "Enable provider storage").on_click(
+                        cx.listener(|view, _, _, cx| view.command(Command::ProviderUnlock, cx))))
             ))
             .when(self.state.selected_moron.is_some() && self.state.provider_available &&
                 matches!(provider_state.as_deref(), Some("awaiting_callback" | "open_browser")), |d| d.child(
@@ -673,14 +714,14 @@ impl Render for Chat {
                             .child(div().flex_1())
                             .when(self.state.pending, |d| d.child(button("retry", "Retry")
                                 .on_click(cx.listener(|view, _, _, cx| view.command(Command::Retry, cx)))))
-                            .when_some(active.clone(), |d, id| d.child(button("stop", "Stop")
+                            .when_some(if self.state.selected_moron.is_none() { active.clone() } else { None }, |d, id| d.child(button("stop", "Stop")
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
                             .child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
                                 .w(px(32.)).h(px(32.)).rounded(px(16.))
                                 .flex().items_center().justify_center()
                                 .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
-                            .when(self.state.ready && !self.state.pending && active.is_none(), |d| d.child(
+                            .when(self.state.ready && !self.state.pending, |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
                                     .w(px(28.)).h(px(28.)).rounded(px(14.))
                                     .bg(if draft_ready { rgb(0x24262B) } else { rgb(0x9DA1A7) })
@@ -907,7 +948,7 @@ fn main() {
             return;
         }
     };
-    let login_initial = matches!(config, Config::NamedLogin { .. });
+    let login_initial = matches!(config, Config::NamedLogin { .. } | Config::Local);
     let preview = std::env::var_os("MORONS_UI_PREVIEW").is_some();
     gpui_platform::application().run(move |cx: &mut App| {
         input::bind_keys(cx);

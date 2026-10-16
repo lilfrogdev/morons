@@ -111,6 +111,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
     if (closing) return send(response, 503, { error: 'closing' });
     const path = new URL(request.url ?? '/', 'http://localhost').pathname;
     try {
+      if (path === '/v1/accounts/setup' && request.method === 'GET')
+        return send(response, 200, { firstAccountAvailable: accounts.count() === 0 });
       if (path === '/v1/accounts/bootstrap' && request.method === 'POST') {
         if (bootstrapInProgress || accounts.count() !== 0 || !sameSecret(request.headers['x-morons-bootstrap'], bootstrapToken))
           return send(response, 403, { error: 'bootstrap_unavailable' });
@@ -137,6 +139,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       if (!account) return send(response, 401, { error: 'unauthorized' });
       if (path === '/v1/session/me' && request.method === 'GET')
         return send(response, 200, { account: { id: account.id, name: account.name, administrator: account.administrator }, expiresAt: account.expiresAt });
+      if (path === '/v1/workspaces' && request.method === 'GET')
+        return send(response, 200, { workspaces: accounts.workspaces(account.id) });
       if (path === '/v1/session/logout' && request.method === 'POST') {
         accounts.revoke(token); return send(response, 200, { signedOut: true });
       }
@@ -221,7 +225,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       bootstrapToken: bootstrap.toString('utf8').trim(), providerKey, providerModelId, repositoryPlan,
       port: Number(process.env.PORT ?? 8787) });
     })
-    .then(({ url }) => process.stdout.write(`Morons local account server listening at ${url}\n`))
+    .then((instance) => {
+      process.stdout.write(`Morons local account server listening at ${instance.url}\n`);
+      process.once('SIGTERM', () => instance.close().then(() => { process.exitCode = 0; })
+        .catch(() => { process.exitCode = 1; }));
+    })
     .catch((error) => {
       const runnerErrors = new Set(['runner_image_digest_required', 'container_engine_not_running',
         'runner_image_not_present', 'runner_image_missing_node_or_git', 'container_runner_unavailable',

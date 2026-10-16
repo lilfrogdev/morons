@@ -19,6 +19,7 @@ pub struct NamedMessage {
     pub role: Role,
     pub text: String,
     pub handoff: Option<Handoff>,
+    pub status: Option<String>,
 }
 
 impl NamedHistory {
@@ -45,13 +46,22 @@ impl NamedHistory {
                     let id = uuid::Uuid::from_u128(snapshot.tasks.len() as u128 + 1).to_string();
                     snapshot.tasks.push(Task {
                         id: id.clone(),
-                        status: TaskStatus::Completed,
+                        status: match item.status.as_deref() {
+                            Some("queued") => TaskStatus::Accepted,
+                            Some("running") => TaskStatus::Running,
+                            Some("failed") => TaskStatus::Failed,
+                            None | Some("delivered") => TaskStatus::Completed,
+                            _ => return Err("Invalid named message status"),
+                        },
                         input: item.text.clone(),
                         created_at: 0,
                         updated_at: 0,
                         error: None,
                     });
                     task_id = Some(id);
+                    if matches!(item.status.as_deref(), Some("running")) {
+                        snapshot.active_task_id = task_id.clone();
+                    }
                 }
                 Role::Assistant if task_id.is_none() => return Err("Invalid named history order"),
                 Role::Assistant => {}
@@ -64,6 +74,10 @@ impl NamedHistory {
                 partial: false,
                 handoff: item.handoff,
             });
+        }
+        if snapshot.active_task_id.as_ref().is_some_and(|active| !snapshot.tasks.iter().any(|task|
+            &task.id == active && matches!(task.status, TaskStatus::Accepted | TaskStatus::Running))) {
+            snapshot.active_task_id = None;
         }
         snapshot.validate()?;
         Ok(snapshot)

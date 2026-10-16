@@ -7,13 +7,17 @@ app. The current local tryout is on Mac.
 
 ## Working local path
 
-GPUI can create the first account and sign in within the app. Its password and
-first-account setup fields are masked; the device bearer stays in app memory
+GPUI can create the first local account and sign in within the app. The local
+server starts only after Create account or Sign in is selected. The owner secret
+is established internally on Create account, so local enrollment needs no
+terminal setup code. Separate-server enrollment retains its private setup
+code. The password field is masked; the device bearer stays in app memory
 and can be revoked by Sign out. A loopback account gateway maps the bearer to
 an account-private Pi Durable and OptChat owner. Named morons keep rules,
 preferences, durable sessions, bounded memory, and scoped `@mention` question
 and answer handoffs. Multiple device sessions see the same account history;
-other accounts have separate databases.
+other accounts have separate databases. New and existing accounts receive a
+Personal workspace record; additional workspace management is pending.
 
 The offline fixture model can call `/source PATH` for one exact allowlisted
 committed file and `/review` followed by a unified diff. The latter commits a
@@ -28,7 +32,9 @@ five-second lease; GPUI renders the chart with native primitives in the
 conversation scroll area and clears it on logout or refresh failure. Invalid
 model-supplied visualization data remains ordinary text.
 
-Pi 1.2's ChatGPT OAuth interaction has a human-triggered GPUI lifecycle:
+Local provider storage now has an explicit enable button after sign-in; it
+creates the private encryption key and restarts the local server without
+starting OAuth. Pi 1.2's ChatGPT OAuth interaction has a human-triggered GPUI lifecycle:
 start, inspect the server-returned authorization URL, open the browser, paste
 a final redirect URL if needed, cancel, status, and disconnect. The server
 requires an owner-private 32-byte unlock key before exposing this path, keeps

@@ -217,6 +217,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const inFlight = new Map();
   const handoffFlight = new Map();
   const sessionTail = new Map();
+  const settlementTail = new Map();
   const modelChanges = new Set();
   const handoffConfigured = new Set();
   function isHandoffTarget(session) {
@@ -253,24 +254,24 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     return { selected: selected && { provider: selected.provider, id: selected.modelId },
       models: known, favorites: catalog.listModelFavorites() };
   }
-  async function chat(conversation, session, body, displayText = body?.text) {
+  async function chat(conversation, session, body, displayText = body?.text, waitForAnswer = true) {
     const sessionId = session.id;
     if (typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
       return { status: 400, body: { error: "invalid_text" } };
     if (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))
       return { status: 400, body: { error: "invalid_request_id" } };
-    await ensureHandoffTool(conversation, session);
     const key = `${sessionId}:${body.requestId}`;
     if (inFlight.has(key)) {
       const active = inFlight.get(key);
       if (active.text !== body.text) return { status: 409, body: { error: "request_id_conflict" } };
-      return active.promise;
+      return waitForAnswer ? active.completion : active.admission.then((value) => value.accepted);
     }
-    const execute = async () => {
+    const admit = async () => {
+      await ensureHandoffTool(conversation, session);
       const previous = catalog.getReply(sessionId, body.requestId);
-      if (previous && previous.display_text !== displayText) return { status: 409, body: { error: "request_id_conflict" } };
+      if (previous && previous.display_text !== displayText) return { accepted: { status: 409, body: { error: "request_id_conflict" } } };
       if (previous?.answer !== null && previous?.answer !== undefined)
-        return { status: 200, body: { requestId: body.requestId, answer: previous.answer } };
+        return { accepted: { status: 200, body: { requestId: body.requestId, answer: previous.answer, state: 'done' } } };
 
 
       const modelRef = previous ? null : (await conversation.agent(BACKGROUND_CONTEXT)).model;
@@ -278,10 +279,28 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       const submitted = previous ? previous.text : body.text + prepared.text;
       if (!previous) catalog.reserveReply(sessionId, body.requestId, submitted, displayText);
       const reserved = catalog.getReply(sessionId, body.requestId);
-      if (reserved.display_text !== displayText) return { status: 409, body: { error: "request_id_conflict" } };
-      const submission = await conversation.submit({ type: "input", content: submitted, requestId: body.requestId }, BACKGROUND_CONTEXT);
+      if (reserved.display_text !== displayText) return { accepted: { status: 409, body: { error: "request_id_conflict" } } };
+      const submission = await conversation.submit({ type: "input", content: submitted,
+        requestId: body.requestId, whenBusy: 'steer' }, BACKGROUND_CONTEXT);
+      const status = await submission.status(BACKGROUND_CONTEXT);
+      return { submission, accepted: { status: 202,
+        body: { requestId: body.requestId, state: status.status === 'queued' ? 'queued' : 'delivered' } } };
+    };
+    const previousTail = sessionTail.get(sessionId) ?? Promise.resolve();
+    const admission = previousTail.catch(() => {}).then(admit);
+    sessionTail.set(sessionId, admission);
+    admission.finally(() => {
+      if (sessionTail.get(sessionId) === admission) sessionTail.delete(sessionId);
+    }).catch(() => {});
+    const completion = admission.then(async ({ submission, accepted }) => {
+      if (!submission) return accepted;
       const settled = await submission.wait(BACKGROUND_CONTEXT);
-      if (settled.status !== "done" || settled.type !== "input") return { status: 500, body: { error: "generation_failed" } };
+      if (settled.status !== "done" || settled.type !== "input") {
+        catalog.failReply(sessionId, body.requestId);
+        return { status: 500, body: { error: "generation_failed" } };
+      }
+      const prior = settlementTail.get(sessionId) ?? Promise.resolve();
+      const finalize = prior.catch(() => {}).then(async () => {
       const answer = await conversation.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
       const text = entryText(answer);
       if (text.startsWith(VIZ_PREFIX)) {
@@ -298,37 +317,62 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       catalog.saveReply(sessionId, body.requestId, displayAnswer(text));
       await memoryRuntime.sync(conversation, session);
       return { status: 200, body: { requestId: body.requestId, answer: displayAnswer(text) } };
-    };
-
-
-    const previous = sessionTail.get(sessionId) ?? Promise.resolve();
-    const work = previous.catch(() => {}).then(execute);
-    sessionTail.set(sessionId, work);
-    work.finally(() => {
+      });
+      settlementTail.set(sessionId, finalize);
+      finalize.finally(() => { if (settlementTail.get(sessionId) === finalize) settlementTail.delete(sessionId); }).catch(() => {});
+      return finalize;
+    });
+    completion.finally(() => {
       inFlight.delete(key);
-      if (sessionTail.get(sessionId) === work) sessionTail.delete(sessionId);
     }).catch(() => {});
-    inFlight.set(key, { text: body.text, promise: work });
-    return work;
+    inFlight.set(key, { text: body.text, admission, completion });
+    return waitForAnswer ? completion : admission.then((value) => value.accepted);
+  }
+  for (const pending of catalog.pendingReplies()) {
+    const session = catalog.getSession(pending.session_id);
+    if (!session) continue;
+    const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+    chat(conversation, session, { requestId: pending.request_id, text: pending.display_text },
+      pending.display_text).catch(() => {});
   }
   async function history(conversation, sessionId, moronId) {
     const items = (await conversation.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
     const session = catalog.getSession(sessionId);
     await memoryRuntime.sync(conversation, session);
+    const submissions = (await harness.inspect(BACKGROUND_CONTEXT)).submissions
+      .filter((item) => item.conversationId === conversation.id && item.type === 'input');
+    const byEntry = new Map(submissions.filter((item) => item.entry)
+      .map((item) => [String(item.entry), item]));
+    const replies = catalog.listReplies(sessionId);
+    const unseen = new Map();
+    for (const reply of replies) {
+      const group = unseen.get(reply.text) ?? [];
+      group.push(reply);
+      unseen.set(reply.text, group);
+    }
     const handoffs = catalog.listHandoffs(sessionId).filter((handoff) => handoff.answer !== null);
     const modelHandoffs = new Map(handoffStore.list(sessionId).filter((handoff) => handoff.answer !== null)
       .map((handoff) => [handoff.source_user_entry_id, handoff]));
-    return { sessionId, moronId, messages: items.reverse().filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")
+    const messages = items.reverse().filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")
       .map((entry) => {
         const role = entry.kind === "pi.user" ? "user" : "assistant";
         const raw = entryText(entry);
+        const reply = role === 'user' ? unseen.get(raw)?.shift() : null;
+        const submission = role === 'user' ? byEntry.get(String(entry.id)) : null;
         const display = role === "user" ? catalog.displayTextForSubmitted(sessionId, raw) : undefined;
         const handoff = role === "user" && handoffs.find((item) => display === `@${item.target_moron_id} ${item.question}`);
         const modelHandoff = role === "user" ? modelHandoffs.get(String(entry.id)) : null;
         return { id: String(entry.id), role, text: display ?? (handoff ? `@${handoff.target_moron_id} ${handoff.question}` : displayAnswer(raw)),
+          ...(role === 'user' ? { status: reply?.state === 'failed' ? 'failed' :
+            submission?.status === 'placed' ? 'running' : 'delivered' } : {}),
           ...(handoff || modelHandoff ? { handoff: { targetMoronId: (handoff ?? modelHandoff).target_moron_id,
             answer: (handoff ?? modelHandoff).answer } } : {}) };
-      }).filter((entry) => entry.role === 'user' || entry.text.length > 0) };
+      }).filter((entry) => entry.role === 'user' || entry.text.length > 0);
+    for (const reply of replies) {
+      if (reply.state === 'accepted' && unseen.get(reply.text)?.includes(reply))
+        messages.push({ id: `queued-${reply.request_id}`, role: 'user', text: reply.display_text, status: 'queued' });
+    }
+    return { sessionId, moronId, messages };
   }
   function scopedHandoffText(handoff) {
     return `@${handoff.target_moron_id} ${handoff.question}\n\n[Scoped answer from @${handoff.target_moron_id}: ${handoff.answer}]`;
@@ -495,12 +539,15 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
           if (typeof body?.provider !== 'string' || typeof body?.id !== 'string' ||
               body.provider.length > 80 || body.id.length > 128 || !body.provider || !body.id)
             return send(response, 400, { error: 'invalid_model' });
-          if (modelChanges.has(session.id) || sessionTail.has(session.id))
+          if (modelChanges.has(session.id) || sessionTail.has(session.id) ||
+              catalog.pendingReplies().some((reply) => reply.session_id === session.id))
             return send(response, 409, { error: 'session_busy' });
           modelChanges.add(session.id);
           try {
-            const busy = (await harness.inspect(BACKGROUND_CONTEXT)).tasks.some((task) =>
-              task.record.conversationId === conversation.id);
+            const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+            const busy = inspection.tasks.some((task) => task.record.conversationId === conversation.id) ||
+              inspection.submissions.some((submission) => submission.conversationId === conversation.id &&
+                (submission.status === 'queued' || submission.status === 'placed'));
             if (busy || sessionTail.has(session.id)) return send(response, 409, { error: 'session_busy' });
             const catalogView = await modelCatalog(conversation);
             if (!catalogView.models.some((model) => model.provider === body.provider &&
@@ -523,9 +570,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (request.method === "POST" && sessionPath[2] === "chat") {
           if (modelChanges.has(session.id)) return send(response, 409, { error: 'session_busy' });
           const body = await readBody(request);
-        const result = typeof body?.text === "string" && body.text.startsWith("@")
+          if (modelChanges.has(session.id)) return send(response, 409, { error: 'session_busy' });
+          const result = typeof body?.text === "string" && body.text.startsWith("@")
             ? await delegatedChat(session, body)
-            : await chat(conversation, session, body);
+            : await chat(conversation, session, body, body?.text, false);
           return send(response, result.status, result.body);
         }
       }

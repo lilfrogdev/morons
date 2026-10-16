@@ -1,4 +1,5 @@
 use crate::{
+    local::LocalBackend,
     model::{Message, Role, Snapshot, Status, Task, TaskStatus},
     named::NamedHistory,
     sse::Decoder,
@@ -20,6 +21,7 @@ pub struct State {
     pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
     pub selected_moron: Option<String>,
+    pub workspace_name: Option<String>,
     pub review: Option<NamedReview>,
     pub error: Option<&'static str>,
     pub ready: bool,
@@ -27,6 +29,9 @@ pub struct State {
     pub accepted: Option<(String, String)>,
     pub request_error: Option<&'static str>,
     pub account_login: bool,
+    pub local_mode: bool,
+    pub account_server_reachable: bool,
+    pub first_account_available: bool,
     pub provider_available: bool,
     pub provider_state: Option<String>,
     pub provider_url: Option<String>,
@@ -44,6 +49,7 @@ impl Default for State {
             model_favorites: vec![],
             named_morons: vec![],
             selected_moron: None,
+            workspace_name: None,
             review: None,
             error: None,
             ready: false,
@@ -51,6 +57,9 @@ impl Default for State {
             accepted: None,
             request_error: None,
             account_login: false,
+            local_mode: false,
+            account_server_reachable: false,
+            first_account_available: false,
             provider_available: false,
             provider_state: None,
             provider_url: None,
@@ -75,6 +84,7 @@ pub enum Command {
     AccountLogin { name: String, password: String },
     AccountCreate { name: String, password: String, bootstrap: String },
     AccountLogout,
+    ProviderUnlock,
     ProviderStart,
     ProviderCallback(String),
     ProviderCancel,
@@ -114,6 +124,7 @@ struct NamedReviewDetail {
 
 pub enum Config {
     Mock,
+    Local,
     Http { url: Url, bearer: Option<String> },
     Named { url: Url, bearer: String },
     NamedLogin { url: Url },
@@ -121,7 +132,8 @@ pub enum Config {
 impl Config {
     pub fn from_env() -> Result<Self, &'static str> {
         let Ok(value) = std::env::var("MORONS_BACKEND_URL") else {
-            return Ok(Self::Mock);
+            return Ok(if std::env::var("MORONS_BACKEND_MODE").ok().as_deref() == Some("mock") ||
+                std::env::var_os("MORONS_UI_PREVIEW").is_some() { Self::Mock } else { Self::Local });
         };
         let url = Url::parse(&value).map_err(|_| "Invalid backend URL")?;
         let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -166,9 +178,10 @@ impl Worker {
                 let publisher = Publisher { updates, stale };
                 match config {
                     Config::Mock => mock(receiver, publisher).await,
+                    Config::Local => local_account(&mut receiver, &publisher).await,
                     Config::Http { url, bearer } => http(url, bearer, receiver, publisher).await,
                     Config::Named { url, bearer } => {
-                        if named_http(url.clone(), bearer, &mut receiver, &publisher).await {
+                        if named_http(url.clone(), bearer, &mut receiver, &publisher, None).await {
                             named_account(url, &mut receiver, &publisher).await;
                         }
                     }
@@ -196,6 +209,59 @@ impl Publisher {
             let _ = self.stale.try_recv();
             let _ = self.updates.try_send(value);
         }
+    }
+}
+
+async fn local_account(commands: &mut mpsc::Receiver<Command>, publisher: &Publisher) {
+    let client = match Client::builder().redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10)).build() { Ok(client) => client, Err(_) => return };
+    let mut backend: Option<LocalBackend> = None;
+    let mut bootstrap = String::new();
+    let mut state = State { account_login: true, local_mode: true, account_server_reachable: true,
+        first_account_available: true, status: "Welcome to Morons", ..State::default() };
+    publisher.publish(&state);
+    while let Some(command) = commands.recv().await {
+        let (name, password, create) = match command {
+            Command::AccountCreate { name, password, .. } => (name, password, true),
+            Command::AccountLogin { name, password } => (name, password, false),
+            Command::Reconnect => { state.first_account_available = true; publisher.publish(&state); continue; },
+            _ => continue,
+        };
+        if !valid_named_id(&name) || !(12..=256).contains(&password.len()) {
+            state.error = Some("Enter a valid account name and password (12+ characters)");
+            publisher.publish(&state);
+            continue;
+        }
+        state.status = if create { "Creating account…" } else { "Signing in…" };
+        state.error = None;
+        publisher.publish(&state);
+        if backend.is_none() {
+            match LocalBackend::launch(create) {
+                Ok((owned, _, secret)) => { backend = Some(owned); bootstrap = secret; },
+                Err(error) => { state.error = Some(error); publisher.publish(&state); continue; }
+            }
+        }
+        let address = backend.as_ref().expect("launched local server").url();
+        if create {
+            let result = client.post(address.join("v1/accounts/bootstrap").expect("static route"))
+                .header("X-Morons-Bootstrap", &bootstrap)
+                .json(&serde_json::json!({"name":name,"password":password}))
+                .timeout(Duration::from_secs(15)).send().await;
+            match result {
+                Ok(response) if response.status().is_success() => { state.first_account_available = false; },
+                Ok(_) => { state.error = Some("First account already exists or setup was rejected"); publisher.publish(&state); continue; },
+                Err(_) => { state.error = Some("Cannot reach local account server"); publisher.publish(&state); continue; },
+            }
+        }
+        match login_account(&client, &address, &name, &password).await {
+            Ok(token) => {
+                if !named_http(address, token, commands, publisher, backend.as_mut()).await { return; }
+                state = State { account_login: true, local_mode: true, account_server_reachable: true,
+                    first_account_available: false, status: "Signed out", ..State::default() };
+            }
+            Err(error) => { state.error = Some(error); state.status = "Sign in to Morons"; }
+        }
+        publisher.publish(&state);
     }
 }
 
@@ -479,7 +545,7 @@ async fn handle(
             Err("Model and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
-        Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
+        Command::ProviderUnlock | Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
         Command::ProviderLogout => Err("Account and provider login require the named backend"),
     };
     state.request_error = result.err();
@@ -633,6 +699,11 @@ struct AccountSession {
     expires_at: u64,
 }
 #[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountSetup {
+    first_account_available: bool,
+}
+#[derive(serde::Deserialize)]
 struct ProviderResponse {
     available: bool,
     provider: ProviderStatus,
@@ -647,6 +718,23 @@ struct ProviderStatus {
 struct AccountMe { account: AccountIdentity }
 #[derive(serde::Deserialize)]
 struct AccountIdentity { id: String }
+#[derive(serde::Deserialize)]
+struct NamedWorkspaces { workspaces: Vec<NamedWorkspace> }
+#[derive(serde::Deserialize)]
+struct NamedWorkspace { id: String, name: String }
+
+async fn login_account(client: &Client, url: &Url, name: &str, password: &str) -> Result<String, &'static str> {
+    let response = client.post(url.join("v1/session/login").expect("static route"))
+        .json(&serde_json::json!({"name":name,"password":password}))
+        .timeout(Duration::from_secs(15)).send().await.map_err(|_| "Cannot reach account server")?;
+    if !response.status().is_success() { return Err("Account name or password was not accepted"); }
+    let session: AccountSession = serde_json::from_slice(&bounded_body_with_limit(response, 4096).await?)
+        .map_err(|_| "Invalid account login response")?;
+    if session.token.len() < 32 || session.token.len() > 256 || session.expires_at == 0 {
+        return Err("Invalid account login response");
+    }
+    Ok(session.token)
+}
 
 async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publisher: &Publisher) {
     let client = match Client::builder().redirect(reqwest::redirect::Policy::none())
@@ -656,7 +744,21 @@ async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publish
     };
     let mut state = State { account_login: true, status: "Sign in to Morons", ..State::default() };
     publisher.publish(&state);
-    while let Some(command) = commands.recv().await {
+    loop {
+        let setup = client.get(url.join("v1/accounts/setup").expect("static route"))
+            .timeout(Duration::from_secs(3)).send().await.ok();
+        let available = if let Some(response) = setup {
+            if response.status().is_success() {
+                serde_json::from_slice::<AccountSetup>(&bounded_body_with_limit(response, 4096).await.unwrap_or_default()).ok()
+            } else { None }
+        } else { None };
+        state.account_server_reachable = available.is_some();
+        state.first_account_available = available.is_some_and(|setup| setup.first_account_available);
+        if state.account_server_reachable {
+            if state.error == Some("Start the local Morons account server, then check again") { state.error = None; }
+        } else { state.error = Some("Start the local Morons account server, then check again"); }
+        publisher.publish(&state);
+        let Some(command) = commands.recv().await else { break };
         match command {
             Command::AccountLogin { name, password } if valid_named_id(&name) && password.len() >= 12 && password.len() <= 256 => {
                 state.status = "Signing in…";
@@ -676,7 +778,7 @@ async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publish
                 }.await;
                 match result {
                     Ok(token) => {
-                        if !named_http(url.clone(), token, commands, publisher).await { return; }
+                        if !named_http(url.clone(), token, commands, publisher, None).await { return; }
                         state = State { account_login: true, status: "Signed out", ..State::default() };
                     }
                     Err(error) => { state.status = "Sign in to Morons"; state.error = Some(error); }
@@ -691,7 +793,10 @@ async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publish
                     .json(&serde_json::json!({"name":name,"password":password}))
                     .timeout(Duration::from_secs(15)).send().await;
                 match result {
-                    Ok(response) if response.status().is_success() => state.status = "Account created. Sign in.",
+                    Ok(response) if response.status().is_success() => {
+                        state.status = "Account created. Sign in.";
+                        state.first_account_available = false;
+                    },
                     Ok(_) => { state.status = "Sign in to Morons"; state.error = Some("Account setup unavailable or rejected"); }
                     Err(_) => { state.status = "Sign in to Morons"; state.error = Some("Cannot reach account server"); }
                 }
@@ -708,6 +813,7 @@ async fn named_http(
     bearer: String,
     commands: &mut mpsc::Receiver<Command>,
     publisher: &Publisher,
+    mut local_backend: Option<&mut LocalBackend>,
 ) -> bool {
     let client = match Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -717,12 +823,12 @@ async fn named_http(
         Ok(client) => client,
         Err(_) => return false,
     };
-    let api = NamedApi {
+    let mut api = NamedApi {
         client,
         url,
         bearer,
     };
-    let mut state = State::default();
+    let mut state = State { local_mode: local_backend.is_some(), ..State::default() };
     let mut pending: Option<(String, String)> = None;
     let mut selected = "repo".to_owned();
     loop {
@@ -780,6 +886,9 @@ async fn named_http(
                 Some(detail.review)
             } else { None };
             let me: AccountMe = api.get("v1/session/me").await?;
+            let workspaces: NamedWorkspaces = api.get("v1/workspaces").await?;
+            let workspace_name = workspaces.workspaces.iter().find(|item| item.id == "personal" && item.name.len() <= 80)
+                .map(|item| item.name.clone()).ok_or("Personal workspace unavailable")?;
             let visual: serde_json::Value = api.get(&format!("v1/sessions/{session}/visualizations")).await?;
             let now = Instant::now();
             let epoch = visual.get("accessEpoch").and_then(|v| v.as_str()).unwrap_or("");
@@ -789,11 +898,11 @@ async fn named_http(
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>((selected_model, model.available, model_selection, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at())))
+            Ok::<_, &'static str>((selected_model, model.available, model_selection, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name))
         }
         .await;
         let session = match refreshed {
-            Ok((model, model_available, selected_model, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at)) => {
+            Ok((model, model_available, selected_model, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name)) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
@@ -801,6 +910,7 @@ async fn named_http(
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
+                state.workspace_name = Some(workspace_name);
                 state.review = review;
                 state.visualizations = documents;
                 state.visualization_expires_at = expires_at;
@@ -886,6 +996,7 @@ async fn named_http(
                         state.review = None;
                         state.named_morons.clear();
                         state.selected_moron = None;
+                        state.workspace_name = None;
                         state.model = None;
                         state.models.clear();
                         state.selected_model = None;
@@ -900,6 +1011,14 @@ async fn named_http(
                         return true;
                     }
                     Command::AccountLogin { .. } | Command::AccountCreate { .. } => {},
+                    Command::ProviderUnlock => {
+                        if let Some(local) = local_backend.as_deref_mut() {
+                            match local.enable_provider() {
+                                Ok(url) => { api.url = url; state.request_error = None; },
+                                Err(error) => state.request_error = Some(error),
+                            }
+                        }
+                    }
                     Command::ProviderStart if state.provider_available => {
                         state.request_error = api.post("v1/provider/openai/start", serde_json::json!({})).await.err();
                     }

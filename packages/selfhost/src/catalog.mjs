@@ -25,6 +25,9 @@ export function openCatalog(path) {
     db.exec('ALTER TABLE memory_sync_cursors ADD COLUMN source_count INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(review_intents)').all().some((column) => column.name === 'base_revision'))
     db.exec('ALTER TABLE review_intents ADD COLUMN base_revision TEXT');
+  if (!db.prepare('PRAGMA table_info(replies)').all().some((column) => column.name === 'state'))
+    db.exec("ALTER TABLE replies ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'");
+  db.exec("UPDATE replies SET state = 'done' WHERE answer IS NOT NULL AND state = 'accepted'");
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
@@ -50,8 +53,9 @@ export function openCatalog(path) {
       db.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)").run(id, moronId, conversationId, Date.now());
       return session(getSession.get(id));
     },
-    getReply: (sessionId, requestId) => db.prepare("SELECT text, display_text, answer FROM replies WHERE session_id = ? AND request_id = ?").get(sessionId, requestId),
-    listReplies: (sessionId) => db.prepare("SELECT text, display_text FROM replies WHERE session_id = ?").all(sessionId),
+    getReply: (sessionId, requestId) => db.prepare("SELECT text, display_text, answer, state FROM replies WHERE session_id = ? AND request_id = ?").get(sessionId, requestId),
+    listReplies: (sessionId) => db.prepare("SELECT request_id, text, display_text, answer, state FROM replies WHERE session_id = ? ORDER BY rowid").all(sessionId),
+    pendingReplies: () => db.prepare("SELECT session_id, request_id, text, display_text FROM replies WHERE state = 'accepted' ORDER BY rowid").all(),
     displayTextForSubmitted: (sessionId, text) => db.prepare(
       "SELECT display_text FROM replies WHERE session_id = ? AND text = ? LIMIT 1"
     ).get(sessionId, text)?.display_text,
@@ -71,8 +75,9 @@ export function openCatalog(path) {
           AND excluded.source_count >= memory_sync_cursors.source_count`)
         .run(sessionId, entryId, sourceCount);
     },
-    reserveReply: (sessionId, requestId, text, displayText) => db.prepare("INSERT OR IGNORE INTO replies VALUES (?, ?, ?, ?, NULL)").run(sessionId, requestId, text, displayText),
-    saveReply: (sessionId, requestId, answer) => db.prepare("UPDATE replies SET answer = ? WHERE session_id = ? AND request_id = ?").run(answer, sessionId, requestId),
+    reserveReply: (sessionId, requestId, text, displayText) => db.prepare("INSERT OR IGNORE INTO replies (session_id, request_id, text, display_text, answer) VALUES (?, ?, ?, ?, NULL)").run(sessionId, requestId, text, displayText),
+    saveReply: (sessionId, requestId, answer) => db.prepare("UPDATE replies SET answer = ?, state = 'done' WHERE session_id = ? AND request_id = ?").run(answer, sessionId, requestId),
+    failReply: (sessionId, requestId) => db.prepare("UPDATE replies SET state = 'failed' WHERE session_id = ? AND request_id = ? AND answer IS NULL").run(sessionId, requestId),
     memoryDate(entryId) {
       db.prepare("INSERT OR IGNORE INTO memory_entry_dates VALUES (?, ?)").run(entryId, new Date().toISOString());
       return db.prepare("SELECT date FROM memory_entry_dates WHERE entry_id = ?").get(entryId).date;

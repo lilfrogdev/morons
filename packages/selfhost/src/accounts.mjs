@@ -15,7 +15,9 @@ export async function openAccounts(path) {
   db.exec(`PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, salt BLOB NOT NULL, password_hash BLOB NOT NULL, administrator INTEGER NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS device_sessions (token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id), expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS workspaces (account_id TEXT NOT NULL REFERENCES accounts(id), id TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (account_id, id));
     CREATE INDEX IF NOT EXISTS device_sessions_account ON device_sessions(account_id);`);
+  db.prepare("INSERT OR IGNORE INTO workspaces (account_id, id, name, created_at) SELECT id, 'personal', 'Personal', created_at FROM accounts").run();
   const findName = db.prepare('SELECT * FROM accounts WHERE name = ?');
   const findToken = db.prepare('SELECT a.id, a.name, a.administrator, s.expires_at FROM device_sessions s JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ?');
   return {
@@ -26,6 +28,7 @@ export async function openAccounts(path) {
       const hash = await scrypt(password, salt, 64);
       const id = randomUUID();
       db.prepare('INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?)').run(id, name, salt, hash, administrator ? 1 : 0, Date.now());
+      db.prepare("INSERT INTO workspaces (account_id, id, name, created_at) VALUES (?, 'personal', 'Personal', ?)").run(id, Date.now());
       return { id, name, administrator };
     },
     async login(name, password) {
@@ -46,6 +49,10 @@ export async function openAccounts(path) {
       const row = findToken.get(tokenHash(token));
       if (!row || row.expires_at <= Date.now()) return null;
       return { id: row.id, name: row.name, administrator: Boolean(row.administrator), expiresAt: row.expires_at };
+    },
+    workspaces(accountId) {
+      return db.prepare('SELECT id, name FROM workspaces WHERE account_id = ? ORDER BY created_at, id')
+        .all(accountId);
     },
     revoke(token) { if (typeof token === 'string') db.prepare('DELETE FROM device_sessions WHERE token_hash = ?').run(tokenHash(token)); },
     close: () => db.close(),

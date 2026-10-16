@@ -1,17 +1,38 @@
 # Self-hosted Morons, local Mac tryout
 
-The default account server uses Pi Durable 1.2, the OptChat port, and a
-**deterministic offline model**. It makes no provider login or inference calls.
-The server binds `127.0.0.1` only. Build from this checkout:
+The local Mac app uses Pi Durable 1.2, OptChat, and a deterministic offline
+model. It makes no provider login or inference calls by itself. Build from this
+checkout, then open the desktop app without backend environment variables:
 
 ```sh
 cd packages/selfhost
 npm ci
+cd ../../apps/desktop
+cargo run --locked
 ```
 
-Create a private data directory and first-account setup code. The code is read
-from a file, not a command-line argument or log. Keep the file private and
-paste its contents into the GPUI setup field when asked.
+The app opens to **Create your first account**. Enter an account name and a
+password of at least 12 characters, then select **Create first account**. This
+action starts a loopback-only local account server, establishes a private owner
+secret, creates the account and its Personal workspace, and signs in. No setup
+code needs to be copied. The app does not create local credentials or start
+the server before Create account or Sign in is selected. The password is masked.
+For a returning account, select **Sign in**. The 30-day device token stays in
+app memory and is revoked by **Sign out**; sign in again after an app restart.
+The server stores only a hash of each device token. Each account has separate
+Pi Durable and OptChat SQLite files.
+
+After sign-in, **Enable provider storage** explicitly creates a private
+encryption key and restarts the local server. It does not start ChatGPT sign-in.
+The model menu offers **Set up provider** for a separate human-triggered
+connection. The offline model remains available throughout. No real OAuth or
+paid model call was made while building this branch.
+
+## Separate account server
+
+Operators who run the account server separately must supply an owner-private
+bootstrap token file. This path retains the setup-code boundary for remote or
+separately managed enrollment.
 
 ```sh
 umask 077
@@ -22,20 +43,9 @@ MORONS_BOOTSTRAP_TOKEN_FILE="$HOME/.config/morons/bootstrap" \
 npm run start:account
 ```
 
-In another terminal, launch the Mac app without a bearer or password on its
-command line:
-
-```sh
-cd apps/desktop
-MORONS_BACKEND_MODE=named MORONS_BACKEND_URL=http://127.0.0.1:8787 cargo run
-```
-
-Choose an account name and a password of at least 12 characters in GPUI. For
-the first account, enter the setup code and select **Create first account**,
-then **Sign in**. The password field is masked. The 30-day device token stays
-in app memory and is revoked by **Sign out**; sign in again after an app restart.
-The server stores only a hash of each device token. Each account has separate
-Pi Durable and OptChat SQLite files.
+Launch GPUI with `MORONS_BACKEND_MODE=named` and the account server's HTTPS
+origin, or its loopback HTTP origin. This separate-server first enrollment
+still requires the operator's setup code in GPUI.
 
 The repository moron is enabled only when an operator supplies
 `MORONS_REPOSITORY` and a comma-separated exact `MORONS_SOURCE_PATHS` allowlist
