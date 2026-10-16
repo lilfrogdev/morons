@@ -1182,6 +1182,8 @@ async fn named_http(
                 state.snapshot = Snapshot::empty();
                 state.models.clear();
                 state.selected_model = None;
+                state.selected_effort = None;
+                state.model_favorites.clear();
                 state.fast_mode = false;
                 state.fast_available = false;
                 state.model = None;
