@@ -15,6 +15,12 @@ export function openCatalog(path) {
     CREATE TABLE IF NOT EXISTS review_intents (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), branch TEXT NOT NULL, patch TEXT NOT NULL, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS visualizations (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), document TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);`);
   db.exec('CREATE TABLE IF NOT EXISTS model_favorites (provider TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider, model_id))');
+  db.exec(`CREATE TABLE IF NOT EXISTS external_usage (
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), kind TEXT NOT NULL,
+    provider TEXT NOT NULL, model_id TEXT NOT NULL, timestamp INTEGER NOT NULL,
+    usage_json TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS external_usage_session_time ON external_usage(session_id, timestamp);`);
   db.exec(`CREATE TABLE IF NOT EXISTS memory_sync_cursors (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id),
     last_entry_id INTEGER NOT NULL CHECK(last_entry_id > 0),
@@ -56,7 +62,22 @@ export function openCatalog(path) {
         .run(id, name.trim(), rules, preferences, Date.now(), workspaceId);
       return moron(getMoron.get(id));
     },
-    listSessions: (moronId) => db.prepare("SELECT id, moron_id, created_at FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
+    listSessions: (moronId) => db.prepare("SELECT id, moron_id, conversation_id, created_at FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
+    saveExternalUsage({ id, sessionId, kind, provider, modelId, timestamp, usage }) {
+      if (!getSession.get(sessionId) || !['memory'].includes(kind) ||
+          typeof id !== 'string' || typeof provider !== 'string' || typeof modelId !== 'string' ||
+          !Number.isSafeInteger(timestamp)) throw new Error('invalid_external_usage');
+      db.prepare('INSERT OR IGNORE INTO external_usage VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(id, sessionId, kind, provider, modelId, timestamp, JSON.stringify(usage));
+    },
+    listExternalUsage(sessionIds) {
+      if (!sessionIds.length) return [];
+      const statement = db.prepare(`SELECT id, session_id, kind, provider, model_id, timestamp, usage_json
+        FROM external_usage WHERE session_id IN (${sessionIds.map(() => '?').join(',')}) ORDER BY timestamp, id`);
+      return statement.all(...sessionIds).map((row) => ({ id: row.id, sessionId: row.session_id,
+        kind: row.kind, provider: row.provider, modelId: row.model_id,
+        timestamp: row.timestamp, usage: JSON.parse(row.usage_json) }));
+    },
     getSession: (id) => session(getSession.get(id)),
     getSessionByConversation: (id) => session(db.prepare("SELECT * FROM sessions WHERE conversation_id = ?").get(id)),
     createSession(id, moronId, conversationId) {
@@ -146,6 +167,7 @@ export function openCatalog(path) {
 }
 
 function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, pinned: Boolean(row.pinned) }; }
-function session(row) { return row && { id: row.id, moronId: row.moron_id, conversationId: row.conversation_id, createdAt: row.created_at }; }
+function session(row) { return row && { id: row.id, moronId: row.moron_id,
+  conversationId: Number(row.conversation_id), createdAt: row.created_at }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }
 function reviewSummary(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, checks: JSON.parse(row.checks).map(({ ok }) => ({ ok })), decision: row.decision, createdAt: row.created_at }; }

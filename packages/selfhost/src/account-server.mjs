@@ -5,6 +5,7 @@ import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openAccounts } from './accounts.mjs';
 import { openFixtureServer } from './server.mjs';
+import { piVersionStatus } from './pi-version.mjs';
 import { acquireOwnerLock } from './owner-lock.mjs';
 import { createProviderFlow } from './provider-flow.mjs';
 import { openProviderRuntime } from './provider-runtime.mjs';
@@ -98,7 +99,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       try {
         server = await openFixtureServer({ databasePath: join(directory, 'pi.sqlite'),
           ownerToken: internalToken, repositoryPlan: accountPlan, accountId: account.id,
-          providerModels: providerRuntime?.models ?? null, providerModelId });
+          providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
           providerRuntime, accountPlan };
       } catch (error) { await server?.close(); await providerRuntime?.close?.(); throw error; }
@@ -140,6 +141,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       if (!account) return send(response, 401, { error: 'unauthorized' });
       if (path === '/v1/session/me' && request.method === 'GET')
         return send(response, 200, { account: { id: account.id, name: account.name, administrator: account.administrator }, expiresAt: account.expiresAt });
+      if (path === '/v1/runtime/pi/version' && request.method === 'GET')
+        return send(response, 200, await piVersionStatus());
       if (path === '/v1/workspaces' && request.method === 'GET')
         return send(response, 200, { workspaces: accounts.workspaces(account.id) });
       if (path === '/v1/workspaces' && request.method === 'POST') {
@@ -181,6 +184,11 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       const body = ['POST', 'PUT', 'PATCH'].includes(request.method) ? await bytes(request) : undefined;
       if (path === '/v1/morons' && ['GET', 'POST'].includes(request.method)) {
         const workspaceId = request.method === 'GET' ? requestUrl.searchParams.get('workspaceId') ?? 'personal' : json(body)?.workspaceId ?? 'personal';
+        if (!accounts.workspace(account.id, workspaceId))
+          return send(response, 404, { error: 'workspace_not_found' });
+      }
+      if (path === '/v1/usage' && request.method === 'GET') {
+        const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
         if (!accounts.workspace(account.id, workspaceId))
           return send(response, 404, { error: 'workspace_not_found' });
       }

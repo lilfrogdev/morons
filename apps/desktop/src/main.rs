@@ -26,6 +26,9 @@ const ICON_STAR_FILLED: &[u8] = include_bytes!("assets/tabler/star-filled.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("assets/tabler/chevron-down.svg");
 const ICON_BOLT: &[u8] = include_bytes!("assets/tabler/bolt.svg");
 fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
+fn activation_key(event: &KeyDownEvent) -> bool {
+    !event.keystroke.modifiers.modified() && matches!(event.keystroke.key.as_str(), "enter" | "space")
+}
 fn model_icon(model_id: &str) -> &'static [u8] {
     let id = model_id.to_ascii_lowercase();
     if id.starts_with("gpt-") || id.starts_with("chatgpt-") ||
@@ -33,9 +36,9 @@ fn model_icon(model_id: &str) -> &'static [u8] {
         ICON_OPENAI
     } else { ICON_CPU }
 }
-fn provider_name(provider: &str) -> &str { if provider == "morons-fixture" { "Demo · synthetic replies" } else if provider == "openai" { "OpenAI" } else { provider } }
+fn provider_name(provider: &str) -> &str { if provider == "openai" { "OpenAI" } else { provider } }
 fn model_label(provider: &str, label: &str) -> String {
-    if provider == "morons-fixture" { label.replace("Offline fixture", "Demo").replace("Offline alternate", "Demo alternate") } else { label.to_owned() }
+    if provider == "morons-fixture" { "Set up provider".into() } else { label.to_owned() }
 }
 fn model_version(id: &str) -> (u16, u16) {
     let version = id.strip_prefix("gpt-").or_else(|| id.strip_prefix('o')).unwrap_or("");
@@ -72,6 +75,11 @@ struct Chat {
     show_morons: bool,
     show_repositories: bool,
     show_profile: bool,
+    show_usage: bool,
+    usage_window: String,
+    usage_provider: Option<String>,
+    usage_model: Option<String>,
+    usage_menu: Option<&'static str>,
     drafts: drafts::Drafts,
     _input_subscription: Subscription,
 }
@@ -123,6 +131,11 @@ impl Chat {
                             view.show_workspaces = false;
                             view.show_create_moron = false;
                             view.show_profile = false;
+                            view.show_usage = false;
+                            view.usage_menu = None;
+                            view.usage_provider = None;
+                            view.usage_model = None;
+                            view.usage_window = "all".into();
                             view.workspace_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.moron_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.model_section.clear();
@@ -140,6 +153,14 @@ impl Chat {
                         if view.state.selected_workspace != state.selected_workspace {
                             view.show_workspaces = false;
                             view.show_profile = false;
+                            view.usage_menu = None;
+                            view.usage_provider = None;
+                            view.usage_model = None;
+                            view.usage_window = "all".into();
+                            if view.show_usage {
+                                view.command(Command::LoadUsage { window: "all".into(),
+                                    provider: None, model: None }, cx);
+                            }
                             view.workspace_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
                         if view.state.selected_moron != state.selected_moron {
@@ -184,6 +205,11 @@ impl Chat {
             show_morons: true,
             show_repositories: true,
             show_profile: false,
+            show_usage: false,
+            usage_window: "all".into(),
+            usage_provider: None,
+            usage_model: None,
+            usage_menu: None,
             drafts: drafts::Drafts::default(),
             _input_subscription: input_subscription,
         }
@@ -206,11 +232,27 @@ impl Chat {
             .then_with(|| b.id.cmp(&a.id)));
         visible
     }
+    fn request_usage(&mut self, cx: &mut Context<Self>) {
+        self.command(Command::LoadUsage { window: self.usage_window.clone(),
+            provider: self.usage_provider.clone(), model: self.usage_model.clone() }, cx);
+    }
+    fn open_usage(&mut self, cx: &mut Context<Self>) {
+        self.show_usage = true;
+        self.show_profile = false;
+        self.usage_menu = None;
+        self.usage_window = "all".into();
+        self.usage_provider = None;
+        self.usage_model = None;
+        self.request_usage(cx);
+        cx.notify();
+    }
     fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_model = !self.show_model;
         self.show_effort = false;
         if self.show_model {
-            self.model_section = self.state.selected_model.as_ref().map(|item| item.0.clone())
+            self.model_section = self.state.selected_model.as_ref()
+                .filter(|(provider, _)| self.state.models.iter().any(|model| &model.provider == provider))
+                .map(|item| item.0.clone())
                 .or_else(|| self.state.models.first().map(|item| item.provider.clone())).unwrap_or_default();
             self.model_cursor = 0;
             self.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
@@ -311,6 +353,150 @@ impl Chat {
         let url = self.provider_callback.read(cx).text().to_owned();
         self.command(Command::ProviderCallback(url), cx);
         self.provider_callback.update(cx, |field, cx| { field.reset(); cx.notify(); });
+    }
+    fn usage_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let report = self.state.usage.clone();
+        let windows = [("all", "All time"), ("24h", "24 hours"), ("7d", "7 days"),
+            ("30d", "30 days"), ("90d", "90 days")];
+        let window_label = windows.iter().find(|(key, _)| *key == self.usage_window)
+            .map(|(_, label)| *label).unwrap_or("All time");
+        let provider_label = self.usage_provider.as_deref().unwrap_or("All providers").to_owned();
+        let model_label = self.usage_model.as_deref().unwrap_or("All models").to_owned();
+        let provider_choices = report.as_ref().map(|item| item.options.providers.clone()).unwrap_or_default();
+        let model_choices = report.as_ref().map(|item| item.options.models.clone()).unwrap_or_default();
+        div().id("usage-panel").role(gpui::Role::Region).aria_label("Usage")
+            .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
+            .child(div().w_full().max_w(px(820.)).mx_auto().flex().flex_col().gap_4()
+                .child(div().flex().items_center().justify_between()
+                    .child(div().text_xl().font_weight(FontWeight::BOLD).child("Usage"))
+                    .child(button("usage-back", "Back to chat").on_click(cx.listener(|view, _, _, cx| {
+                        view.show_usage = false; view.usage_menu = None; cx.notify();
+                    })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                        if activation_key(event) { view.show_usage = false; view.usage_menu = None;
+                            cx.stop_propagation(); cx.notify(); }
+                    }))))
+                .child(div().text_sm().text_color(rgb(0x626772))
+                    .child("Completed model calls in this workspace"))
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(button("usage-window", window_label).on_click(cx.listener(|view, _, _, cx| {
+                        view.usage_menu = if view.usage_menu == Some("window") { None } else { Some("window") };
+                        cx.stop_propagation(); cx.notify();
+                    })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                        if activation_key(event) { view.usage_menu = if view.usage_menu == Some("window") { None } else { Some("window") };
+                            cx.stop_propagation(); cx.notify(); }
+                    })))
+                    .child(button("usage-provider", "Provider").child(format!(" · {provider_label}"))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.usage_menu = if view.usage_menu == Some("provider") { None } else { Some("provider") };
+                            cx.stop_propagation(); cx.notify();
+                        })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                            if activation_key(event) { view.usage_menu = if view.usage_menu == Some("provider") { None } else { Some("provider") };
+                                cx.stop_propagation(); cx.notify(); }
+                        })))
+                    .child(button("usage-model", "Model").child(format!(" · {model_label}"))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.usage_menu = if view.usage_menu == Some("model") { None } else { Some("model") };
+                            cx.stop_propagation(); cx.notify();
+                        })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                            if activation_key(event) { view.usage_menu = if view.usage_menu == Some("model") { None } else { Some("model") };
+                                cx.stop_propagation(); cx.notify(); }
+                        }))))
+                .when(self.usage_menu == Some("window"), |d| d.child(div().id("usage-window-options")
+                    .flex().flex_wrap().gap_1().children(windows.into_iter().map(|(key, label)| {
+                        div().id(SharedString::from(format!("usage-window-{key}")))
+                            .role(gpui::Role::Button).aria_label(label).focusable().tab_stop(true)
+                            .px_2().py_1().rounded_sm().cursor_pointer().bg(rgb(0xF1F3F5))
+                            .child(label).on_click(cx.listener(move |view, _, _, cx| {
+                                view.usage_window = key.into(); view.usage_menu = None;
+                                view.request_usage(cx); cx.stop_propagation();
+                            })).on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.usage_window = key.into(); view.usage_menu = None;
+                                    view.request_usage(cx); cx.stop_propagation(); }
+                            }))
+                    }))))
+                .when(self.usage_menu == Some("provider"), |d| d.child(div().id("usage-provider-options")
+                    .flex().flex_wrap().gap_1()
+                    .child(button("usage-provider-all", "All providers").on_click(cx.listener(|view, _, _, cx| {
+                        view.usage_provider = None; view.usage_model = None; view.usage_menu = None;
+                        view.request_usage(cx); cx.stop_propagation();
+                    })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                        if activation_key(event) { view.usage_provider = None; view.usage_model = None;
+                            view.usage_menu = None; view.request_usage(cx); cx.stop_propagation(); }
+                    })))
+                    .children(provider_choices.into_iter().map(|provider| {
+                        let value = provider.clone();
+                        let keyboard_value = provider.clone();
+                        div().id(SharedString::from(format!("usage-provider-{provider}")))
+                            .role(gpui::Role::Button).aria_label(SharedString::from(provider.clone()))
+                            .focusable().tab_stop(true).px_2().py_1().rounded_sm()
+                            .cursor_pointer().bg(rgb(0xF1F3F5)).child(provider)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.usage_provider = Some(value.clone()); view.usage_model = None;
+                                view.usage_menu = None; view.request_usage(cx); cx.stop_propagation();
+                            })).on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.usage_provider = Some(keyboard_value.clone());
+                                    view.usage_model = None; view.usage_menu = None;
+                                    view.request_usage(cx); cx.stop_propagation(); }
+                            }))
+                    }))))
+                .when(self.usage_menu == Some("model"), |d| d.child(div().id("usage-model-options")
+                    .flex().flex_wrap().gap_1()
+                    .child(button("usage-model-all", "All models").on_click(cx.listener(|view, _, _, cx| {
+                        view.usage_model = None; view.usage_menu = None;
+                        view.request_usage(cx); cx.stop_propagation();
+                    })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                        if activation_key(event) { view.usage_model = None; view.usage_menu = None;
+                            view.request_usage(cx); cx.stop_propagation(); }
+                    })))
+                    .children(model_choices.into_iter().filter(|item| self.usage_provider.as_ref()
+                        .is_none_or(|provider| *provider == item.provider)).map(|item| {
+                        let value = item.model.clone();
+                        let provider = item.provider.clone();
+                        let keyboard_value = value.clone();
+                        let keyboard_provider = provider.clone();
+                        let label = format!("{} · {}", item.provider, item.model);
+                        div().id(SharedString::from(format!("usage-model-{}-{}", item.provider, item.model)))
+                            .role(gpui::Role::Button).aria_label(SharedString::from(label.clone()))
+                            .focusable().tab_stop(true).px_2().py_1().rounded_sm()
+                            .cursor_pointer().bg(rgb(0xF1F3F5)).child(label)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.usage_provider = Some(provider.clone()); view.usage_model = Some(value.clone());
+                                view.usage_menu = None; view.request_usage(cx); cx.stop_propagation();
+                            })).on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.usage_provider = Some(keyboard_provider.clone());
+                                    view.usage_model = Some(keyboard_value.clone()); view.usage_menu = None;
+                                    view.request_usage(cx); cx.stop_propagation(); }
+                            }))
+                    }))))
+                .when(self.state.usage_loading, |d| d.child(div().text_sm().child("Loading usage…")))
+                .when(self.state.usage_error, |d| d.child(div().text_sm()
+                    .text_color(rgb(0xA04438)).child("Could not load usage")))
+                .when_some(report, |d, report| {
+                    let total = report.totals;
+                    d.child(div().flex().flex_wrap().gap_3()
+                        .child(usage_stat("Calls", total.calls.to_string()))
+                        .child(usage_stat("Tokens", total.total_tokens.to_string()))
+                        .child(usage_stat("Input", total.input_tokens.to_string()))
+                        .child(usage_stat("Output", total.output_tokens.to_string()))
+                        .child(usage_stat("Cache read", total.cache_read_tokens.to_string()))
+                        .child(usage_stat("Cache write", total.cache_write_tokens.to_string()))
+                        .child(usage_stat("Estimated cost", format!("${:.4}", total.estimated_cost_usd)))
+                        .child(usage_stat("Unknown cost", total.unknown_cost_calls.to_string())))
+                    .child(div().font_weight(FontWeight::BOLD).child("Providers"))
+                    .when(report.providers.is_empty(), |d| d.child(div().text_sm().child("No completed calls in this range")))
+                    .children(report.providers.iter().map(|item| usage_row(item.provider.clone(), &item.metrics)))
+                    .child(div().font_weight(FontWeight::BOLD).child("Models"))
+                    .children(report.models.iter().map(|item| usage_row(format!("{} · {}", item.provider, item.model), &item.metrics)))
+                    .child(div().font_weight(FontWeight::BOLD).child("Over time"))
+                    .children(report.periods.iter().map(|item| usage_row(item.start.clone(), &item.metrics)))
+                    .child(div().text_xs().text_color(rgb(0x626772)).child(format!(
+                        "Calls by path: {} main · {} handoff · {} memory · subagents {}",
+                        report.coverage.kinds.main, report.coverage.kinds.handoff,
+                        report.coverage.kinds.memory,
+                        if report.coverage.subagents == "not_instrumented" { "not instrumented" }
+                        else { report.coverage.subagents.as_str() })))
+                    .child(div().text_xs().text_color(rgb(0x626772)).child(report.coverage.note))
+                }))
     }
     fn sidebar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.state.selected_moron.as_deref();
@@ -475,12 +661,60 @@ impl Chat {
                                 .child(div().px_2().py_2().text_size(px(12.))
                                     .text_color(rgb(0x626772)).child("No repositories connected"))))
                     )
-                    .child(div().px_2().pt_2().text_size(px(11.))
-                        .text_color(rgb(0x626772)).child(self.state.status))
+                    .when(self.state.status != "Connected", |d| d.child(
+                        div().px_2().pt_2().text_size(px(11.))
+                            .text_color(rgb(0x626772)).child(self.state.status)))
                     .when(self.show_profile && self.state.account_name.is_some(), |d| d.child(
                         div().id("profile-menu").role(gpui::Role::Region).aria_label("Account menu")
                             .p_2().rounded(px(6.)).border_1().border_color(rgb(0xE3E5E8))
+                            .flex().flex_col().gap_1()
                             .bg(rgb(0xFFFFFF))
+                            .child(button("profile-usage", "Usage")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.open_usage(cx); cx.stop_propagation();
+                                }))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.open_usage(cx); cx.stop_propagation();
+                                    }
+                                })))
+                            .child(button("profile-pi-version", "Pi version & updates")
+                                .on_click(cx.listener(|view, _, _, cx| view.command(Command::CheckPiVersion, cx)))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.command(Command::CheckPiVersion, cx);
+                                        cx.stop_propagation();
+                                    }
+                                })))
+                            .when(self.state.pi_version_loading, |d| d.child(
+                                div().px_2().text_size(px(11.)).text_color(rgb(0x626772))
+                                    .child("Checking Pi releases…")))
+                            .when(self.state.pi_version_error, |d| d.child(
+                                div().px_2().text_size(px(11.)).text_color(rgb(0xA13E35))
+                                    .child("Could not check Pi versions")))
+                            .when_some(self.state.pi_version.clone(), |d, version| {
+                                let summary = match version.status.as_str() {
+                                    "candidate" => "Newer Pi packages published; compatibility unverified",
+                                    "current" => "Installed Pi packages are current",
+                                    _ => "Latest Pi release is unknown",
+                                };
+                                d.child(div().id("pi-version-status").role(gpui::Role::Region)
+                                    .aria_label("Pi version status").px_2().py_1()
+                                    .text_size(px(11.)).text_color(rgb(0x626772))
+                                    .flex().flex_col().gap_1()
+                                    .child(format!("Installed: ai {}, durable {}",
+                                        version.installed.ai, version.installed.durable))
+                                    .when_some(version.latest_published, |d, latest| d.child(
+                                        format!("Published: ai {}, durable {}", latest.ai, latest.durable)))
+                                    .child(summary)
+                                    .child(if version.update_supported {
+                                        "Update in a tested Morons release; keep the previous bundle and data backup for rollback."
+                                    } else {
+                                        "Update requires a tested Morons build. Keep the previous bundle and a data backup for rollback."
+                                    }))
+                            })
                             .child(button("profile-sign-out", "Sign out")
                                 .on_click(cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)))
                                 .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
@@ -588,6 +822,19 @@ fn primary_button(id: &'static str, label: &'static str) -> Stateful<Div> {
         .bg(rgb(0x24313D)).text_color(rgb(0xFFFFFF)).text_sm()
         .cursor_pointer().hover(|s| s.bg(rgb(0x35495A))).child(label)
 }
+fn usage_stat(label: &'static str, value: String) -> impl IntoElement {
+    div().min_w(px(130.)).p_3().rounded_sm().border_1().border_color(rgb(0xE3E5E8))
+        .flex().flex_col().gap_1()
+        .child(div().text_xs().text_color(rgb(0x626772)).child(label))
+        .child(div().text_lg().font_weight(FontWeight::BOLD).child(value))
+}
+fn usage_row(label: String, metrics: &morons_desktop::transport::UsageMetrics) -> impl IntoElement {
+    div().flex().justify_between().gap_3().py_2().border_b_1().border_color(rgb(0xE3E5E8))
+        .child(div().min_w_0().truncate().text_sm().child(label))
+        .child(div().text_sm().text_color(rgb(0x626772))
+            .child(format!("{} calls · {} tokens · ${:.4} estimated",
+                metrics.calls, metrics.total_tokens, metrics.estimated_cost_usd)))
+}
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = window.bounds().size.width < px(760.);
@@ -602,10 +849,12 @@ impl Render for Chat {
             self.state.status
         };
         let model = self.state.model.as_deref().unwrap_or("No model connected");
-        let needs_provider = self.state.selected_model.as_ref().is_some_and(|(provider, _)|
-            provider == "morons-fixture") && self.state.provider_state.as_deref() != Some("connected");
-        let model_display = if self.state.selected_model.as_ref().is_some_and(|(provider, _)|
-            provider == "morons-fixture") { "Demo · synthetic replies".to_owned() } else {
+        let needs_provider = self.state.models.is_empty() || self.state.selected_model.as_ref()
+            .is_some_and(|(provider, _)| provider == "morons-fixture");
+        let model_display = if needs_provider {
+            if self.state.provider_state.as_deref() == Some("connected") { "Choose a model".to_owned() }
+            else { "Set up provider".to_owned() }
+        } else {
             model_label(self.state.selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or(""), model)
         };
         let effort_label = match self.state.selected_effort.as_deref() {
@@ -749,21 +998,23 @@ impl Render for Chat {
             .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
             .on_click(cx.listener(|view, _, _, cx| {
-                if view.show_model || view.show_effort || view.show_profile || view.show_workspaces {
+                if view.show_model || view.show_effort || view.show_profile || view.show_workspaces || view.usage_menu.is_some() {
                     view.show_model = false;
                     view.show_effort = false;
                     view.show_profile = false;
                     view.show_workspaces = false;
+                    view.usage_menu = None;
                     cx.notify();
                 }
             }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if (view.show_model || view.show_effort || view.show_profile || view.show_workspaces) && event.keystroke.key == "escape" {
+                if (view.show_model || view.show_effort || view.show_profile || view.show_workspaces || view.usage_menu.is_some()) && event.keystroke.key == "escape" {
                     view.show_model = false;
                     view.show_effort = false;
                     view.show_profile = false;
                     view.show_workspaces = false;
-                    window.focus(&view.input.focus_handle(cx), cx);
+                    view.usage_menu = None;
+                    if !view.show_usage { window.focus(&view.input.focus_handle(cx), cx); }
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -791,10 +1042,11 @@ impl Render for Chat {
                                     .font_weight(FontWeight::BOLD)
                                     .child("Morons"),
                             )
-                            .child(div().text_sm().text_color(rgb(0x667786)).child(status)),
+                            .when(status != "Connected", |d| d.child(
+                                div().text_sm().text_color(rgb(0x667786)).child(status))),
                     )
                     .child(div().flex().gap_2()
-                        .when(!self.state.account_login, |d| d.child(button("reconnect", "Reconnect").on_click(
+                        .when(!self.state.account_login && self.state.status == "Disconnected" && self.state.error.is_some(), |d| d.child(button("reconnect", "Try now").on_click(
                             cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
                         )))),
             ))
@@ -875,7 +1127,8 @@ impl Render for Chat {
                         .child(button("provider-cancel", "Cancel sign-in").on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderCancel, cx))))
                     )
             ))
-            .when(!self.state.account_login, |d| d.child(
+            .when(!self.state.account_login && self.show_usage, |d| d.child(self.usage_panel(cx)))
+            .when(!self.state.account_login && !self.show_usage, |d| d.child(
                 div()
                     .id("history")
                     .role(gpui::Role::List)
@@ -952,7 +1205,7 @@ impl Render for Chat {
                         .child(error),
                 )
             })
-            .when(!self.state.account_login, |d| d.child(
+            .when(!self.state.account_login && !self.show_usage, |d| d.child(
                 div().px(px(if narrow { 12. } else { 16. }))
                     .pb(px(16.)).relative().child(
                     div()
@@ -1158,7 +1411,8 @@ impl Render for Chat {
                                                 }))
                                         })))
                                     .child(div().flex_1().min_w_0().pt(px(7.)).px(px(12.)).pb(px(9.)).flex().flex_col()
-                                        .when(needs_provider || provider_state.as_deref() == Some("connected"), |d| d.child(
+                                        .when((needs_provider && provider_state.as_deref() != Some("connected")) ||
+                                            (!needs_provider && provider_state.as_deref() == Some("connected")), |d| d.child(
                                             div().id("provider-setup-choice").role(gpui::Role::Button)
                                                 .aria_label(if provider_state.as_deref() == Some("connected") { "Disconnect ChatGPT" } else { "Set up provider" })
                                                 .h(px(42.)).px_2().mb_1().rounded(px(6.))
@@ -1249,10 +1503,12 @@ impl Render for Chat {
                                                         .role(gpui::Role::Button)
                                                         .aria_label(if favorite { "Remove from favorites" } else { "Add to favorites" })
                                                         .aria_selected(favorite).focusable().tab_stop(true)
-                                                        .w(px(24.)).h(px(26.)).rounded(px(4.))
+                                                        .flex_shrink_0().w(px(32.)).h(px(32.)).rounded(px(6.))
+                                                        .bg(if favorite { rgb(0xFFF0B8) } else { rgb(0xF7F3E8) })
+                                                        .hover(|d| d.bg(rgb(0xFFE49A)))
                                                         .flex().items_center().justify_center().cursor_pointer()
                                                         .child(svg().data(if favorite { ICON_STAR_FILLED } else { ICON_STAR })
-                                                            .w(px(14.)).h(px(14.)))
+                                                            .w(px(20.)).h(px(20.)).text_color(rgb(0x9A6200)))
                                                         .on_click(cx.listener(move |view, _, _, cx| {
                                                             view.toggle_favorite(star_provider.clone(), star_id.clone(), !favorite, cx);
                                                             cx.stop_propagation();

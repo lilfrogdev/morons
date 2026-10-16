@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
+import { timingSafeEqual, createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,6 +19,7 @@ import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
 import { installFastModels, fastModelId, isFastModelId, baseModelId } from './fast-models.mjs';
+import { collectUsage, usageFilters } from './usage.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
 const isRepositoryMoron = (moron) => moron &&
@@ -115,7 +116,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, providerModels = null, providerModelId = null, accountId = 'local-owner' }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true }) {
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
@@ -147,7 +148,11 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
-      piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models) });
+      piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models,
+        ({ session, model, answer }) => catalog.saveExternalUsage({
+          id: randomUUID(),
+          sessionId: session.id, kind: 'memory', provider: model.provider,
+          modelId: model.id, timestamp: answer.timestamp ?? Date.now(), usage: answer.usage })) });
     handoffExtension = createHandoffExtension({ store: handoffStore, catalog,
       getSourceUserEntryId: async ({ source }) => {
         const conversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
@@ -258,7 +263,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const allowed = new Set(available.map((model) => `${model.provider}\0${model.id}`));
     const agent = await conversation.agent(BACKGROUND_CONTEXT);
     const selected = agent.model;
-    const known = models.getModels().filter((model) => !isFastModelId(model.id)).slice(0, 127).map((model) => ({
+    const known = models.getModels().filter((model) => !isFastModelId(model.id) &&
+      (fixtureEnabled || model.provider !== 'morons-fixture')).slice(0, 127).map((model) => ({
       provider: model.provider, id: model.id, label: model.name,
       available: allowed.has(`${model.provider}\0${model.id}`),
       efforts: effortOptions(model),
@@ -266,7 +272,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         ? { releaseDate: model.releaseDate } : {}),
     }));
     const selectedId = selected && baseModelId(selected.modelId);
-    if (selected && !known.some((model) => model.provider === selected.provider && model.id === selectedId))
+    if (selected && (fixtureEnabled || selected.provider !== 'morons-fixture') &&
+        !known.some((model) => model.provider === selected.provider && model.id === selectedId))
       known.push({ provider: selected.provider, id: selectedId, label: selectedId, available: false, efforts: [] });
     const fastAvailable = selected?.provider === 'openai' &&
       allowed.has(`openai\0${fastModelId(selectedId)}`);
@@ -275,6 +282,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       selectedEffort: agent.thinkingLevel, models: known, favorites: catalog.listModelFavorites() };
   }
   async function chat(conversation, session, body, displayText = body?.text, waitForAnswer = true) {
+    if (!fixtureEnabled && (await conversation.agent(BACKGROUND_CONTEXT)).model?.provider === 'morons-fixture')
+      return { status: 409, body: { error: 'provider_setup_required' } };
     const sessionId = session.id;
     if (typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
       return { status: 400, body: { error: "invalid_text" } };
@@ -463,7 +472,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const requestUrl = new URL(request.url ?? "/", `http://${host}`);
     const path = requestUrl.pathname;
     try {
-      if (request.method === "GET" && path === "/v1/fixture/status")
+      if (fixtureEnabled && request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
       if (request.method === "GET" && path === "/v1/models")
         return send(response, 200, await modelCatalog(root));
@@ -471,10 +480,17 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const body = await readBody(request);
         if (typeof body?.provider !== 'string' || typeof body?.id !== 'string' ||
             typeof body?.favorite !== 'boolean' || body.provider.length > 80 || body.id.length > 128 ||
-            !models.getModel(body.provider, body.id))
+            !models.getModel(body.provider, body.id) ||
+            (!fixtureEnabled && body.provider === 'morons-fixture'))
           return send(response, 400, { error: 'invalid_model' });
         catalog.setModelFavorite(body.provider, body.id, body.favorite);
         return send(response, 200, { favorites: catalog.listModelFavorites() });
+      }
+      if (request.method === 'GET' && path === '/v1/usage') {
+        let filters;
+        try { filters = usageFilters(requestUrl.searchParams); }
+        catch { return send(response, 400, { error: 'invalid_usage_filter' }); }
+        return send(response, 200, await collectUsage({ catalog, harness, models, filters }));
       }
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
@@ -668,14 +684,14 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
           return send(response, result.status, result.body);
         }
       }
-      if (request.method === "GET" && path === "/v1/fixture/history") {
+      if (fixtureEnabled && request.method === "GET" && path === "/v1/fixture/history") {
         const items = (await root.entries({}, 200, undefined, BACKGROUND_CONTEXT)).items;
         return send(response, 200, {
           messages: items.reverse().filter((entry) => entry.kind === "pi.user" || entry.kind === "pi.assistant")
             .map((entry) => ({ id: entry.id, role: entry.kind === "pi.user" ? "user" : "assistant", text: entryText(entry) })),
         });
       }
-      if (request.method === "POST" && path === "/v1/fixture/chat") {
+      if (fixtureEnabled && request.method === "POST" && path === "/v1/fixture/chat") {
         const body = await readBody(request);
         if (typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
           return send(response, 400, { error: "invalid_text" });

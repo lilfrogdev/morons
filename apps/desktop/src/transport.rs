@@ -25,6 +25,12 @@ pub struct State {
     pub named_morons: Vec<(String, String)>,
     pub pinned_morons: Vec<String>,
     pub account_name: Option<String>,
+    pub pi_version: Option<PiVersion>,
+    pub pi_version_loading: bool,
+    pub pi_version_error: bool,
+    pub usage: Option<UsageReport>,
+    pub usage_loading: bool,
+    pub usage_error: bool,
     pub selected_moron: Option<String>,
     pub workspaces: Vec<(String, String)>,
     pub selected_workspace: Option<String>,
@@ -60,6 +66,12 @@ impl Default for State {
             named_morons: vec![],
             pinned_morons: vec![],
             account_name: None,
+            pi_version: None,
+            pi_version_loading: false,
+            pi_version_error: false,
+            usage: None,
+            usage_loading: false,
+            usage_error: false,
             selected_moron: None,
             workspaces: vec![],
             selected_workspace: None,
@@ -105,6 +117,8 @@ pub enum Command {
     AccountLogin { name: String, password: String },
     AccountCreate { name: String, password: String, bootstrap: String },
     AccountLogout,
+    CheckPiVersion,
+    LoadUsage { window: String, provider: Option<String>, model: Option<String> },
     ProviderUnlock,
     ProviderStart,
     ProviderCallback(String),
@@ -116,6 +130,84 @@ pub enum Command {
 pub enum ReviewDecision {
     Approve,
     Reject,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiVersion {
+    pub installed: PiPackages,
+    pub latest_published: Option<PiPackages>,
+    pub status: String,
+    pub update_supported: bool,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct PiPackages {
+    pub ai: String,
+    pub durable: String,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageMetrics {
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
+    pub unknown_cost_calls: u64,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageProvider {
+    pub provider: String,
+    #[serde(flatten)]
+    pub metrics: UsageMetrics,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageModel {
+    pub provider: String,
+    pub model: String,
+    #[serde(flatten)]
+    pub metrics: UsageMetrics,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsagePeriod {
+    pub start: String,
+    #[serde(flatten)]
+    pub metrics: UsageMetrics,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageOptions {
+    pub providers: Vec<String>,
+    pub models: Vec<UsageModelChoice>,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageModelChoice {
+    pub provider: String,
+    pub model: String,
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageCoverage {
+    pub kinds: UsageKinds,
+    pub actual_tokens: bool,
+    pub actual_spend: bool,
+    pub subagents: String,
+    pub note: String,
+}
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageKinds { pub main: u64, pub handoff: u64, pub memory: u64 }
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageScope { pub workspace_id: String }
+#[derive(Clone, serde::Deserialize)]
+pub struct UsageReport {
+    pub scope: UsageScope,
+    pub totals: UsageMetrics,
+    pub providers: Vec<UsageProvider>,
+    pub models: Vec<UsageModel>,
+    pub periods: Vec<UsagePeriod>,
+    pub options: UsageOptions,
+    pub coverage: UsageCoverage,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,11 +294,13 @@ impl Worker {
                     Config::Local => local_account(&mut receiver, &publisher).await,
                     Config::Http { url, bearer } => http(url, bearer, receiver, publisher).await,
                     Config::Named { url, bearer } => {
-                        if named_http(url.clone(), bearer, &mut receiver, &publisher, None).await {
-                            named_account(url, &mut receiver, &publisher).await;
+                        match named_http(url.clone(), bearer, &mut receiver, &publisher, None).await {
+                            NamedExit::Closed => {},
+                            exit => named_account(url, &mut receiver, &publisher,
+                                matches!(exit, NamedExit::Expired)).await,
                         }
                     }
-                    Config::NamedLogin { url } => named_account(url, &mut receiver, &publisher).await,
+                    Config::NamedLogin { url } => named_account(url, &mut receiver, &publisher, false).await,
                 }
             });
         });
@@ -276,9 +370,13 @@ async fn local_account(commands: &mut mpsc::Receiver<Command>, publisher: &Publi
         }
         match login_account(&client, &address, &name, &password).await {
             Ok(token) => {
-                if !named_http(address, token, commands, publisher, backend.as_mut()).await { return; }
+                let exit = named_http(address, token, commands, publisher, backend.as_mut()).await;
+                if matches!(exit, NamedExit::Closed) { return; }
                 state = State { account_login: true, local_mode: true, account_server_reachable: true,
-                    first_account_available: false, status: "Signed out", ..State::default() };
+                    first_account_available: false,
+                    status: if matches!(exit, NamedExit::Expired) { "Session expired" } else { "Signed out" },
+                    error: if matches!(exit, NamedExit::Expired) { Some("Session expired; sign in again") } else { None },
+                    ..State::default() };
             }
             Err(error) => { state.error = Some(error); state.status = "Sign in to Morons"; }
         }
@@ -568,6 +666,8 @@ async fn handle(
             Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
+        Command::CheckPiVersion |
+        Command::LoadUsage { .. } |
         Command::ProviderUnlock | Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
         Command::ProviderLogout => Err("Account and provider login require the named backend"),
     };
@@ -666,6 +766,7 @@ impl NamedApi {
             .send()
             .await
             .map_err(|_| "Cannot reach named backend")?;
+        if response.status().as_u16() == 401 { return Err("Session expired; sign in again"); }
         if !response.status().is_success() {
             return Err("Named backend rejected request");
         }
@@ -736,6 +837,51 @@ impl NamedApi {
             .ok_or("Cannot select named session")
     }
 }
+async fn check_pi_version(api: &NamedApi, state: &mut State, publisher: &Publisher) {
+    state.pi_version_loading = true;
+    state.pi_version_error = false;
+    publisher.publish(state);
+    match api.get::<PiVersion>("v1/runtime/pi/version").await {
+        Ok(value) if ["current", "candidate", "unknown"].contains(&value.status.as_str()) &&
+            value.installed.ai.len() <= 32 && value.installed.durable.len() <= 32 &&
+            value.latest_published.as_ref().is_none_or(|latest|
+                latest.ai.len() <= 32 && latest.durable.len() <= 32) => {
+            state.pi_version = Some(value);
+        }
+        _ => {
+            state.pi_version = None;
+            state.pi_version_error = true;
+        }
+    }
+    state.pi_version_loading = false;
+    publisher.publish(state);
+}
+async fn load_usage(api: &NamedApi, state: &mut State, publisher: &Publisher,
+    workspace: &str, window: &str, provider: Option<&str>, model: Option<&str>) {
+    if !["all", "24h", "7d", "30d", "90d"].contains(&window) ||
+        !valid_named_id(workspace) ||
+        provider.is_some_and(|value| value.len() > 80 || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')) ||
+        model.is_some_and(|value| value.len() > 128 || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.~:".contains(ch))) {
+        state.usage_error = true;
+        publisher.publish(state);
+        return;
+    }
+    state.usage_loading = true;
+    state.usage_error = false;
+    publisher.publish(state);
+    let mut route = format!("v1/usage?workspaceId={workspace}&window={window}");
+    if let Some(provider) = provider { route.push_str(&format!("&provider={provider}")); }
+    if let Some(model) = model { route.push_str(&format!("&model={model}")); }
+    match api.get::<UsageReport>(&route).await {
+        Ok(report) if report.scope.workspace_id == workspace && report.options.providers.len() <= 128 &&
+            report.options.models.len() <= 512 && report.periods.len() <= 5000 => {
+            state.usage = Some(report);
+        }
+        _ => { state.usage = None; state.usage_error = true; }
+    }
+    state.usage_loading = false;
+    publisher.publish(state);
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -786,13 +932,17 @@ async fn login_account(client: &Client, url: &Url, name: &str, password: &str) -
     Ok(session.token)
 }
 
-async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publisher: &Publisher) {
+async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publisher: &Publisher,
+    expired: bool) {
     let client = match Client::builder().redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10)).build() {
         Ok(client) => client,
         Err(_) => return,
     };
-    let mut state = State { account_login: true, status: "Sign in to Morons", ..State::default() };
+    let mut state = State { account_login: true,
+        status: if expired { "Session expired" } else { "Sign in to Morons" },
+        error: if expired { Some("Session expired; sign in again") } else { None },
+        ..State::default() };
     publisher.publish(&state);
     loop {
         let setup = client.get(url.join("v1/accounts/setup").expect("static route"))
@@ -828,8 +978,12 @@ async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publish
                 }.await;
                 match result {
                     Ok(token) => {
-                        if !named_http(url.clone(), token, commands, publisher, None).await { return; }
-                        state = State { account_login: true, status: "Signed out", ..State::default() };
+                        let exit = named_http(url.clone(), token, commands, publisher, None).await;
+                        if matches!(exit, NamedExit::Closed) { return; }
+                        state = State { account_login: true,
+                            status: if matches!(exit, NamedExit::Expired) { "Session expired" } else { "Signed out" },
+                            error: if matches!(exit, NamedExit::Expired) { Some("Session expired; sign in again") } else { None },
+                            ..State::default() };
                     }
                     Err(error) => { state.status = "Sign in to Morons"; state.error = Some(error); }
                 }
@@ -858,20 +1012,21 @@ async fn named_account(url: Url, commands: &mut mpsc::Receiver<Command>, publish
     }
 }
 
+enum NamedExit { Closed, SignedOut, Expired }
 async fn named_http(
     url: Url,
     bearer: String,
     commands: &mut mpsc::Receiver<Command>,
     publisher: &Publisher,
     mut local_backend: Option<&mut LocalBackend>,
-) -> bool {
+) -> NamedExit {
     let client = match Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .build()
     {
         Ok(client) => client,
-        Err(_) => return false,
+        Err(_) => return NamedExit::Closed,
     };
     let mut api = NamedApi {
         client,
@@ -922,9 +1077,13 @@ async fn named_http(
                 available.next().is_none().then(|| (only.provider.clone(), only.id.clone()))
             }).ok_or("Ambiguous selected model")?;
             let model = models.models.iter().find(|model|
-                model.provider == model_selection.0 && model.id == model_selection.1)
-                .ok_or("Selected model missing from catalog")?;
-            let selected_model = model.label.clone();
+                model.provider == model_selection.0 && model.id == model_selection.1);
+            if model.is_none() && model_selection.0 != "morons-fixture" {
+                return Err("Selected model missing from catalog");
+            }
+            let selected_model = model.map(|item| item.label.clone())
+                .unwrap_or_else(|| "Set up provider".into());
+            let model_available = model.is_some_and(|item| item.available);
             let history: NamedHistory = api.get(&format!("v1/sessions/{session}/history")).await?;
             if history.session_id != session || history.moron_id != selected {
                 return Err("Named session identity mismatch");
@@ -955,7 +1114,7 @@ async fn named_http(
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>(Some((selected_model, model.available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
+            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
         }
         .await;
         let session = match refreshed {
@@ -966,6 +1125,11 @@ async fn named_http(
                 };
                 state.workspaces = workspaces.workspaces.iter().map(|item| (item.id.clone(), item.name.clone())).collect();
                 state.account_name = api.get::<AccountMe>("v1/session/me").await.ok().map(|me| me.account.name);
+                if state.selected_workspace.as_deref() != Some(selected_workspace.as_str()) {
+                    state.usage = None;
+                    state.usage_error = false;
+                    state.usage_loading = false;
+                }
                 state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
                     .map(|item| item.name.clone());
@@ -982,7 +1146,7 @@ async fn named_http(
                 state.status = "No Morons yet";
                 state.error = None;
                 publisher.publish(&state);
-                let Some(command) = commands.recv().await else { return false; };
+                let Some(command) = commands.recv().await else { return NamedExit::Closed; };
                 match command {
                     Command::CreateMoron { id, name } if valid_named_id(&id) && valid_workspace_name(&name) => {
                         state.request_error = api.post("v1/morons", serde_json::json!({
@@ -1002,7 +1166,11 @@ async fn named_http(
                         state.request_error = api.patch(&format!("v1/workspaces/{selected_workspace}"),
                             serde_json::json!({"name":name})).await.err();
                     }
-                    Command::AccountLogout => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return true; }
+                    Command::AccountLogout => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return NamedExit::SignedOut; }
+                    Command::CheckPiVersion => check_pi_version(&api, &mut state, publisher).await,
+                    Command::LoadUsage { window, provider, model } =>
+                        load_usage(&api, &mut state, publisher, &selected_workspace,
+                            &window, provider.as_deref(), model.as_deref()).await,
                     _ => { state.request_error = Some("Choose a workspace or create a Moron"); }
                 }
                 publisher.publish(&state);
@@ -1022,6 +1190,11 @@ async fn named_http(
                 state.account_name = Some(account_name);
                 state.selected_moron = Some(selected.clone());
                 state.workspaces = workspaces.workspaces.into_iter().map(|item| (item.id, item.name)).collect();
+                if state.selected_workspace.as_deref() != Some(selected_workspace.as_str()) {
+                    state.usage = None;
+                    state.usage_error = false;
+                    state.usage_loading = false;
+                }
                 state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = Some(workspace_name);
                 state.review = review;
@@ -1040,6 +1213,7 @@ async fn named_http(
                 session
             }
             Err(error) => {
+                if error == "Session expired; sign in again" { return NamedExit::Expired; }
                 state.ready = false;
                 state.status = "Disconnected";
                 state.error = Some(error);
@@ -1049,8 +1223,8 @@ async fn named_http(
                 tokio::select! {
                     command = commands.recv() => {
                         match command {
-                            None => return false,
-                            Some(Command::AccountLogout) => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return true; },
+                            None => return NamedExit::Closed,
+                            Some(Command::AccountLogout) => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return NamedExit::SignedOut; },
                             _ => {},
                         }
                     },
@@ -1061,7 +1235,7 @@ async fn named_http(
         };
         tokio::select! {
             command = commands.recv() => {
-                let Some(command) = command else { return false; };
+                let Some(command) = command else { return NamedExit::Closed; };
                 let should_submit = matches!(command, Command::Submit(_) | Command::Retry);
                 match command {
                     Command::Submit(text) => {
@@ -1181,6 +1355,12 @@ async fn named_http(
                         state.selected_model = None;
                         state.selected_effort = None;
                         state.model_favorites.clear();
+                        state.pi_version = None;
+                        state.pi_version_loading = false;
+                        state.pi_version_error = false;
+                        state.usage = None;
+                        state.usage_loading = false;
+                        state.usage_error = false;
                         state.ready = false;
                         state.account_login = true;
                         state.provider_url = None;
@@ -1188,9 +1368,13 @@ async fn named_http(
                         state.visualizations.clear();
                         state.visualization_expires_at = None;
                         publisher.publish(&state);
-                        return true;
+                        return NamedExit::SignedOut;
                     }
                     Command::AccountLogin { .. } | Command::AccountCreate { .. } => {},
+                    Command::CheckPiVersion => check_pi_version(&api, &mut state, publisher).await,
+                    Command::LoadUsage { window, provider, model } =>
+                        load_usage(&api, &mut state, publisher, &selected_workspace,
+                            &window, provider.as_deref(), model.as_deref()).await,
                     Command::ProviderUnlock => {
                         if let Some(local) = local_backend.as_deref_mut() {
                             match local.enable_provider() {
