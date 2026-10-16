@@ -18,6 +18,7 @@ import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
+import { installFastModels, fastModelId, isFastModelId, baseModelId } from './fast-models.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
 const isRepositoryMoron = (moron) => moron &&
@@ -144,6 +145,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (repoExtension) registry.install(repoExtension);
     models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
+    installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
       piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models) });
     handoffExtension = createHandoffExtension({ store: handoffStore, catalog,
@@ -256,16 +258,20 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const allowed = new Set(available.map((model) => `${model.provider}\0${model.id}`));
     const agent = await conversation.agent(BACKGROUND_CONTEXT);
     const selected = agent.model;
-    const known = models.getModels().slice(0, 127).map((model) => ({
+    const known = models.getModels().filter((model) => !isFastModelId(model.id)).slice(0, 127).map((model) => ({
       provider: model.provider, id: model.id, label: model.name,
       available: allowed.has(`${model.provider}\0${model.id}`),
       efforts: effortOptions(model),
       ...(typeof model.releaseDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(model.releaseDate)
         ? { releaseDate: model.releaseDate } : {}),
     }));
-    if (selected && !known.some((model) => model.provider === selected.provider && model.id === selected.modelId))
-      known.push({ provider: selected.provider, id: selected.modelId, label: selected.modelId, available: false, efforts: [] });
-    return { selected: selected && { provider: selected.provider, id: selected.modelId },
+    const selectedId = selected && baseModelId(selected.modelId);
+    if (selected && !known.some((model) => model.provider === selected.provider && model.id === selectedId))
+      known.push({ provider: selected.provider, id: selectedId, label: selectedId, available: false, efforts: [] });
+    const fastAvailable = selected?.provider === 'openai' &&
+      allowed.has(`openai\0${fastModelId(selectedId)}`);
+    return { selected: selected && { provider: selected.provider, id: selectedId },
+      fastMode: Boolean(selected && isFastModelId(selected.modelId)), fastAvailable,
       selectedEffort: agent.thinkingLevel, models: known, favorites: catalog.listModelFavorites() };
   }
   async function chat(conversation, session, body, displayText = body?.text, waitForAnswer = true) {
@@ -553,6 +559,34 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       const sessionPath = /^\/v1\/sessions\/([^/]+)\/(history|chat)$/.exec(path);
       const sessionModelPath = /^\/v1\/sessions\/([^/]+)\/models?$/.exec(path);
       const sessionEffortPath = /^\/v1\/sessions\/([^/]+)\/effort$/.exec(path);
+      const sessionFastPath = /^\/v1\/sessions\/([^/]+)\/fast$/.exec(path);
+      if (sessionFastPath && request.method === 'POST') {
+        const session = catalog.getSession(decodeURIComponent(sessionFastPath[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        const body = await readBody(request);
+        if (typeof body?.enabled !== 'boolean') return send(response, 400, { error: 'invalid_fast_mode' });
+        if (modelChanges.has(session.id) || sessionTail.has(session.id) ||
+            catalog.pendingReplies().some((reply) => reply.session_id === session.id))
+          return send(response, 409, { error: 'session_busy' });
+        modelChanges.add(session.id);
+        try {
+          const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+          const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+          if (inspection.tasks.some((task) => task.record.conversationId === conversation.id) ||
+              inspection.submissions.some((submission) => submission.conversationId === conversation.id &&
+                (submission.status === 'queued' || submission.status === 'placed')))
+            return send(response, 409, { error: 'session_busy' });
+          const view = await modelCatalog(conversation);
+          if (!view.selected || !view.models.some((model) => model.provider === view.selected.provider &&
+              model.id === view.selected.id && model.available))
+            return send(response, 403, { error: 'model_unavailable' });
+          if (body.enabled && !view.fastAvailable)
+            return send(response, 403, { error: 'fast_mode_unavailable' });
+          await conversation.configure({ model: { provider: view.selected.provider,
+            modelId: body.enabled ? fastModelId(view.selected.id) : view.selected.id } }, BACKGROUND_CONTEXT);
+          return send(response, 200, await modelCatalog(conversation));
+        } finally { modelChanges.delete(session.id); }
+      }
       if (sessionEffortPath && request.method === 'POST') {
         const session = catalog.getSession(decodeURIComponent(sessionEffortPath[1]));
         if (!session) return send(response, 404, { error: 'session_not_found' });
@@ -604,7 +638,11 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
                 model.id === body.id && model.available))
               return send(response, 403, { error: 'model_unavailable' });
             const currentEffort = (await conversation.agent(BACKGROUND_CONTEXT)).thinkingLevel;
-            await conversation.configure({ model: { provider: body.provider, modelId: body.id },
+            const fastTarget = catalogView.fastMode && body.provider === 'openai' &&
+              (await models.getAvailable()).some((model) => model.provider === body.provider &&
+                model.id === fastModelId(body.id));
+            await conversation.configure({ model: { provider: body.provider,
+              modelId: fastTarget ? fastModelId(body.id) : body.id },
               thinkingLevel: catalogView.models.find((model) => model.provider === body.provider && model.id === body.id)
                 ?.efforts.includes(currentEffort) ? currentEffort : 'off',
               extensions: extensionsFor(session, { provider: body.provider, modelId: body.id }) }, BACKGROUND_CONTEXT);

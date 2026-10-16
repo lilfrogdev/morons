@@ -12,18 +12,19 @@ use morons_desktop::{
     transport::{Command, Config, State, Worker},
 };
 
-const ICON_PLUS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>"##;
-const ICON_SEND: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>"##;
-const ICON_MIC: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5zM5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>"##;
-const ICON_HOME: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#24262b" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1z"/></svg>"##;
-const ICON_FOLDER: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/></svg>"##;
-const ICON_AGENT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M9 13h.01M15 13h.01M9 17h6"/></svg>"##;
-const ICON_CPU: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 1v4m6-4v4M9 19v4m6-4v4M1 9h4m-4 6h4m14-6h4m-4 6h4"/></svg>"##;
-const ICON_OPENAI: &[u8] = include_bytes!("assets/model-openai.svg");
-const ICON_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></svg>"##;
-const ICON_STAR: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#b77900" stroke-width="1.5" stroke-linejoin="round"><path d="m12 2 3.1 6.3 7 1-5 4.9 1.2 6.9L12 17.8l-6.3 3.3 1.2-6.9-5-4.9 7-1z"/></svg>"##;
-const ICON_STAR_FILLED: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#EAB308" stroke="#B77900" stroke-width="1.5" stroke-linejoin="round"><path d="m12 2 3.1 6.3 7 1-5 4.9 1.2 6.9L12 17.8l-6.3 3.3 1.2-6.9-5-4.9 7-1z"/></svg>"##;
-const ICON_CHEVRON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#626772" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>"##;
+const ICON_PLUS: &[u8] = include_bytes!("assets/tabler/plus.svg");
+const ICON_SEND: &[u8] = include_bytes!("assets/tabler/arrow-up.svg");
+const ICON_MIC: &[u8] = include_bytes!("assets/tabler/microphone.svg");
+const ICON_HOME: &[u8] = include_bytes!("assets/tabler/home.svg");
+const ICON_FOLDER: &[u8] = include_bytes!("assets/tabler/folder.svg");
+const ICON_AGENT: &[u8] = include_bytes!("assets/tabler/robot.svg");
+const ICON_CPU: &[u8] = include_bytes!("assets/tabler/cpu.svg");
+const ICON_OPENAI: &[u8] = include_bytes!("assets/tabler/brand-openai.svg");
+const ICON_SEARCH: &[u8] = include_bytes!("assets/tabler/search.svg");
+const ICON_STAR: &[u8] = include_bytes!("assets/tabler/star.svg");
+const ICON_STAR_FILLED: &[u8] = include_bytes!("assets/tabler/star-filled.svg");
+const ICON_CHEVRON: &[u8] = include_bytes!("assets/tabler/chevron-down.svg");
+const ICON_BOLT: &[u8] = include_bytes!("assets/tabler/bolt.svg");
 fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
 fn model_icon(model_id: &str) -> &'static [u8] {
     let id = model_id.to_ascii_lowercase();
@@ -61,6 +62,7 @@ struct Chat {
     last_ack: Option<String>,
     scroll: ScrollHandle,
     show_model: bool,
+    show_effort: bool,
     model_section: String,
     model_cursor: usize,
     auth_signup: bool,
@@ -69,7 +71,7 @@ struct Chat {
     show_pinned: bool,
     show_morons: bool,
     show_repositories: bool,
-    show_connect_repository: bool,
+    show_profile: bool,
     drafts: drafts::Drafts,
     _input_subscription: Subscription,
 }
@@ -117,9 +119,10 @@ impl Chat {
                             view.local_error = None;
                             view.drafts.clear();
                             view.show_model = false;
+                            view.show_effort = false;
                             view.show_workspaces = false;
                             view.show_create_moron = false;
-                            view.show_connect_repository = false;
+                            view.show_profile = false;
                             view.workspace_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.moron_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.model_section.clear();
@@ -131,10 +134,12 @@ impl Chat {
                             view.input.update(cx, |input, cx| { input.set_text(restored); cx.notify(); });
                             view.last_ack = None;
                             view.show_model = false;
+                            view.show_effort = false;
                             view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
                         if view.state.selected_workspace != state.selected_workspace {
                             view.show_workspaces = false;
+                            view.show_profile = false;
                             view.workspace_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
                         if view.state.selected_moron != state.selected_moron {
@@ -169,6 +174,7 @@ impl Chat {
             last_ack: None,
             scroll: ScrollHandle::new(),
             show_model: false,
+            show_effort: false,
             model_section: String::new(),
             model_cursor: 0,
             auth_signup: false,
@@ -177,7 +183,7 @@ impl Chat {
             show_pinned: true,
             show_morons: true,
             show_repositories: true,
-            show_connect_repository: false,
+            show_profile: false,
             drafts: drafts::Drafts::default(),
             _input_subscription: input_subscription,
         }
@@ -202,6 +208,7 @@ impl Chat {
     }
     fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_model = !self.show_model;
+        self.show_effort = false;
         if self.show_model {
             self.model_section = self.state.selected_model.as_ref().map(|item| item.0.clone())
                 .or_else(|| self.state.models.first().map(|item| item.provider.clone())).unwrap_or_default();
@@ -465,27 +472,50 @@ impl Chat {
                                     }
                                 })))
                             .when(self.show_repositories, |d| d
-                                .child(button("add-repository", "Add repository")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.show_connect_repository = !view.show_connect_repository; cx.notify();
-                                    }))
-                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
-                                        if !event.keystroke.modifiers.modified() &&
-                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                            view.show_connect_repository = !view.show_connect_repository;
-                                            cx.stop_propagation(); cx.notify();
-                                        }
-                                    })))
                                 .child(div().px_2().py_2().text_size(px(12.))
-                                    .text_color(rgb(0x626772)).child("No repositories connected"))
-                                .when(self.show_connect_repository, |d| d.child(
-                                    div().px_2().py_2().text_size(px(12.))
-                                        .text_color(rgb(0x626772))
-                                        .child("Local folder and GitHub connections are not available yet.")))))
+                                    .text_color(rgb(0x626772)).child("No repositories connected"))))
                     )
-                    .child(div().px_2().pt_3().text_size(px(11.))
-                        .text_color(rgb(0x626772))
-                        .child(self.state.status))
+                    .child(div().px_2().pt_2().text_size(px(11.))
+                        .text_color(rgb(0x626772)).child(self.state.status))
+                    .when(self.show_profile && self.state.account_name.is_some(), |d| d.child(
+                        div().id("profile-menu").role(gpui::Role::Region).aria_label("Account menu")
+                            .p_2().rounded(px(6.)).border_1().border_color(rgb(0xE3E5E8))
+                            .bg(rgb(0xFFFFFF))
+                            .child(button("profile-sign-out", "Sign out")
+                                .on_click(cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.command(Command::AccountLogout, cx);
+                                        cx.stop_propagation();
+                                    }
+                                })))))
+                    .when_some(self.state.account_name.clone(), |d, name| {
+                        let initials = name.split('-').filter_map(|part| part.chars().next())
+                            .take(2).collect::<String>().to_uppercase();
+                        d.child(div().id("profile-control").role(gpui::Role::Button)
+                            .aria_label(SharedString::from(format!("Account {name}")))
+                            .aria_expanded(self.show_profile).focusable().tab_stop(true)
+                            .w_full().px_2().py_2().rounded(px(6.)).cursor_pointer()
+                            .hover(|d| d.bg(rgb(0xECEEF1)))
+                            .flex().items_center().gap_2()
+                            .child(div().w(px(30.)).h(px(30.)).rounded_full()
+                                .bg(rgb(0xDDE5EB)).flex().items_center().justify_center()
+                                .text_size(px(11.)).font_weight(FontWeight::BOLD).child(initials))
+                            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(name))
+                            .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.show_profile = !view.show_profile;
+                                cx.stop_propagation(); cx.notify();
+                            }))
+                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                if !event.keystroke.modifiers.modified() &&
+                                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    view.show_profile = !view.show_profile;
+                                    cx.stop_propagation(); cx.notify();
+                                }
+                            })))
+                    })
             )
     }
 }
@@ -577,6 +607,11 @@ impl Render for Chat {
         let model_display = if self.state.selected_model.as_ref().is_some_and(|(provider, _)|
             provider == "morons-fixture") { "Demo · synthetic replies".to_owned() } else {
             model_label(self.state.selected_model.as_ref().map(|item| item.0.as_str()).unwrap_or(""), model)
+        };
+        let effort_label = match self.state.selected_effort.as_deref() {
+            Some("low") => Some("Low"), Some("medium") => Some("Medium"),
+            Some("high") => Some("High"), Some("xhigh") => Some("Xhigh"),
+            Some("max") => Some("Max"), _ => None,
         };
         let model_options = self.state.models.clone();
         let visible_models = self.visible_models(cx);
@@ -714,11 +749,20 @@ impl Render for Chat {
             .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
             .on_click(cx.listener(|view, _, _, cx| {
-                if view.show_model { view.show_model = false; cx.notify(); }
+                if view.show_model || view.show_effort || view.show_profile || view.show_workspaces {
+                    view.show_model = false;
+                    view.show_effort = false;
+                    view.show_profile = false;
+                    view.show_workspaces = false;
+                    cx.notify();
+                }
             }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if view.show_model && event.keystroke.key == "escape" {
+                if (view.show_model || view.show_effort || view.show_profile || view.show_workspaces) && event.keystroke.key == "escape" {
                     view.show_model = false;
+                    view.show_effort = false;
+                    view.show_profile = false;
+                    view.show_workspaces = false;
                     window.focus(&view.input.focus_handle(cx), cx);
                     cx.stop_propagation();
                     cx.notify();
@@ -752,9 +796,6 @@ impl Render for Chat {
                     .child(div().flex().gap_2()
                         .when(!self.state.account_login, |d| d.child(button("reconnect", "Reconnect").on_click(
                             cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)),
-                        )))
-                        .when(self.state.selected_moron.is_some(), |d| d.child(button("account-sign-out", "Sign out").on_click(
-                            cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)),
                         )))),
             ))
             .when(self.state.account_login, |d| d.child(
@@ -935,6 +976,29 @@ impl Render for Chat {
                                 .aria_label("Attachments unavailable for this connection")
                                 .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
                                 .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                            .when(self.state.fast_available, |d| d.child(
+                                div().id("fast-mode").role(gpui::Role::Button)
+                                    .aria_label(if self.state.fast_mode {
+                                        "Turn Fast mode off"
+                                    } else { "Turn Fast mode on; uses more subscription usage" })
+                                    .aria_selected(self.state.fast_mode)
+                                    .focusable().tab_stop(true).cursor_pointer()
+                                    .w(px(28.)).h(px(28.)).rounded(px(6.))
+                                    .bg(if self.state.fast_mode { rgb(0xFFF5D9) } else { rgb(0xFFFFFF) })
+                                    .flex().items_center().justify_center()
+                                    .child(svg().data(ICON_BOLT).w(px(17.)).h(px(17.))
+                                        .text_color(if self.state.fast_mode { rgb(0xB77900) } else { rgb(0x80858D) }))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.command(Command::SelectFast(!view.state.fast_mode), cx);
+                                        cx.stop_propagation();
+                                    }))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified() &&
+                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            view.command(Command::SelectFast(!view.state.fast_mode), cx);
+                                            cx.stop_propagation();
+                                        }
+                                    }))))
                             .child(div().id("model").role(gpui::Role::Button)
                                 .aria_label("Choose a model")
                                 .aria_expanded(self.show_model)
@@ -946,6 +1010,7 @@ impl Render for Chat {
                                 .child(svg().data(model_icon(selected_model.as_ref().map(|item| item.1.as_str()).unwrap_or("")))
                                     .w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                 .child(div().min_w_0().truncate().child(model_display.clone()))
+                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.open_model_menu(window, cx);
                                     cx.stop_propagation();
@@ -957,6 +1022,30 @@ impl Render for Chat {
                                         cx.stop_propagation();
                                     }
                                 })))
+                            .when(!selected_efforts.is_empty(), |d| d
+                                .child(div().h(px(14.)).border_l_1().border_color(rgb(0xE3E5E8)).mx(px(2.)))
+                                .child(div().id("effort").role(gpui::Role::Button)
+                                    .aria_label("Choose reasoning effort")
+                                    .aria_expanded(self.show_effort)
+                                    .focusable().tab_stop(true).cursor_pointer()
+                                    .h(px(28.)).px(px(7.)).rounded(px(6.))
+                                    .hover(|d| d.bg(rgb(0xECEEF1)))
+                                    .flex().items_center().gap_1().text_size(px(12.))
+                                    .child(effort_label.unwrap_or("Off"))
+                                    .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.show_effort = !view.show_effort;
+                                        view.show_model = false;
+                                        cx.stop_propagation(); cx.notify();
+                                    }))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified() &&
+                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            view.show_effort = !view.show_effort;
+                                            view.show_model = false;
+                                            cx.stop_propagation(); cx.notify();
+                                        }
+                                    }))))
                             .child(div().flex_1())
                             .when(self.state.pending, |d| d.child(button("retry", "Retry")
                                 .on_click(cx.listener(|view, _, _, cx| view.command(Command::Retry, cx)))))
@@ -1102,35 +1191,6 @@ impl Render for Chat {
                                             .border_color(rgb(0xE3E5E8)).flex().items_center().gap(px(5.))
                                             .child(svg().data(ICON_SEARCH).w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                             .child(self.model_search.clone()))
-                                        .when(!selected_efforts.is_empty(), |d| d.child(
-                                            div().id("model-effort").role(gpui::Role::Group)
-                                                .aria_label("Reasoning effort for selected model")
-                                                .pt(px(7.)).pb(px(4.)).flex().flex_wrap().gap(px(4.))
-                                                .children(selected_efforts.iter().map(|effort| {
-                                                    let chosen = effort.clone();
-                                                    let keyboard_choice = effort.clone();
-                                                    let label = if effort == "off" { "Default" } else { effort.as_str() };
-                                                    div().id(SharedString::from(format!("effort-{effort}")))
-                                                        .role(gpui::Role::Button)
-                                                        .aria_label(SharedString::from(format!("Reasoning effort {label}")))
-                                                        .aria_selected(selected_effort.as_deref() == Some(effort.as_str()))
-                                                        .focusable().tab_stop(true).cursor_pointer()
-                                                        .px(px(7.)).py(px(4.)).rounded(px(5.))
-                                                        .bg(if selected_effort.as_deref() == Some(effort.as_str()) {
-                                                            rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
-                                                        .text_size(px(11.)).child(label.to_owned())
-                                                        .on_click(cx.listener(move |view, _, _, cx| {
-                                                            view.command(Command::SelectEffort(chosen.clone()), cx);
-                                                            cx.stop_propagation();
-                                                        }))
-                                                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                                                            if !event.keystroke.modifiers.modified() &&
-                                                                matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                                                view.command(Command::SelectEffort(keyboard_choice.clone()), cx);
-                                                                cx.stop_propagation();
-                                                            }
-                                                        }))
-                                                }))))
                                         .when(self.model_section == "favorites" && self.model_search.read(cx).text().is_empty(), |d|
                                             d.child(div().pt(px(10.)).px_2().text_size(px(11.))
                                                 .text_color(rgb(0x626772)).child("Favorites")))
@@ -1208,6 +1268,48 @@ impl Render for Chat {
                                     ),
                             )
                         })
+                        .when(self.show_effort && !selected_efforts.is_empty(), |d| d.child(
+                            div().id("effort-menu").role(gpui::Role::Dialog)
+                                .aria_label("Reasoning effort")
+                                .absolute().bottom(px(72.)).left(px(if narrow { 143. } else { 147. }))
+                                .w(px(144.)).p(px(5.))
+                                .rounded(px(8.)).border_1().border_color(rgb(0xE3E5E8))
+                                .bg(rgb(0xFFFFFF))
+                                .shadow(vec![BoxShadow::new(px(0.), px(8.), hsla(0., 0., 0., 0.12)).blur_radius(px(18.))])
+                                .flex().flex_col()
+                                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                                .children(selected_efforts.iter().map(|effort| {
+                                    let chosen = effort.clone();
+                                    let keyboard_choice = effort.clone();
+                                    let label = if effort == "off" { "Off".to_owned() } else {
+                                        let mut chars = effort.chars();
+                                        chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                                            .unwrap_or_default()
+                                    };
+                                    div().id(SharedString::from(format!("effort-{effort}")))
+                                        .role(gpui::Role::Button)
+                                        .aria_label(SharedString::from(format!("Reasoning effort {label}")))
+                                        .aria_selected(selected_effort.as_deref() == Some(effort.as_str()))
+                                        .focusable().tab_stop(true).cursor_pointer()
+                                        .px(px(10.)).py(px(7.)).rounded(px(5.))
+                                        .bg(if selected_effort.as_deref() == Some(effort.as_str()) {
+                                            rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
+                                        .text_size(px(12.)).child(label)
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.command(Command::SelectEffort(chosen.clone()), cx);
+                                            view.show_effort = false;
+                                            cx.stop_propagation(); cx.notify();
+                                        }))
+                                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                            if !event.keystroke.modifiers.modified() &&
+                                                matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                view.command(Command::SelectEffort(keyboard_choice.clone()), cx);
+                                                view.show_effort = false;
+                                                cx.stop_propagation(); cx.notify();
+                                            }
+                                        }))
+                                }))
+                        ))
             )))
     }
 }

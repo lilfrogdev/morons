@@ -11,3 +11,7 @@ and presentation. No GPL-licensed Zed editor code is incorporated.
 The compact composer presentation is adapted from Pitcrew's web UI design
 (https://github.com/lilfrogdev/pitcrew), licensed under Apache-2.0.
 The GPUI implementation is native Rust; no React component was copied.
+
+Interface icons are from Tabler Icons 3.48.0, matching Pitcrew's icon set.
+https://tabler.io/icons
+Licensed under MIT; see LICENSE-TABLER.

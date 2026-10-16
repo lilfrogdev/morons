@@ -19,9 +19,12 @@ pub struct State {
     pub models: Vec<ModelOption>,
     pub selected_model: Option<(String, String)>,
     pub selected_effort: Option<String>,
+    pub fast_mode: bool,
+    pub fast_available: bool,
     pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
     pub pinned_morons: Vec<String>,
+    pub account_name: Option<String>,
     pub selected_moron: Option<String>,
     pub workspaces: Vec<(String, String)>,
     pub selected_workspace: Option<String>,
@@ -51,9 +54,12 @@ impl Default for State {
             models: vec![],
             selected_model: None,
             selected_effort: None,
+            fast_mode: false,
+            fast_available: false,
             model_favorites: vec![],
             named_morons: vec![],
             pinned_morons: vec![],
+            account_name: None,
             selected_moron: None,
             workspaces: vec![],
             selected_workspace: None,
@@ -90,6 +96,7 @@ pub enum Command {
     ToggleMoronPin { id: String, pinned: bool },
     SelectModel { provider: String, id: String },
     SelectEffort(String),
+    SelectFast(bool),
     ToggleModelFavorite { provider: String, id: String, favorite: bool },
     ReviewDecision {
         id: String,
@@ -557,7 +564,7 @@ async fn handle(
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
         Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } | Command::SelectModel { .. } |
-        Command::SelectEffort(_) | Command::ToggleModelFavorite { .. } =>
+        Command::SelectEffort(_) | Command::SelectFast(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
@@ -628,6 +635,10 @@ struct NamedModels {
     selected: Option<SelectedModel>,
     #[serde(rename = "selectedEffort")]
     selected_effort: Option<String>,
+    #[serde(rename = "fastMode", default)]
+    fast_mode: bool,
+    #[serde(rename = "fastAvailable", default)]
+    fast_available: bool,
     #[serde(default)]
     favorites: Vec<SelectedModel>,
 }
@@ -751,7 +762,7 @@ struct ProviderStatus {
 #[derive(serde::Deserialize)]
 struct AccountMe { account: AccountIdentity }
 #[derive(serde::Deserialize)]
-struct AccountIdentity { id: String }
+struct AccountIdentity { id: String, name: String }
 #[derive(serde::Deserialize)]
 struct NamedWorkspaces { workspaces: Vec<NamedWorkspace> }
 #[derive(serde::Deserialize)]
@@ -944,7 +955,7 @@ async fn named_http(
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>(Some((selected_model, model.available, model_selection, models.selected_effort, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces)))
+            Ok::<_, &'static str>(Some((selected_model, model.available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
         }
         .await;
         let session = match refreshed {
@@ -954,6 +965,7 @@ async fn named_http(
                     Err(_) => { state.error = Some("Cannot load workspaces"); publisher.publish(&state); continue; }
                 };
                 state.workspaces = workspaces.workspaces.iter().map(|item| (item.id.clone(), item.name.clone())).collect();
+                state.account_name = api.get::<AccountMe>("v1/session/me").await.ok().map(|me| me.account.name);
                 state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
                     .map(|item| item.name.clone());
@@ -963,6 +975,8 @@ async fn named_http(
                 state.snapshot = Snapshot::empty();
                 state.models.clear();
                 state.selected_model = None;
+                state.fast_mode = false;
+                state.fast_available = false;
                 state.model = None;
                 state.ready = false;
                 state.status = "No Morons yet";
@@ -994,15 +1008,18 @@ async fn named_http(
                 publisher.publish(&state);
                 continue;
             }
-            Ok(Some((model, model_available, selected_model, selected_effort, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name, workspaces))) => {
+            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name))) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
                 state.selected_effort = selected_effort;
+                state.fast_mode = fast_mode;
+                state.fast_available = fast_available;
                 state.model_favorites = favorites;
                 state.snapshot = snapshot;
                 state.pinned_morons = catalog.morons.iter().filter(|m| m.pinned).map(|m| m.id.clone()).collect();
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
+                state.account_name = Some(account_name);
                 state.selected_moron = Some(selected.clone());
                 state.workspaces = workspaces.workspaces.into_iter().map(|item| (item.id, item.name)).collect();
                 state.selected_workspace = Some(selected_workspace.clone());
@@ -1125,6 +1142,16 @@ async fn named_http(
                             state.request_error = api.post(&format!("v1/sessions/{session}/effort"),
                                 serde_json::json!({"effort":effort})).await.err();
                         } else { state.request_error = Some("Effort is unavailable for this model"); }
+                    }
+                    Command::SelectFast(enabled) => {
+                        if pending.is_some() || state.snapshot.active_task_id.is_some() {
+                            state.request_error = Some("Wait for the current task before changing speed");
+                        } else if enabled && !state.fast_available {
+                            state.request_error = Some("Fast mode is unavailable for this model");
+                        } else {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/fast"),
+                                serde_json::json!({"enabled":enabled})).await.err();
+                        }
                     }
                     Command::ToggleModelFavorite { provider, id, favorite } => {
                         if state.models.iter().any(|model| model.provider == provider && model.id == id) {
