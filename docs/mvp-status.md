@@ -21,6 +21,12 @@ Personal workspace record. The source now supports account-owned workspace
 creation, renaming, and switching; Morons are listed within their workspace.
 New accounts start with an empty Moron list and an explicit New Moron action;
 previously saved Repository Morons and their conversations are preserved.
+The Repositories view can register an existing local Git repository through the
+native folder picker. Each account and workspace keeps its own repository
+records, coordinating Moron, threads, pinned/archive state, and repository-scoped
+OptChat memory. The path stays in the local account database. Repository source
+and review tools remain limited to the separately configured and verified runner;
+registration alone does not grant file access to a model.
 The updated desktop bundle has not yet replaced the app in the user's active test.
 Packaged Mac launches use backend resources inside the app bundle, avoiding a
 runtime read of the development checkout in Documents. New local accounts use
@@ -63,6 +69,10 @@ so the picker does not offer one. Pi's OpenAI catalog does not provide a remote 
 actual remote model access remains unverified until a human signs in and uses
 it. No actual OAuth or paid call was made. Local
 credential metadata restores provider status after a restart.
+Pi Durable's ordinary automatic compaction policy is enabled for conversation
+context. Repository coordinating Morons also retain their shared OptChat scope.
+Automatic compaction with a real provider has not been exercised without a human
+provider sign-in and model call.
 
 ## Trust boundary and remaining milestones
 

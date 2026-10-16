@@ -111,6 +111,7 @@ pub enum Command {
     SelectMoron(String),
     SelectSession { moron_id: String, session_id: String },
     CreateSession { moron_id: String },
+    RegisterRepository(String),
     SelectWorkspace(String),
     CreateWorkspace { id: String, name: String },
     RenameWorkspace(String),
@@ -675,7 +676,7 @@ async fn handle(
         }
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
-        Command::SelectSession { .. } | Command::CreateSession { .. } |
+        Command::SelectSession { .. } | Command::CreateSession { .. } | Command::RegisterRepository(_) |
         Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } |
         Command::UpdateMoron { .. } | Command::ToggleRepositoryPin { .. } | Command::ToggleRepositoryArchive { .. } |
         Command::SelectModel { .. } |
@@ -730,6 +731,8 @@ pub struct NamedRepository {
 }
 #[derive(serde::Deserialize)]
 struct NamedRepositories { repositories: Vec<NamedRepository> }
+#[derive(serde::Deserialize)]
+struct RegisteredRepository { repository: NamedRepository }
 #[derive(serde::Deserialize)]
 struct NamedMorons {
     morons: Vec<MoronDetails>,
@@ -827,6 +830,19 @@ impl NamedApi {
         } else {
             Err("Named backend rejected request")
         }
+    }
+    async fn register_repository(&self, path: &str, workspace_id: &str) -> Result<String, &'static str> {
+        let response = self.request(reqwest::Method::POST, "v1/repositories")
+            .json(&serde_json::json!({"path":path,"workspaceId":workspace_id}))
+            .send().await.map_err(|_| "Repository registration outcome uncertain; refresh the list")?;
+        if response.status().as_u16() == 409 { return Err("Repository is already connected"); }
+        if !response.status().is_success() { return Err("Choose a Git repository root"); }
+        let item: RegisteredRepository = serde_json::from_slice(&bounded_body(response).await?)
+            .map_err(|_| "Invalid repository response")?;
+        if !valid_named_id(&item.repository.id) || !valid_named_id(&item.repository.moron_id) {
+            return Err("Invalid repository response");
+        }
+        Ok(item.repository.moron_id)
     }
     async fn patch(&self, route: &str, body: serde_json::Value) -> Result<(), &'static str> {
         let response = self.request(reqwest::Method::PATCH, route).json(&body).send().await
@@ -1200,6 +1216,12 @@ async fn named_http(
                         })).await.err();
                         if state.request_error.is_none() { selected = id; }
                     }
+                    Command::RegisterRepository(path) => {
+                        match api.register_repository(&path, &selected_workspace).await {
+                            Ok(moron_id) => { selected = moron_id; selected_session = None; state.request_error = None; },
+                            Err(error) => state.request_error = Some(error),
+                        }
+                    }
                     Command::SelectWorkspace(id) if state.workspaces.iter().any(|(known, _)| known == &id) => {
                         selected_workspace = id; selected.clear(); selected_session = None; state.request_error = None;
                     }
@@ -1321,6 +1343,16 @@ async fn named_http(
                             state.request_error = api.post(&format!("v1/morons/{moron_id}/sessions"),
                                 serde_json::json!({"id":id,"title":"New thread"})).await.err();
                             if state.request_error.is_none() { selected = moron_id; selected_session = Some(id); }
+                        }
+                    }
+                    Command::RegisterRepository(path) => {
+                        if pending.is_some() || state.named_morons.len() >= 32 {
+                            state.request_error = Some("Finish the current task or use another workspace");
+                        } else {
+                            match api.register_repository(&path, &selected_workspace).await {
+                                Ok(moron_id) => { selected = moron_id; selected_session = None; state.request_error = None; },
+                                Err(error) => state.request_error = Some(error),
+                            }
                         }
                     }
                     Command::SelectWorkspace(id) => {

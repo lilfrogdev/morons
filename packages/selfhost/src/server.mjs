@@ -1,8 +1,10 @@
 import { createServer } from "node:http";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
-import { mkdir, realpath } from "node:fs/promises";
-import { basename, dirname, resolve, sep } from "node:path";
+import { execFile } from 'node:child_process';
+import { mkdir, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from 'node:util';
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
@@ -22,8 +24,20 @@ import { installFastModels, fastModelId, isFastModelId, baseModelId } from './fa
 import { collectUsage, usageFilters } from './usage.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
-const isRepositoryMoron = (moron) => moron &&
-  moron.id === (moron.workspaceId === 'personal' ? 'repo' : `repo-${moron.workspaceId}`);
+const execFileAsync = promisify(execFile);
+async function selectedRepositoryPath(path, storagePath) {
+  if (typeof path !== 'string' || path.length > 4096 || !isAbsolute(path) || path.includes('\0'))
+    throw new Error('invalid_repository_path');
+  const source = await realpath(path);
+  if (!(await stat(source)).isDirectory()) throw new Error('invalid_repository_path');
+  const storage = await realpath(storagePath);
+  if (source === storage || source.startsWith(`${storage}${sep}`) || storage.startsWith(`${source}${sep}`))
+    throw new Error('repository_private_path_overlap');
+  const { stdout } = await execFileAsync('git', ['-C', source, 'rev-parse', '--show-toplevel'],
+    { timeout: 5000, maxBuffer: 8192, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+  if (await realpath(stdout.trim()) !== source) throw new Error('repository_root_required');
+  return source;
+}
 function displayAnswer(raw) {
   if (!raw.startsWith(VIZ_PREFIX)) return raw;
   try {
@@ -149,7 +163,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
-      sharedMoronId: repositoryPlan ? 'repo' : null,
+      isSharedMoron: (moronId) => Boolean(catalog.repositoryForMoron(moronId)),
       piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models,
         ({ session, model, answer, callId }) => catalog.saveExternalUsage({
           id: callId,
@@ -198,15 +212,18 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       { provider: 'morons-fixture', modelId: 'fixture' };
     harness = await Harness.open(
       await openNodeSqliteStorage(databasePath),
-      { models, registry, settings: { compaction: { enabled: false, backgroundTokens: 0 } } },
+      { models, registry },
       BACKGROUND_CONTEXT,
     );
     root = await harness.root(BACKGROUND_CONTEXT, {
       agent: { model: selectedModel, extensions: [] },
     });
-    if (repositoryPlan && !catalog.getMoron('repo'))
-      catalog.createMoron({ id: 'repo', name: repositoryName,
-        rules: '', preferences: '', workspaceId: 'personal' });
+    if (repositoryPlan) {
+      if (!catalog.getMoron('repo'))
+        catalog.createMoron({ id: 'repo', name: repositoryName,
+          rules: '', preferences: '', workspaceId: 'personal' });
+      catalog.ensureLegacyRepository(await realpath(repositoryPlan.repository).catch(() => resolve(repositoryPlan.repository)), repositoryName);
+    }
   } catch (error) {
     await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
     catalog?.close();
@@ -240,7 +257,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   }
   function extensionsFor(session, model) {
     if (isHandoffTarget(session)) return [];
-    return [handoffExtension, ...(isRepositoryMoron(catalog.getMoron(session.moronId)) && repoExtension &&
+    return [handoffExtension, ...(session.moronId === 'repo' && repoExtension &&
       (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])];
   }
   async function ensureHandoffTool(conversation, session) {
@@ -412,11 +429,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     return `@${handoff.target_moron_id} ${handoff.question}\n\n[Scoped answer from @${handoff.target_moron_id}: ${handoff.answer}]`;
   }
   async function createNamedSession(moron, id, { handoff = false, model = selectedModel, title = 'New thread' } = {}) {
-    const instructions = [moron.rules, moron.preferences].filter(Boolean).join("\n\n");
+    const repository = catalog.repositoryForMoron(moron.id);
+    const instructions = [repository && `Registered repository ID: ${repository.id}. Only claim to have read or changed source when a repository tool returns a result.`,
+      moron.rules, moron.preferences].filter(Boolean).join("\n\n");
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
       agent: { model, instructions,
-        extensions: handoff ? [] : [handoffExtension, ...(isRepositoryMoron(moron) && repoExtension &&
+        extensions: handoff ? [] : [handoffExtension, ...(moron.id === 'repo' && repoExtension &&
           (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])] },
     }, BACKGROUND_CONTEXT);
     handoffConfigured.add(id);
@@ -501,22 +520,38 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
       if (request.method === 'GET' && path === '/v1/repositories') {
         const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
-        const repositories = repositoryPlan && workspaceId === 'personal' ? [{
-          id: 'configured', name: repositoryName, moronId: 'repo',
-          ...catalog.repositorySidebar(workspaceId, 'configured'),
-        }] : [];
+        const repositories = catalog.listRepositories(workspaceId).map((repository) => ({
+          id: repository.id, name: repository.name, moronId: repository.moronId,
+          ...catalog.repositorySidebar(workspaceId, repository.id),
+        }));
         return send(response, 200, { repositories });
+      }
+      if (request.method === 'POST' && path === '/v1/repositories') {
+        const body = await readBody(request);
+        const workspaceId = body?.workspaceId ?? 'personal';
+        if (!validId(workspaceId)) return send(response, 400, { error: 'invalid_workspace' });
+        let selectedPath;
+        try { selectedPath = await selectedRepositoryPath(body?.path, dirname(databasePath)); }
+        catch { return send(response, 400, { error: 'invalid_repository_path' }); }
+        if (catalog.listRepositories(workspaceId).some((repository) => repository.path === selectedPath))
+          return send(response, 409, { error: 'repository_exists' });
+        const suffix = randomBytes(8).toString('hex');
+        const repository = catalog.registerRepository({ id: `r-${suffix}`, moronId: `repo-${suffix}`,
+          workspaceId, path: selectedPath,
+          name: basename(selectedPath).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' });
+        return send(response, 201, { repository: { id: repository.id, name: repository.name,
+          moronId: repository.moronId, pinned: false, archived: false } });
       }
       const repositorySidebar = /^\/v1\/repositories\/([^/]+)\/(pin|archive)$/.exec(path);
       if (repositorySidebar && request.method === 'PATCH') {
         const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
-        if (!repositoryPlan || workspaceId !== 'personal' || repositorySidebar[1] !== 'configured')
-          return send(response, 404, { error: 'repository_not_found' });
+        const repository = catalog.getRepository(repositorySidebar[1]);
+        if (!repository || repository.workspaceId !== workspaceId) return send(response, 404, { error: 'repository_not_found' });
         const body = await readBody(request);
         const field = repositorySidebar[2] === 'pin' ? 'pinned' : 'archived';
         if (typeof body?.[field] !== 'boolean') return send(response, 400, { error: 'invalid_repository_sidebar' });
-        return send(response, 200, { repository: { id: 'configured', name: repositoryName,
-          moronId: 'repo', ...catalog.setRepositorySidebar(workspaceId, 'configured', field, body[field]) } });
+        return send(response, 200, { repository: { id: repository.id, name: repository.name,
+          moronId: repository.moronId, ...catalog.setRepositorySidebar(workspaceId, repository.id, field, body[field]) } });
       }
       const moronPin = /^\/v1\/morons\/([^/]+)\/pin$/.exec(path);
       if (moronPin && request.method === 'PATCH') {
@@ -741,6 +776,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (error?.message === "too_large") return send(response, 413, { error: "body_too_large" });
       if (error?.message === "invalid_json") return send(response, 400, { error: "invalid_json" });
       if (error?.message === "invalid_moron" || error?.message === "invalid_session") return send(response, 400, { error: error.message });
+      if (error?.message === 'invalid_repository' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE')
+        return send(response, 409, { error: 'repository_limit_or_conflict' });
       if (error?.message === "memory_source_conflict") return send(response, 409, { error: "memory_conflict" });
       return send(response, 500, { error: "internal" });
     }

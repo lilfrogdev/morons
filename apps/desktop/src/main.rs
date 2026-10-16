@@ -49,6 +49,11 @@ fn model_version(id: &str) -> (u16, u16) {
     (parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
         parts.next().and_then(|v| v.parse().ok()).unwrap_or(0))
 }
+fn compact_repository_name(name: &str) -> String {
+    let chars: Vec<_> = name.chars().collect();
+    if chars.len() <= 15 { return name.to_owned(); }
+    format!("{}…{}", chars[..6].iter().collect::<String>(), chars[chars.len()-7..].iter().collect::<String>())
+}
 
 actions!(morons, [SendMessage, Quit, FocusNext, FocusPrevious]);
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -315,6 +320,20 @@ impl Chat {
                 rules: self.settings_rules.read(cx).text().to_owned(),
                 preferences: self.settings_preferences.read(cx).text().to_owned() }, cx);
         }
+    }
+    fn add_repository(&mut self, cx: &mut Context<Self>) {
+        let selected = cx.prompt_for_paths(PathPromptOptions {
+            files: false, directories: true, multiple: false,
+            prompt: Some("Choose repository".into()),
+        });
+        cx.spawn(async move |view, cx| {
+            if let Ok(Ok(Some(paths))) = selected.await {
+                if let Some(path) = paths.into_iter().next() {
+                    let path = path.to_string_lossy().into_owned();
+                    let _ = view.update(cx, |view, cx| view.command(Command::RegisterRepository(path), cx));
+                }
+            }
+        }).detach();
     }
     fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_model = !self.show_model;
@@ -816,6 +835,11 @@ impl Chat {
                                     }
                                 })))
                             .when(self.show_repositories, |d| d
+                                .child(button("add-repository", "Add repository")
+                                    .on_click(cx.listener(|view, _, _, cx| view.add_repository(cx)))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if activation_key(event) { view.add_repository(cx); cx.stop_propagation(); }
+                                    })))
                                 .when(self.state.repositories.is_empty(), |d| d.child(
                                     div().px_2().py_2().text_size(px(12.))
                                         .text_color(rgb(0x626772)).child("No repositories connected")))
@@ -948,7 +972,7 @@ fn repository_row(repo: &morons_desktop::transport::NamedRepository, selected: b
             .flex_1().min_w_0().h_full().px_2().rounded(px(10.))
             .flex().items_center().gap_2().cursor_pointer().text_size(px(14.))
             .child(svg().data(ICON_FOLDER).w(px(18.)).h(px(18.)).text_color(rgb(0x626772)))
-            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .child(div().flex_1().min_w_0().truncate().child(compact_repository_name(&name)))
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.select_section(NavSection::Repositories, cx);
                 if view.state.selected_moron.as_deref() != Some(moron_id.as_str()) {

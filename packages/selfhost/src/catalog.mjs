@@ -44,11 +44,44 @@ export function openCatalog(path) {
     pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(workspace_id, repository_id)
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS repositories (
+    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, moron_id TEXT NOT NULL UNIQUE REFERENCES morons(id),
+    path TEXT NOT NULL, name TEXT NOT NULL, created_at INTEGER NOT NULL,
+    UNIQUE(workspace_id, path)
+  );
+  CREATE INDEX IF NOT EXISTS repositories_workspace ON repositories(workspace_id, created_at, id);`);
   db.exec('CREATE INDEX IF NOT EXISTS morons_workspace ON morons(workspace_id, created_at, id)');
   db.exec("UPDATE replies SET state = 'done' WHERE answer IS NOT NULL AND state = 'accepted'");
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
   return {
+    listRepositories(workspaceId) {
+      return db.prepare('SELECT id, workspace_id AS workspaceId, moron_id AS moronId, path, name FROM repositories WHERE workspace_id = ? ORDER BY created_at, id').all(workspaceId);
+    },
+    getRepository(id) {
+      return db.prepare('SELECT id, workspace_id AS workspaceId, moron_id AS moronId, path, name FROM repositories WHERE id = ?').get(id) ?? null;
+    },
+    repositoryForMoron(moronId) {
+      return db.prepare('SELECT id, workspace_id AS workspaceId, moron_id AS moronId, path, name FROM repositories WHERE moron_id = ?').get(moronId) ?? null;
+    },
+    ensureLegacyRepository(path, name) {
+      db.prepare("INSERT OR IGNORE INTO repositories VALUES ('configured', 'personal', 'repo', ?, ?, ?)").run(path, name, Date.now());
+      return this.getRepository('configured');
+    },
+    registerRepository({ id, workspaceId, moronId, path, name }) {
+      if (!validId(id) || !validId(workspaceId) || !validId(moronId) ||
+          typeof path !== 'string' || !path || typeof name !== 'string' || !name.trim() || name.length > 80 ||
+          this.listRepositories(workspaceId).length >= 32 || this.listMorons(workspaceId).length >= 32)
+        throw new Error('invalid_repository');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        this.createMoron({ id: moronId, name, rules: '', preferences: '', workspaceId });
+        db.prepare('INSERT INTO repositories VALUES (?, ?, ?, ?, ?, ?)')
+          .run(id, workspaceId, moronId, path, name, Date.now());
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      return this.getRepository(id);
+    },
     listModelFavorites: () => db.prepare('SELECT provider, model_id AS id FROM model_favorites ORDER BY provider, model_id').all(),
     setModelFavorite(provider, id, favorite) {
       if (favorite) db.prepare('INSERT OR IGNORE INTO model_favorites VALUES (?, ?)').run(provider, id);

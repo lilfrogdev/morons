@@ -188,7 +188,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
           return send(response, 404, { error: 'workspace_not_found' });
       }
       if (path === '/v1/repositories' || /^\/v1\/repositories\/[^/]+\/(pin|archive)$/.test(path)) {
-        const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
+        const workspaceId = request.method === 'POST' && path === '/v1/repositories'
+          ? json(body)?.workspaceId ?? 'personal' : requestUrl.searchParams.get('workspaceId') ?? 'personal';
         if (!accounts.workspace(account.id, workspaceId))
           return send(response, 404, { error: 'workspace_not_found' });
       }
