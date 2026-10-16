@@ -10,22 +10,30 @@ function number(value) {
 
 function empty() {
   return { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
-    cacheWriteTokens: 0, totalTokens: 0, estimatedCostUsd: 0, unknownCostCalls: 0 };
+    cacheWriteTokens: 0, totalTokens: 0, estimatedCostUsd: 0,
+    unknownCostCalls: 0, unknownUsageCalls: 0 };
+}
+
+function completeUsage(usage) {
+  return usage && ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens']
+    .every((key) => typeof usage[key] === 'number' && Number.isFinite(usage[key]) && usage[key] >= 0);
 }
 
 function increment(target, usage, estimatedCost) {
   target.calls++;
-  target.inputTokens += number(usage.input);
-  target.outputTokens += number(usage.output);
-  target.cacheReadTokens += number(usage.cacheRead);
-  target.cacheWriteTokens += number(usage.cacheWrite);
-  target.totalTokens += number(usage.totalTokens) ||
-    number(usage.input) + number(usage.output) + number(usage.cacheRead) + number(usage.cacheWrite);
+  if (!completeUsage(usage)) target.unknownUsageCalls++;
+  target.inputTokens += number(usage?.input);
+  target.outputTokens += number(usage?.output);
+  target.cacheReadTokens += number(usage?.cacheRead);
+  target.cacheWriteTokens += number(usage?.cacheWrite);
+  target.totalTokens += number(usage?.totalTokens) ||
+    number(usage?.input) + number(usage?.output) + number(usage?.cacheRead) + number(usage?.cacheWrite);
   if (estimatedCost !== null) target.estimatedCostUsd += estimatedCost;
   else target.unknownCostCalls++;
 }
 
 function estimatedCost(models, provider, modelId, usage) {
+  if (!completeUsage(usage)) return null;
   if (provider === 'morons-fixture') return 0;
   if (number(usage?.cost?.total) > 0) return usage.cost.total;
   const rates = models.getModel(provider, baseModelId(modelId))?.cost;
@@ -76,8 +84,9 @@ export async function collectUsage({ catalog, harness, models, filters, now = Da
   const kinds = { main: 0, handoff: 0, memory: 0 };
   const hourly = filters.window === '24h';
   const include = ({ provider, modelId, timestamp, usage, kind }) => {
-    if (!Number.isFinite(timestamp) || timestamp < cutoff || timestamp > now || !usage ||
-        typeof provider !== 'string' || typeof modelId !== 'string') return;
+    if (!Number.isFinite(timestamp) || timestamp < cutoff || timestamp > now) return;
+    provider = typeof provider === 'string' && provider ? provider : 'unknown';
+    modelId = typeof modelId === 'string' && modelId ? modelId : 'unknown';
     const canonical = baseModelId(modelId);
     observedProviders.add(provider);
     observedModels.add(`${provider}\0${canonical}`);
@@ -132,7 +141,8 @@ export async function collectUsage({ catalog, harness, models, filters, now = Da
       .sort((a, b) => b.totalTokens - a.totalTokens || a.provider.localeCompare(b.provider)),
     periods: [...periods].map(([start, value]) => ({ start, ...value }))
       .sort((a, b) => a.start.localeCompare(b.start)),
-    coverage: { kinds, actualTokens: true, actualSpend: false, subagents: 'not_instrumented',
-      note: 'Token counts come from completed model responses. Cost is an estimate from model prices, not a bill. Subscription usage has no known dollar charge here; calls without reliable prices are counted as unknown cost.' },
+    coverage: { kinds, actualTokens: totals.unknownUsageCalls === 0, actualSpend: false,
+      subagents: 'included_as_handoff',
+      note: 'Completed conversation, delegated Moron, and memory calls are included. Token totals are partial when unknown usage calls are nonzero. Cost is an estimate from model prices, not a bill; subscription charges and calls without reliable prices have unknown cost.' },
   };
 }

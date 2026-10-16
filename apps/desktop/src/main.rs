@@ -475,13 +475,14 @@ impl Chat {
                     let total = report.totals;
                     d.child(div().flex().flex_wrap().gap_3()
                         .child(usage_stat("Calls", total.calls.to_string()))
-                        .child(usage_stat("Tokens", total.total_tokens.to_string()))
-                        .child(usage_stat("Input", total.input_tokens.to_string()))
-                        .child(usage_stat("Output", total.output_tokens.to_string()))
-                        .child(usage_stat("Cache read", total.cache_read_tokens.to_string()))
-                        .child(usage_stat("Cache write", total.cache_write_tokens.to_string()))
-                        .child(usage_stat("Estimated cost", format!("${:.4}", total.estimated_cost_usd)))
-                        .child(usage_stat("Unknown cost", total.unknown_cost_calls.to_string())))
+                        .child(usage_stat("Tokens", usage_token_label(&total)))
+                        .child(usage_stat("Input", usage_count_label(&total, total.input_tokens)))
+                        .child(usage_stat("Output", usage_count_label(&total, total.output_tokens)))
+                        .child(usage_stat("Cache read", usage_count_label(&total, total.cache_read_tokens)))
+                        .child(usage_stat("Cache write", usage_count_label(&total, total.cache_write_tokens)))
+                        .child(usage_stat("Estimated cost", usage_cost_label(&total)))
+                        .child(usage_stat("Unknown cost", total.unknown_cost_calls.to_string()))
+                        .child(usage_stat("Unknown usage", total.unknown_usage_calls.to_string())))
                     .child(div().font_weight(FontWeight::BOLD).child("Providers"))
                     .when(report.providers.is_empty(), |d| d.child(div().text_sm().child("No completed calls in this range")))
                     .children(report.providers.iter().map(|item| usage_row(item.provider.clone(), &item.metrics)))
@@ -493,8 +494,8 @@ impl Chat {
                         "Calls by path: {} main · {} handoff · {} memory · subagents {}",
                         report.coverage.kinds.main, report.coverage.kinds.handoff,
                         report.coverage.kinds.memory,
-                        if report.coverage.subagents == "not_instrumented" { "not instrumented" }
-                        else { report.coverage.subagents.as_str() })))
+                        if report.coverage.subagents == "included_as_handoff" { "included as handoffs" }
+                        else { "not instrumented" })))
                     .child(div().text_xs().text_color(rgb(0x626772)).child(report.coverage.note))
                 }))
     }
@@ -828,12 +829,29 @@ fn usage_stat(label: &'static str, value: String) -> impl IntoElement {
         .child(div().text_xs().text_color(rgb(0x626772)).child(label))
         .child(div().text_lg().font_weight(FontWeight::BOLD).child(value))
 }
+fn usage_token_label(metrics: &morons_desktop::transport::UsageMetrics) -> String {
+    usage_count_label(metrics, metrics.total_tokens)
+}
+fn usage_count_label(metrics: &morons_desktop::transport::UsageMetrics, count: u64) -> String {
+    if metrics.calls > 0 && metrics.unknown_usage_calls == metrics.calls { "Unknown".into() }
+    else if metrics.unknown_usage_calls > 0 { format!("≥{count}") }
+    else { count.to_string() }
+}
+fn usage_cost_label(metrics: &morons_desktop::transport::UsageMetrics) -> String {
+    if metrics.calls > 0 && metrics.unknown_cost_calls == metrics.calls { "Unknown".into() }
+    else if metrics.unknown_cost_calls > 0 { format!("${:.4} partial", metrics.estimated_cost_usd) }
+    else { format!("${:.4}", metrics.estimated_cost_usd) }
+}
 fn usage_row(label: String, metrics: &morons_desktop::transport::UsageMetrics) -> impl IntoElement {
-    div().flex().justify_between().gap_3().py_2().border_b_1().border_color(rgb(0xE3E5E8))
+    div().flex().flex_wrap().justify_between().gap_3().py_2().border_b_1().border_color(rgb(0xE3E5E8))
         .child(div().min_w_0().truncate().text_sm().child(label))
         .child(div().text_sm().text_color(rgb(0x626772))
-            .child(format!("{} calls · {} tokens · ${:.4} estimated",
-                metrics.calls, metrics.total_tokens, metrics.estimated_cost_usd)))
+            .child(format!("{} calls · {} tokens{} · {} estimated{}",
+                metrics.calls, usage_token_label(metrics),
+                if metrics.unknown_usage_calls > 0 { format!(" · {} unknown usage", metrics.unknown_usage_calls) }
+                else { String::new() }, usage_cost_label(metrics),
+                if metrics.unknown_cost_calls > 0 { format!(" · {} unknown cost", metrics.unknown_cost_calls) }
+                else { String::new() })))
 }
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

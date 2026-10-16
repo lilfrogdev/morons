@@ -155,6 +155,7 @@ pub struct UsageMetrics {
     pub total_tokens: u64,
     pub estimated_cost_usd: f64,
     pub unknown_cost_calls: u64,
+    pub unknown_usage_calls: u64,
 }
 #[derive(Clone, serde::Deserialize)]
 pub struct UsageProvider {

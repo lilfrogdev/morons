@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { timingSafeEqual, createHash, randomBytes, randomUUID } from "node:crypto";
+import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -149,10 +149,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
       piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models,
-        ({ session, model, answer }) => catalog.saveExternalUsage({
-          id: randomUUID(),
+        ({ session, model, answer, callId }) => catalog.saveExternalUsage({
+          id: callId,
           sessionId: session.id, kind: 'memory', provider: model.provider,
-          modelId: model.id, timestamp: answer.timestamp ?? Date.now(), usage: answer.usage })) });
+          modelId: model.id, timestamp: answer.timestamp ?? Date.now(), usage: answer.usage ?? null })) });
     handoffExtension = createHandoffExtension({ store: handoffStore, catalog,
       getSourceUserEntryId: async ({ source }) => {
         const conversation = await harness.conversation(source.conversationId, BACKGROUND_CONTEXT);
