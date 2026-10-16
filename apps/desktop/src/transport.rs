@@ -21,6 +21,7 @@ pub struct State {
     pub selected_effort: Option<String>,
     pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
+    pub pinned_morons: Vec<String>,
     pub selected_moron: Option<String>,
     pub workspaces: Vec<(String, String)>,
     pub selected_workspace: Option<String>,
@@ -52,6 +53,7 @@ impl Default for State {
             selected_effort: None,
             model_favorites: vec![],
             named_morons: vec![],
+            pinned_morons: vec![],
             selected_moron: None,
             workspaces: vec![],
             selected_workspace: None,
@@ -85,6 +87,7 @@ pub enum Command {
     CreateWorkspace { id: String, name: String },
     RenameWorkspace(String),
     CreateMoron { id: String, name: String },
+    ToggleMoronPin { id: String, pinned: bool },
     SelectModel { provider: String, id: String },
     SelectEffort(String),
     ToggleModelFavorite { provider: String, id: String, favorite: bool },
@@ -553,7 +556,7 @@ async fn handle(
         }
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
-        Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::SelectModel { .. } |
+        Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } | Command::SelectModel { .. } |
         Command::SelectEffort(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
@@ -586,6 +589,8 @@ async fn submit_pending(api: &Api, pending: Option<&(String, String)>) -> Result
 struct NamedMoron {
     id: String,
     name: String,
+    #[serde(default)]
+    pinned: bool,
 }
 #[derive(serde::Deserialize)]
 struct NamedMorons {
@@ -953,6 +958,7 @@ async fn named_http(
                 state.workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
                     .map(|item| item.name.clone());
                 state.named_morons.clear();
+                state.pinned_morons.clear();
                 state.selected_moron = None;
                 state.snapshot = Snapshot::empty();
                 state.models.clear();
@@ -995,6 +1001,7 @@ async fn named_http(
                 state.selected_effort = selected_effort;
                 state.model_favorites = favorites;
                 state.snapshot = snapshot;
+                state.pinned_morons = catalog.morons.iter().filter(|m| m.pinned).map(|m| m.id.clone()).collect();
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
                 state.workspaces = workspaces.workspaces.into_iter().map(|item| (item.id, item.name)).collect();
@@ -1072,6 +1079,14 @@ async fn named_http(
                                 "rules":"", "preferences":""
                             })).await.err();
                             if state.request_error.is_none() { selected = id; }
+                        }
+                    }
+                    Command::ToggleMoronPin { id, pinned } => {
+                        if !state.named_morons.iter().any(|(known, _)| known == &id) {
+                            state.request_error = Some("Moron is not in this workspace");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/morons/{id}/pin"),
+                                serde_json::json!({"pinned":pinned})).await.err();
                         }
                     }
                     Command::CreateWorkspace { id, name } => {

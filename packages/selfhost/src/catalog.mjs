@@ -29,6 +29,8 @@ export function openCatalog(path) {
     db.exec("ALTER TABLE replies ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'");
   if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'workspace_id'))
     db.exec("ALTER TABLE morons ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'personal'");
+  if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'pinned'))
+    db.exec("ALTER TABLE morons ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
   db.exec('CREATE INDEX IF NOT EXISTS morons_workspace ON morons(workspace_id, created_at, id)');
   db.exec("UPDATE replies SET state = 'done' WHERE answer IS NOT NULL AND state = 'accepted'");
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
@@ -41,6 +43,11 @@ export function openCatalog(path) {
     },
     listMorons: (workspaceId = 'personal') => db.prepare("SELECT * FROM morons WHERE workspace_id = ? ORDER BY created_at, id").all(workspaceId).map(moron),
     getMoron: (id) => moron(getMoron.get(id)),
+    setMoronPinned(id, pinned) {
+      if (!validId(id) || typeof pinned !== 'boolean' || !getMoron.get(id)) throw new Error('invalid_moron');
+      db.prepare('UPDATE morons SET pinned = ? WHERE id = ?').run(Number(pinned), id);
+      return moron(getMoron.get(id));
+    },
     createMoron({ id, name, rules, preferences, workspaceId = 'personal' }) {
       if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 80 ||
           typeof rules !== "string" || rules.length > 12000 ||
@@ -138,7 +145,7 @@ export function openCatalog(path) {
   };
 }
 
-function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id }; }
+function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, pinned: Boolean(row.pinned) }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id, conversationId: row.conversation_id, createdAt: row.created_at }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }
 function reviewSummary(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, checks: JSON.parse(row.checks).map(({ ok }) => ({ ok })), decision: row.decision, createdAt: row.created_at }; }

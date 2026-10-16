@@ -66,6 +66,10 @@ struct Chat {
     auth_signup: bool,
     show_workspaces: bool,
     show_create_moron: bool,
+    show_pinned: bool,
+    show_morons: bool,
+    show_repositories: bool,
+    show_connect_repository: bool,
     drafts: drafts::Drafts,
     _input_subscription: Subscription,
 }
@@ -115,6 +119,7 @@ impl Chat {
                             view.show_model = false;
                             view.show_workspaces = false;
                             view.show_create_moron = false;
+                            view.show_connect_repository = false;
                             view.workspace_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.moron_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.model_section.clear();
@@ -169,6 +174,10 @@ impl Chat {
             auth_signup: false,
             show_workspaces: false,
             show_create_moron: false,
+            show_pinned: true,
+            show_morons: true,
+            show_repositories: true,
+            show_connect_repository: false,
             drafts: drafts::Drafts::default(),
             _input_subscription: input_subscription,
         }
@@ -372,65 +381,159 @@ impl Chat {
                                         .on_click(cx.listener(|view, _, _, cx| view.workspace_action(true, cx))))
                                     .child(button("workspace-rename", "Rename")
                                         .on_click(cx.listener(|view, _, _, cx| view.workspace_action(false, cx))))))))
-                    .child(div().px_2().mb_2().text_size(px(12.))
-                        .font_weight(FontWeight::BOLD).text_color(rgb(0x626772))
-                        .child("Your Morons"))
-                    .child(button("new-moron", "New Moron")
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.show_create_moron = !view.show_create_moron;
-                            cx.notify();
-                        })))
-                    .when(self.show_create_moron, |d| d.child(
-                        div().p_2().flex().flex_col().gap_1()
-                            .child(div().px_1().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
-                                .child(self.moron_input.clone()))
-                            .child(button("create-moron", "Create Moron")
-                                .on_click(cx.listener(|view, _, _, cx| view.create_moron(cx))))))
-                    .child(div().id("moron-list").role(gpui::Role::List)
-                        .aria_label("Named Morons")
-                        .flex_1().min_h_0().overflow_y_scroll()
-                        .flex().flex_col().gap_1()
-                        .when(self.state.named_morons.is_empty(), |d| d.child(
-                            div().px_2().py_2().text_size(px(12.))
-                                .text_color(rgb(0x626772))
-                                .child(if self.state.account_login {
-                                    "Sign in to see your Morons"
-                                } else { "No named Morons yet" })
-                        ))
-                        .children(self.state.named_morons.iter().map(|(id, name)| {
-                            let selected = active == Some(id.as_str());
-                            let chosen = id.clone();
-                            let key_choice = id.clone();
-                            div().id(SharedString::from(format!("sidebar-moron-{id}")))
-                                .role(gpui::Role::Button)
-                                .aria_label(SharedString::from(format!("Open {name}")))
-                                .aria_selected(selected)
-                                .focusable().tab_stop(true)
-                                .w_full().min_w_0().h(px(36.)).px_2()
-                                .rounded(px(6.)).flex().items_center().gap_2()
-                                .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
-                                .hover(|d| d.bg(rgb(0xECEEF1)))
-                                .cursor_pointer().text_size(px(14.))
-                                .child(div().w(px(20.)).flex_shrink_0()
-                                    .child(svg().data(if id == "repo" { ICON_FOLDER } else { ICON_AGENT })
-                                        .w(px(18.)).h(px(18.)).text_color(rgb(0x626772))))
-                                .child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.command(Command::SelectMoron(chosen.clone()), cx)
-                                }))
-                                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                    .child(div().id("sidebar-sections").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_2()
+                        .child(div().id("pinned-section").role(gpui::Role::Region).aria_label("Pinned")
+                            .child(div().id("pinned-heading").role(gpui::Role::Button).aria_label("Pinned")
+                                .aria_expanded(self.show_pinned).focusable().tab_stop(true)
+                                .px_2().py_2().cursor_pointer().text_size(px(12.))
+                                .font_weight(FontWeight::BOLD).text_color(rgb(0x626772)).child("Pinned")
+                                .on_click(cx.listener(|view, _, _, cx| { view.show_pinned = !view.show_pinned; cx.notify(); }))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                                     if !event.keystroke.modifiers.modified() &&
                                         matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        view.command(Command::SelectMoron(key_choice.clone()), cx);
-                                        cx.stop_propagation();
+                                        view.show_pinned = !view.show_pinned; cx.stop_propagation(); cx.notify();
                                     }
+                                })))
+                            .when(self.show_pinned, |d| d.child(div().id("pinned-list").role(gpui::Role::List)
+                                .aria_label("Pinned shortcuts").flex().flex_col().gap_1()
+                                .when(self.state.pinned_morons.is_empty(), |d| d.child(
+                                    div().px_2().py_1().text_size(px(12.)).text_color(rgb(0x626772))
+                                        .child("No pinned Morons")))
+                                .children(self.state.named_morons.iter().filter(|(id, _)|
+                                    self.state.pinned_morons.contains(id)).map(|(id, name)|
+                                    moron_row(id, name, active == Some(id.as_str()), true, true, cx))))))
+                        .child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons")
+                            .child(div().id("morons-heading").role(gpui::Role::Button).aria_label("Morons")
+                                .aria_expanded(self.show_morons).focusable().tab_stop(true)
+                                .px_2().py_2().cursor_pointer().text_size(px(12.))
+                                .font_weight(FontWeight::BOLD).text_color(rgb(0x626772)).child("Morons")
+                                .on_click(cx.listener(|view, _, _, cx| { view.show_morons = !view.show_morons; cx.notify(); }))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.show_morons = !view.show_morons; cx.stop_propagation(); cx.notify();
+                                    }
+                                })))
+                            .when(self.show_morons, |d| d
+                                .child(button("new-moron", "New Moron")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.show_create_moron = !view.show_create_moron; cx.notify();
+                                    }))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified() &&
+                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            view.show_create_moron = !view.show_create_moron;
+                                            cx.stop_propagation(); cx.notify();
+                                        }
+                                    })))
+                                .when(self.show_create_moron, |d| d.child(
+                                    div().p_2().flex().flex_col().gap_1()
+                                        .child(div().px_1().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
+                                            .child(self.moron_input.clone()))
+                                        .child(button("create-moron", "Create Moron")
+                                            .on_click(cx.listener(|view, _, _, cx| view.create_moron(cx)))
+                                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                                if !event.keystroke.modifiers.modified() &&
+                                                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                    view.create_moron(cx); cx.stop_propagation();
+                                                }
+                                            })))))
+                                .child(div().id("moron-list").role(gpui::Role::List)
+                                    .aria_label("Named Morons").flex().flex_col().gap_1()
+                                    .when(self.state.named_morons.is_empty(), |d| d.child(
+                                        div().px_2().py_2().text_size(px(12.))
+                                            .text_color(rgb(0x626772)).child("No Morons yet")))
+                                    .children(self.state.named_morons.iter().map(|(id, name)|
+                                        moron_row(id, name, active == Some(id.as_str()),
+                                            self.state.pinned_morons.contains(id), false, cx))))))
+                        .child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories")
+                            .child(div().id("repositories-heading").role(gpui::Role::Button).aria_label("Repositories")
+                                .aria_expanded(self.show_repositories).focusable().tab_stop(true)
+                                .px_2().py_2().cursor_pointer().text_size(px(12.))
+                                .font_weight(FontWeight::BOLD).text_color(rgb(0x626772))
+                                .flex().items_center().gap_2()
+                                .child(svg().data(ICON_FOLDER).w(px(14.)).h(px(14.)))
+                                .child("Repositories")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_repositories = !view.show_repositories; cx.notify();
                                 }))
-                        })))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if !event.keystroke.modifiers.modified() &&
+                                        matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                        view.show_repositories = !view.show_repositories;
+                                        cx.stop_propagation(); cx.notify();
+                                    }
+                                })))
+                            .when(self.show_repositories, |d| d
+                                .child(button("add-repository", "Add repository")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.show_connect_repository = !view.show_connect_repository; cx.notify();
+                                    }))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if !event.keystroke.modifiers.modified() &&
+                                            matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                            view.show_connect_repository = !view.show_connect_repository;
+                                            cx.stop_propagation(); cx.notify();
+                                        }
+                                    })))
+                                .child(div().px_2().py_2().text_size(px(12.))
+                                    .text_color(rgb(0x626772)).child("No repositories connected"))
+                                .when(self.show_connect_repository, |d| d.child(
+                                    div().px_2().py_2().text_size(px(12.))
+                                        .text_color(rgb(0x626772))
+                                        .child("Local folder and GitHub connections are not available yet.")))))
+                    )
                     .child(div().px_2().pt_3().text_size(px(11.))
                         .text_color(rgb(0x626772))
                         .child(self.state.status))
             )
     }
+}
+fn moron_row(id: &str, name: &str, selected: bool, pinned: bool, shortcut: bool,
+    cx: &mut Context<Chat>) -> Stateful<Div> {
+    let chosen = id.to_owned();
+    let key_choice = id.to_owned();
+    let pin_choice = id.to_owned();
+    let pin_key_choice = id.to_owned();
+    div().id(SharedString::from(format!("sidebar-{}-{id}", if shortcut { "pin" } else { "moron" })))
+        .w_full().min_w_0().h(px(36.)).rounded(px(6.))
+        .flex().items_center()
+        .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
+        .child(div().id(SharedString::from(format!("open-{}-{id}", if shortcut { "pin" } else { "moron" })))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("Open {name}")))
+            .aria_selected(selected).focusable().tab_stop(true)
+            .flex_1().min_w_0().h_full().px_2().rounded(px(6.))
+            .flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(rgb(0xECEEF1)))
+            .text_size(px(14.))
+            .child(div().w(px(20.)).flex_shrink_0()
+                .child(svg().data(ICON_AGENT).w(px(18.)).h(px(18.))))
+            .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+            .on_click(cx.listener(move |view, _, _, cx| view.command(Command::SelectMoron(chosen.clone()), cx)))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified() &&
+                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    view.command(Command::SelectMoron(key_choice.clone()), cx);
+                    cx.stop_propagation();
+                }
+            })))
+        .when(!shortcut, |d| d.child(div().id(SharedString::from(format!("pin-{id}")))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(if pinned { format!("Unpin {name}") } else { format!("Pin {name}") }))
+            .focusable().tab_stop(true).w(px(28.)).h_full()
+            .flex().items_center().justify_center().cursor_pointer()
+            .child(svg().data(if pinned { ICON_STAR_FILLED } else { ICON_STAR })
+                .w(px(15.)).h(px(15.)))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.command(Command::ToggleMoronPin { id: pin_choice.clone(), pinned: !pinned }, cx);
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.modified() &&
+                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    view.command(Command::ToggleMoronPin { id: pin_key_choice.clone(), pinned: !pinned }, cx);
+                    cx.stop_propagation();
+                }
+            }))))
 }
 fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
     div()

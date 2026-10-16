@@ -472,6 +472,14 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
+      const moronPin = /^\/v1\/morons\/([^/]+)\/pin$/.exec(path);
+      if (moronPin && request.method === 'PATCH') {
+        const body = await readBody(request);
+        const id = decodeURIComponent(moronPin[1]);
+        if (!catalog.getMoron(id)) return send(response, 404, { error: 'moron_not_found' });
+        if (typeof body?.pinned !== 'boolean') return send(response, 400, { error: 'invalid_pin' });
+        return send(response, 200, { moron: catalog.setMoronPinned(id, body.pinned) });
+      }
       const visualList = /^\/v1\/sessions\/([^/]+)\/visualizations$/.exec(path);
       if (visualList && request.method === 'GET') {
         const session = catalog.getSession(decodeURIComponent(visualList[1]));
