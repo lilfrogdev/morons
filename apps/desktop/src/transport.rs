@@ -23,7 +23,11 @@ pub struct State {
     pub fast_available: bool,
     pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
+    pub moron_details: Vec<MoronDetails>,
     pub pinned_morons: Vec<String>,
+    pub repositories: Vec<NamedRepository>,
+    pub sessions: Vec<(String, String)>,
+    pub selected_session: Option<String>,
     pub account_name: Option<String>,
     pub pi_version: Option<PiVersion>,
     pub pi_version_loading: bool,
@@ -64,7 +68,11 @@ impl Default for State {
             fast_available: false,
             model_favorites: vec![],
             named_morons: vec![],
+            moron_details: vec![],
             pinned_morons: vec![],
+            repositories: vec![],
+            sessions: vec![],
+            selected_session: None,
             account_name: None,
             pi_version: None,
             pi_version_loading: false,
@@ -101,11 +109,16 @@ pub enum Command {
     Reconnect,
     Retry,
     SelectMoron(String),
+    SelectSession { moron_id: String, session_id: String },
+    CreateSession { moron_id: String },
     SelectWorkspace(String),
     CreateWorkspace { id: String, name: String },
     RenameWorkspace(String),
     CreateMoron { id: String, name: String },
     ToggleMoronPin { id: String, pinned: bool },
+    UpdateMoron { id: String, name: String, rules: String, preferences: String },
+    ToggleRepositoryPin { id: String, pinned: bool },
+    ToggleRepositoryArchive { id: String, archived: bool },
     SelectModel { provider: String, id: String },
     SelectEffort(String),
     SelectFast(bool),
@@ -662,7 +675,10 @@ async fn handle(
         }
         Command::Reconnect => Ok(()),
         Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
-        Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } | Command::SelectModel { .. } |
+        Command::SelectSession { .. } | Command::CreateSession { .. } |
+        Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } |
+        Command::UpdateMoron { .. } | Command::ToggleRepositoryPin { .. } | Command::ToggleRepositoryArchive { .. } |
+        Command::SelectModel { .. } |
         Command::SelectEffort(_) | Command::SelectFast(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
@@ -693,20 +709,35 @@ async fn submit_pending(api: &Api, pending: Option<&(String, String)>) -> Result
     }
 }
 
-#[derive(serde::Deserialize)]
-struct NamedMoron {
+#[derive(Clone, serde::Deserialize)]
+pub struct MoronDetails {
     id: String,
-    name: String,
+    pub name: String,
+    pub rules: String,
+    pub preferences: String,
     #[serde(default)]
     pinned: bool,
 }
+impl MoronDetails { pub fn id(&self) -> &str { &self.id } }
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedRepository {
+    pub id: String,
+    pub name: String,
+    pub moron_id: String,
+    pub pinned: bool,
+    pub archived: bool,
+}
+#[derive(serde::Deserialize)]
+struct NamedRepositories { repositories: Vec<NamedRepository> }
 #[derive(serde::Deserialize)]
 struct NamedMorons {
-    morons: Vec<NamedMoron>,
+    morons: Vec<MoronDetails>,
 }
 #[derive(serde::Deserialize)]
 struct NamedSession {
     id: String,
+    title: String,
 }
 #[derive(serde::Deserialize)]
 struct NamedSessions {
@@ -803,7 +834,7 @@ impl NamedApi {
         if response.status().is_success() { Ok(()) }
         else { Err("Workspace update was rejected") }
     }
-    async fn selected_session(&self, moron_id: &str, workspace_id: &str) -> Result<String, &'static str> {
+    async fn selected_session(&self, moron_id: &str, workspace_id: &str, preferred: Option<&str>) -> Result<(String, Vec<(String, String)>), &'static str> {
         if !valid_named_id(moron_id) {
             return Err("Invalid named moron");
         }
@@ -819,22 +850,21 @@ impl NamedApi {
         if sessions.sessions.len() > 200 {
             return Err("Named sessions exceed client limit");
         }
-        if let Some(first) = sessions.sessions.first() {
-            if !valid_named_id(&first.id) {
+        if sessions.sessions.iter().any(|item| !valid_named_id(&item.id) || item.title.len() > 80) {
                 return Err("Invalid named session");
-            }
-            return Ok(first.id.clone());
+        }
+        if !sessions.sessions.is_empty() {
+            let selected = preferred.filter(|id| sessions.sessions.iter().any(|item| item.id == *id))
+                .unwrap_or(&sessions.sessions[0].id).to_owned();
+            return Ok((selected, sessions.sessions.into_iter().map(|item| (item.id, item.title)).collect()));
         }
 
 
         let first_id = moron_id.to_owned();
         let _ = self.post(&route, serde_json::json!({"id":first_id})).await;
         let sessions: NamedSessions = self.get(&route).await?;
-        sessions
-            .sessions
-            .first()
-            .filter(|s| valid_named_id(&s.id))
-            .map(|s| s.id.clone())
+        sessions.sessions.first().filter(|s| valid_named_id(&s.id))
+            .map(|s| (s.id.clone(), sessions.sessions.iter().map(|item| (item.id.clone(), item.title.clone())).collect()))
             .ok_or("Cannot select named session")
     }
 }
@@ -1037,6 +1067,7 @@ async fn named_http(
     let mut state = State { local_mode: local_backend.is_some(), ..State::default() };
     let mut pending: Option<(String, String)> = None;
     let mut selected = "repo".to_owned();
+    let mut selected_session: Option<String> = None;
     let mut selected_workspace = "personal".to_owned();
     loop {
         let refreshed = async {
@@ -1050,6 +1081,12 @@ async fn named_http(
             }
             let workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
                 .ok_or("Workspace unavailable")?.name.clone();
+            let repositories: NamedRepositories = api.get(&format!("v1/repositories?workspaceId={selected_workspace}")).await?;
+            if repositories.repositories.len() > 32 || repositories.repositories.iter().any(|item|
+                !valid_named_id(&item.id) || !valid_named_id(&item.moron_id) || item.name.len() > 80) {
+                return Err("Invalid repository catalog");
+            }
+            state.repositories = repositories.repositories;
             let catalog: NamedMorons = api.get(&format!("v1/morons?workspaceId={selected_workspace}")).await?;
             if catalog.morons.len() > 32 || catalog.morons.iter().any(|m| !valid_named_id(&m.id) || m.name.len() > 80) {
                 return Err("Invalid named moron catalog");
@@ -1059,8 +1096,10 @@ async fn named_http(
             }
             if !catalog.morons.iter().any(|m| m.id == selected) {
                 selected = catalog.morons.first().ok_or("No named moron available")?.id.clone();
+                selected_session = None;
             }
-            let session = api.selected_session(&selected, &selected_workspace).await?;
+            let (session, sessions) = api.selected_session(&selected, &selected_workspace, selected_session.as_deref()).await?;
+            selected_session = Some(session.clone());
             let models: NamedModels = api.get(&format!("v1/sessions/{session}/models")).await?;
             if models.models.len() > 128 {
                 return Err("Model catalog exceeds client limit");
@@ -1115,7 +1154,7 @@ async fn named_http(
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
+            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, sessions, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
         }
         .await;
         let session = match refreshed {
@@ -1135,7 +1174,10 @@ async fn named_http(
                 state.workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
                     .map(|item| item.name.clone());
                 state.named_morons.clear();
+                state.moron_details.clear();
                 state.pinned_morons.clear();
+                state.sessions.clear();
+                state.selected_session = None;
                 state.selected_moron = None;
                 state.snapshot = Snapshot::empty();
                 state.models.clear();
@@ -1157,11 +1199,11 @@ async fn named_http(
                         if state.request_error.is_none() { selected = id; }
                     }
                     Command::SelectWorkspace(id) if state.workspaces.iter().any(|(known, _)| known == &id) => {
-                        selected_workspace = id; selected.clear(); state.request_error = None;
+                        selected_workspace = id; selected.clear(); selected_session = None; state.request_error = None;
                     }
                     Command::CreateWorkspace { id, name } if valid_named_id(&id) && valid_workspace_name(&name) => {
                         state.request_error = api.post("v1/workspaces", serde_json::json!({"id":id,"name":name})).await.err();
-                        if state.request_error.is_none() { selected_workspace = id; selected.clear(); }
+                        if state.request_error.is_none() { selected_workspace = id; selected.clear(); selected_session = None; }
                     }
                     Command::RenameWorkspace(name) if valid_workspace_name(&name) => {
                         state.request_error = api.patch(&format!("v1/workspaces/{selected_workspace}"),
@@ -1177,7 +1219,7 @@ async fn named_http(
                 publisher.publish(&state);
                 continue;
             }
-            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name))) => {
+            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, sessions, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name))) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
@@ -1187,7 +1229,10 @@ async fn named_http(
                 state.model_favorites = favorites;
                 state.snapshot = snapshot;
                 state.pinned_morons = catalog.morons.iter().filter(|m| m.pinned).map(|m| m.id.clone()).collect();
-                state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
+                state.named_morons = catalog.morons.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+                state.moron_details = catalog.morons;
+                state.sessions = sessions;
+                state.selected_session = Some(session.clone());
                 state.account_name = Some(account_name);
                 state.selected_moron = Some(selected.clone());
                 state.workspaces = workspaces.workspaces.into_iter().map(|item| (item.id, item.name)).collect();
@@ -1250,13 +1295,36 @@ async fn named_http(
                     Command::SelectMoron(id) => {
                         if pending.is_none() && state.named_morons.iter().any(|(known, _)| known == &id) {
                             selected = id;
+                            selected_session = None;
                             state.request_error = None;
+                        }
+                    }
+                    Command::SelectSession { moron_id, session_id } => {
+                        if pending.is_none() && state.named_morons.iter().any(|(known, _)| known == &moron_id) {
+                            let known: NamedSessions = match api.get(&format!("v1/morons/{moron_id}/sessions")).await {
+                                Ok(value) => value,
+                                Err(error) => { state.request_error = Some(error); publisher.publish(&state); continue; }
+                            };
+                            if known.sessions.iter().any(|item| item.id == session_id) {
+                                selected = moron_id;
+                                selected_session = Some(session_id);
+                                state.request_error = None;
+                            }
+                        }
+                    }
+                    Command::CreateSession { moron_id } => {
+                        if pending.is_none() && state.repositories.iter().any(|item|
+                            item.moron_id == moron_id && !item.archived) {
+                            let id = format!("s-{}", uuid::Uuid::new_v4().simple());
+                            state.request_error = api.post(&format!("v1/morons/{moron_id}/sessions"),
+                                serde_json::json!({"id":id,"title":"New thread"})).await.err();
+                            if state.request_error.is_none() { selected = moron_id; selected_session = Some(id); }
                         }
                     }
                     Command::SelectWorkspace(id) => {
                         if pending.is_none() && state.workspaces.iter().any(|(known, _)| known == &id) {
                             selected_workspace = id;
-                            selected.clear();
+                            selected.clear(); selected_session = None;
                             state.request_error = None;
                         }
                     }
@@ -1281,12 +1349,37 @@ async fn named_http(
                                 serde_json::json!({"pinned":pinned})).await.err();
                         }
                     }
+                    Command::UpdateMoron { id, name, rules, preferences } => {
+                        if !state.named_morons.iter().any(|(known, _)| known == &id) ||
+                            !valid_workspace_name(&name) || rules.len() > 12000 || preferences.len() > 12000 {
+                            state.request_error = Some("Invalid Moron settings");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/morons/{id}"),
+                                serde_json::json!({"name":name,"rules":rules,"preferences":preferences})).await.err();
+                        }
+                    }
+                    Command::ToggleRepositoryPin { id, pinned } => {
+                        if !state.repositories.iter().any(|item| item.id == id) {
+                            state.request_error = Some("Repository is unavailable");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/repositories/{id}/pin?workspaceId={selected_workspace}"),
+                                serde_json::json!({"pinned":pinned})).await.err();
+                        }
+                    }
+                    Command::ToggleRepositoryArchive { id, archived } => {
+                        if !state.repositories.iter().any(|item| item.id == id) {
+                            state.request_error = Some("Repository is unavailable");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/repositories/{id}/archive?workspaceId={selected_workspace}"),
+                                serde_json::json!({"archived":archived})).await.err();
+                        }
+                    }
                     Command::CreateWorkspace { id, name } => {
                         if !valid_named_id(&id) || id == "personal" || !valid_workspace_name(&name) {
                             state.request_error = Some("Enter a workspace name of 1–80 characters");
                         } else {
                             state.request_error = api.post("v1/workspaces", serde_json::json!({"id":id,"name":name})).await.err();
-                            if state.request_error.is_none() { selected_workspace = id; selected.clear(); }
+                            if state.request_error.is_none() { selected_workspace = id; selected.clear(); selected_session = None; }
                         }
                     }
                     Command::RenameWorkspace(name) => {

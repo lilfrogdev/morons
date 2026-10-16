@@ -15,9 +15,12 @@ use morons_desktop::{
 const ICON_PLUS: &[u8] = include_bytes!("assets/tabler/plus.svg");
 const ICON_SEND: &[u8] = include_bytes!("assets/tabler/arrow-up.svg");
 const ICON_MIC: &[u8] = include_bytes!("assets/tabler/microphone.svg");
-const ICON_HOME: &[u8] = include_bytes!("assets/tabler/home.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("assets/tabler/folder.svg");
 const ICON_AGENT: &[u8] = include_bytes!("assets/tabler/robot.svg");
+const ICON_GAUGE: &[u8] = include_bytes!("assets/tabler/gauge.svg");
+const ICON_SETTINGS: &[u8] = include_bytes!("assets/tabler/settings.svg");
+const ICON_PIN: &[u8] = include_bytes!("assets/tabler/pin.svg");
+const ICON_ARCHIVE: &[u8] = include_bytes!("assets/tabler/archive.svg");
 const ICON_CPU: &[u8] = include_bytes!("assets/tabler/cpu.svg");
 const ICON_OPENAI: &[u8] = include_bytes!("assets/tabler/brand-openai.svg");
 const ICON_SEARCH: &[u8] = include_bytes!("assets/tabler/search.svg");
@@ -48,6 +51,8 @@ fn model_version(id: &str) -> (u16, u16) {
 }
 
 actions!(morons, [SendMessage, Quit, FocusNext, FocusPrevious]);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavSection { Morons, Repositories, Usage, Settings }
 struct Chat {
     input: Entity<input::TextInput>,
     model_search: Entity<input::TextInput>,
@@ -55,6 +60,9 @@ struct Chat {
     login_password: Entity<input::TextInput>,
     workspace_input: Entity<input::TextInput>,
     moron_input: Entity<input::TextInput>,
+    settings_name: Entity<input::TextInput>,
+    settings_rules: Entity<input::TextInput>,
+    settings_preferences: Entity<input::TextInput>,
     bootstrap_token: Entity<input::TextInput>,
     provider_callback: Entity<input::TextInput>,
     worker: Worker,
@@ -74,6 +82,9 @@ struct Chat {
     show_pinned: bool,
     show_morons: bool,
     show_repositories: bool,
+    show_archived: bool,
+    nav_section: NavSection,
+    settings_moron_id: Option<String>,
     show_profile: bool,
     show_usage: bool,
     usage_window: String,
@@ -93,6 +104,9 @@ impl Chat {
         let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
         let workspace_input = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("workspace-name"); field.set_placeholder("Workspace name"); field });
         let moron_input = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("new-moron-name"); field.set_placeholder("Moron name"); field });
+        let settings_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-name"); field.set_placeholder("Moron name"); field });
+        let settings_rules = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-rules"); field.set_placeholder("Shared instructions for new threads"); field });
+        let settings_preferences = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-preferences"); field.set_placeholder("Preferences for new threads"); field });
         let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("Setup code"); field });
         let provider_callback = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("provider-callback"); field.set_placeholder("Paste final callback URL if needed"); field });
         let (worker, updates) = Worker::start(config);
@@ -101,7 +115,7 @@ impl Chat {
                 if view
                     .update(cx, |view, cx| {
                         if let Some((id, text)) = &state.accepted
-                            && view.state.selected_moron == state.selected_moron
+                            && view.state.selected_session == state.selected_session
                             && view.last_ack.as_ref() != Some(id)
                         {
                             view.last_ack = Some(id.clone());
@@ -132,6 +146,8 @@ impl Chat {
                             view.show_create_moron = false;
                             view.show_profile = false;
                             view.show_usage = false;
+                            view.nav_section = NavSection::Morons;
+                            view.settings_moron_id = None;
                             view.usage_menu = None;
                             view.usage_provider = None;
                             view.usage_model = None;
@@ -141,9 +157,9 @@ impl Chat {
                             view.model_section.clear();
                             view.model_cursor = 0;
                             view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
-                        } else if view.state.selected_moron != state.selected_moron {
+                        } else if view.state.selected_session != state.selected_session {
                             let current = view.input.read(cx).text().to_owned();
-                            let restored = view.drafts.switch(state.selected_moron.as_deref(), &current);
+                            let restored = view.drafts.switch(state.selected_session.as_deref(), &current);
                             view.input.update(cx, |input, cx| { input.set_text(restored); cx.notify(); });
                             view.last_ack = None;
                             view.show_model = false;
@@ -186,6 +202,9 @@ impl Chat {
             login_password,
             workspace_input,
             moron_input,
+            settings_name,
+            settings_rules,
+            settings_preferences,
             bootstrap_token,
             provider_callback,
             worker,
@@ -204,6 +223,9 @@ impl Chat {
             show_pinned: true,
             show_morons: true,
             show_repositories: true,
+            show_archived: false,
+            nav_section: NavSection::Morons,
+            settings_moron_id: None,
             show_profile: false,
             show_usage: false,
             usage_window: "all".into(),
@@ -238,6 +260,7 @@ impl Chat {
     }
     fn open_usage(&mut self, cx: &mut Context<Self>) {
         self.show_usage = true;
+        self.nav_section = NavSection::Usage;
         self.show_profile = false;
         self.usage_menu = None;
         self.usage_window = "all".into();
@@ -245,6 +268,53 @@ impl Chat {
         self.usage_model = None;
         self.request_usage(cx);
         cx.notify();
+    }
+    fn select_section(&mut self, section: NavSection, cx: &mut Context<Self>) {
+        if section == NavSection::Usage { self.open_usage(cx); return; }
+        if section == NavSection::Settings {
+            if let Some(id) = self.state.selected_moron.clone() { self.load_moron_settings(&id, cx); }
+        }
+        self.nav_section = section;
+        self.show_usage = false;
+        self.show_profile = false;
+        if section == NavSection::Morons && self.state.repositories.iter().any(|repo|
+            self.state.selected_moron.as_deref() == Some(repo.moron_id.as_str())) {
+            if let Some((id, _)) = self.state.named_morons.iter().find(|(id, _)|
+                !self.state.repositories.iter().any(|repo| repo.moron_id == *id)) {
+                self.command(Command::SelectMoron(id.clone()), cx);
+            }
+        }
+        if section == NavSection::Repositories {
+            if let Some(repo) = self.state.repositories.iter().find(|repo| !repo.archived) {
+                if self.state.selected_moron.as_deref() != Some(repo.moron_id.as_str()) {
+                    self.command(Command::SelectMoron(repo.moron_id.clone()), cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+    fn load_moron_settings(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(item) = self.state.moron_details.iter().find(|item| item.id() == id) {
+            self.settings_name.update(cx, |field, cx| { field.set_text(item.name.clone()); cx.notify(); });
+            self.settings_rules.update(cx, |field, cx| { field.set_text(item.rules.clone()); cx.notify(); });
+            self.settings_preferences.update(cx, |field, cx| { field.set_text(item.preferences.clone()); cx.notify(); });
+            self.settings_moron_id = Some(id.to_owned());
+        }
+    }
+    fn open_moron_settings(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.load_moron_settings(id, cx);
+        self.nav_section = NavSection::Settings;
+        self.show_usage = false;
+        self.show_profile = false;
+        cx.notify();
+    }
+    fn save_moron_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.settings_moron_id.clone() {
+            self.command(Command::UpdateMoron { id,
+                name: self.settings_name.read(cx).text().to_owned(),
+                rules: self.settings_rules.read(cx).text().to_owned(),
+                preferences: self.settings_preferences.read(cx).text().to_owned() }, cx);
+        }
     }
     fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_model = !self.show_model;
@@ -285,6 +355,10 @@ impl Chat {
         }
         if self.state.account_login {
             self.account_action(self.auth_signup, cx);
+            return;
+        }
+        if !matches!(self.nav_section, NavSection::Morons | NavSection::Repositories) ||
+            !self.input.focus_handle(cx).is_focused(window) {
             return;
         }
         if !self.state.ready {
@@ -370,9 +444,9 @@ impl Chat {
                 .child(div().flex().items_center().justify_between()
                     .child(div().text_xl().font_weight(FontWeight::BOLD).child("Usage"))
                     .child(button("usage-back", "Back to chat").on_click(cx.listener(|view, _, _, cx| {
-                        view.show_usage = false; view.usage_menu = None; cx.notify();
+                        view.select_section(NavSection::Morons, cx); view.usage_menu = None;
                     })).on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
-                        if activation_key(event) { view.show_usage = false; view.usage_menu = None;
+                        if activation_key(event) { view.select_section(NavSection::Morons, cx); view.usage_menu = None;
                             cx.stop_propagation(); cx.notify(); }
                     }))))
                 .child(div().text_sm().text_color(rgb(0x626772))
@@ -499,32 +573,104 @@ impl Chat {
                     .child(div().text_xs().text_color(rgb(0x626772)).child(report.coverage.note))
                 }))
     }
-    fn sidebar(&self, narrow: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div().id("settings-panel").role(gpui::Role::Region).aria_label("Settings")
+            .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
+            .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
+                .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
+                .when_some(self.settings_moron_id.clone(), |d, id| d.child(
+                    div().flex().flex_col().gap_3().p_4().rounded(px(10.))
+                        .border_1().border_color(rgb(0xE3E5E8))
+                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD)
+                            .child(format!("Moron · {id}")))
+                        .child(div().text_sm().child("Name"))
+                        .child(div().px_2().py_1().rounded(px(6.)).border_1().border_color(rgb(0xBAC8D3))
+                            .child(self.settings_name.clone()))
+                        .child(div().text_sm().child("Rules for new threads"))
+                        .child(div().min_h(px(85.)).px_2().py_1().rounded(px(6.))
+                            .border_1().border_color(rgb(0xBAC8D3)).child(self.settings_rules.clone()))
+                        .child(div().text_sm().child("Preferences for new threads"))
+                        .child(div().min_h(px(85.)).px_2().py_1().rounded(px(6.))
+                            .border_1().border_color(rgb(0xBAC8D3)).child(self.settings_preferences.clone()))
+                        .child(button("save-moron-settings", "Save Moron settings")
+                            .on_click(cx.listener(|view, _, _, cx| view.save_moron_settings(cx)))
+                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.save_moron_settings(cx); cx.stop_propagation(); }
+                            })))
+                ))
+                .child(div().flex().flex_col().gap_3().p_4().rounded(px(10.))
+                    .border_1().border_color(rgb(0xE3E5E8))
+                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Account"))
+                    .when_some(self.state.account_name.clone(), |d, name| d.child(
+                        div().text_sm().child(name)))
+                    .child(button("settings-pi-version", "Check Pi version")
+                        .on_click(cx.listener(|view, _, _, cx| view.command(Command::CheckPiVersion, cx))))
+                    .when(self.state.pi_version_loading, |d| d.child(div().text_sm().child("Checking Pi releases…")))
+                    .when(self.state.pi_version_error, |d| d.child(div().text_sm().child("Could not check Pi versions")))
+                    .when_some(self.state.pi_version.clone(), |d, version| d.child(
+                        div().text_sm().child(format!("Installed Pi: ai {}, durable {}",
+                            version.installed.ai, version.installed.durable))))
+                    .child(button("settings-sign-out", "Sign out")
+                        .on_click(cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)))))
+            )
+    }
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.state.selected_moron.as_deref();
         div()
             .id("moron-sidebar")
             .role(gpui::Role::Navigation)
             .aria_label("Morons sidebar")
             .h_full()
-            .w(px(if narrow { 176. } else { 272. }))
+            .w(px(272.))
             .flex_shrink_0()
             .flex()
             .bg(rgb(0xF7F7F8))
             .border_r_1()
             .border_color(rgb(0xE3E5E8))
-            .when(!narrow, |d| d.child(
-                div().w(px(52.)).h_full().flex_shrink_0()
-                    .border_r_1().border_color(rgb(0xE3E5E8))
-                    .flex().flex_col().items_center().pt_4()
-                    .child(div().w(px(38.)).h(px(38.)).rounded(px(6.))
-                        .bg(rgb(0xECEEF1)).flex().items_center().justify_center()
-                        .child(svg().data(ICON_HOME).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
-            ))
+            .child(div().id("navigation-rail").role(gpui::Role::Navigation).aria_label("Sections")
+                .w(px(52.)).h_full().flex_shrink_0().border_r_1().border_color(rgb(0xE3E5E8))
+                .flex().flex_col().items_center().gap_2().pt_4().pb_3()
+                .child(rail_item("rail-morons", "Morons", ICON_AGENT,
+                    self.nav_section == NavSection::Morons, NavSection::Morons, cx))
+                .child(rail_item("rail-repositories", "Repositories", ICON_FOLDER,
+                    self.nav_section == NavSection::Repositories, NavSection::Repositories, cx))
+                .child(rail_item("rail-usage", "Usage", ICON_GAUGE,
+                    self.nav_section == NavSection::Usage, NavSection::Usage, cx))
+                .child(div().flex_1())
+                .child(rail_item("rail-settings", "Settings", ICON_SETTINGS,
+                    self.nav_section == NavSection::Settings, NavSection::Settings, cx))
+                .when_some(self.state.account_name.clone(), |d, name| {
+                    let initials = name.split('-').filter_map(|part| part.chars().next())
+                        .take(2).collect::<String>().to_uppercase();
+                    d.child(div().id("profile-control").role(gpui::Role::Button)
+                        .aria_label(SharedString::from(format!("Account {name}")))
+                        .aria_expanded(self.show_profile).focusable().tab_stop(true)
+                        .w(px(38.)).h(px(38.)).rounded(px(10.)).cursor_pointer()
+                        .hover(|d| d.bg(rgb(0xECEEF1))).flex().items_center().justify_center()
+                        .child(div().w(px(30.)).h(px(30.)).rounded_full()
+                            .bg(rgb(0xDDE5EB)).flex().items_center().justify_center()
+                            .text_size(px(11.)).font_weight(FontWeight::BOLD).child(initials))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.show_profile = !view.show_profile;
+                            cx.stop_propagation(); cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                            if activation_key(event) {
+                                view.show_profile = !view.show_profile;
+                                cx.stop_propagation(); cx.notify();
+                            }
+                        })))
+                }))
             .child(
                 div().flex_1().min_w_0().h_full().flex().flex_col()
                     .px_3().pt_5().pb_3()
                     .child(div().px_2().mb_2().text_size(px(17.))
-                        .font_weight(FontWeight::BOLD).child("Morons"))
+                        .font_weight(FontWeight::BOLD).child(match self.nav_section {
+                            NavSection::Repositories => "Repositories",
+                            NavSection::Usage => "Usage",
+                            NavSection::Settings => "Settings",
+                            NavSection::Morons => "Morons",
+                        }))
                     .when_some(self.state.workspace_name.clone(), |d, workspace| d
                         .child(div().id("workspace-label").role(gpui::Role::Button)
                             .aria_label("Choose workspace").aria_expanded(self.show_workspaces)
@@ -590,13 +736,22 @@ impl Chat {
                                 })))
                             .when(self.show_pinned, |d| d.child(div().id("pinned-list").role(gpui::Role::List)
                                 .aria_label("Pinned shortcuts").flex().flex_col().gap_1()
-                                .when(self.state.pinned_morons.is_empty(), |d| d.child(
+                                .when(self.nav_section != NavSection::Repositories && self.state.pinned_morons.iter().all(|id|
+                                    self.state.repositories.iter().any(|repo| repo.moron_id == *id)), |d| d.child(
                                     div().px_2().py_1().text_size(px(12.)).text_color(rgb(0x626772))
                                         .child("No pinned Morons")))
-                                .children(self.state.named_morons.iter().filter(|(id, _)|
-                                    self.state.pinned_morons.contains(id)).map(|(id, name)|
-                                    moron_row(id, name, active == Some(id.as_str()), true, true, cx))))))
-                        .child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons")
+                                .when(self.nav_section == NavSection::Repositories, |d| d
+                                    .when(self.state.repositories.iter().all(|repo| !repo.pinned || repo.archived), |d| d.child(
+                                        div().px_2().py_1().text_size(px(12.)).text_color(rgb(0x626772))
+                                            .child("No pinned repositories")))
+                                    .children(self.state.repositories.iter().filter(|repo| repo.pinned && !repo.archived)
+                                        .map(|repo| repository_row(repo, active == Some(repo.moron_id.as_str()), true, cx))))
+                                .when(self.nav_section != NavSection::Repositories, |d| d
+                                    .children(self.state.named_morons.iter().filter(|(id, _)|
+                                        self.state.pinned_morons.contains(id) &&
+                                        !self.state.repositories.iter().any(|repo| repo.moron_id == *id)).map(|(id, name)|
+                                        moron_row(id, name, active == Some(id.as_str()), true, true, cx)))))))
+                        .when(self.nav_section != NavSection::Repositories, |d| d.child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons")
                             .child(div().id("morons-heading").role(gpui::Role::Button).aria_label("Morons")
                                 .aria_expanded(self.show_morons).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
@@ -634,19 +789,21 @@ impl Chat {
                                             })))))
                                 .child(div().id("moron-list").role(gpui::Role::List)
                                     .aria_label("Named Morons").flex().flex_col().gap_1()
-                                    .when(self.state.named_morons.is_empty(), |d| d.child(
+                                    .when(self.state.named_morons.iter().all(|(id, _)|
+                                        self.state.repositories.iter().any(|repo| repo.moron_id == *id)), |d| d.child(
                                         div().px_2().py_2().text_size(px(12.))
                                             .text_color(rgb(0x626772)).child("No Morons yet")))
-                                    .children(self.state.named_morons.iter().map(|(id, name)|
+                                    .children(self.state.named_morons.iter().filter(|(id, _)|
+                                        !self.state.repositories.iter().any(|repo| repo.moron_id == *id)).map(|(id, name)|
                                         moron_row(id, name, active == Some(id.as_str()),
-                                            self.state.pinned_morons.contains(id), false, cx))))))
-                        .child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories")
+                                            self.state.pinned_morons.contains(id), false, cx)))))))
+                        .when(self.nav_section == NavSection::Repositories, |d| d.child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories")
                             .child(div().id("repositories-heading").role(gpui::Role::Button).aria_label("Repositories")
                                 .aria_expanded(self.show_repositories).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
                                 .font_weight(FontWeight::BOLD).text_color(rgb(0x626772))
                                 .flex().items_center().gap_2()
-                                .child(svg().data(ICON_FOLDER).w(px(14.)).h(px(14.)))
+                                .child(svg().data(ICON_FOLDER).w(px(14.)).h(px(14.)).text_color(rgb(0x626772)))
                                 .child("Repositories")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.show_repositories = !view.show_repositories; cx.notify();
@@ -659,8 +816,32 @@ impl Chat {
                                     }
                                 })))
                             .when(self.show_repositories, |d| d
-                                .child(div().px_2().py_2().text_size(px(12.))
-                                    .text_color(rgb(0x626772)).child("No repositories connected"))))
+                                .when(self.state.repositories.is_empty(), |d| d.child(
+                                    div().px_2().py_2().text_size(px(12.))
+                                        .text_color(rgb(0x626772)).child("No repositories connected")))
+                                .children(self.state.repositories.iter().filter(|repo| !repo.archived)
+                                    .map(|repo| div().flex().flex_col()
+                                        .child(repository_row(repo, active == Some(repo.moron_id.as_str()), false, cx))
+                                        .when(active == Some(repo.moron_id.as_str()), |d| d
+                                            .child(button("new-repo-thread", "New thread")
+                                                .on_click(cx.listener({ let moron_id = repo.moron_id.clone();
+                                                    move |view, _, _, cx| view.command(Command::CreateSession { moron_id: moron_id.clone() }, cx)
+                                                })))
+                                            .children(self.state.sessions.iter().map(|(id, title)|
+                                                session_row(&repo.moron_id, id, title,
+                                                    self.state.selected_session.as_deref() == Some(id.as_str()), cx)))))))))
+                        .when(self.nav_section == NavSection::Repositories && self.state.repositories.iter().any(|repo| repo.archived), |d| d.child(
+                            div().id("archived-section").role(gpui::Role::Region).aria_label("Archived repositories")
+                                .child(div().id("archived-heading").role(gpui::Role::Button)
+                                    .aria_label("Archived repositories").aria_expanded(self.show_archived)
+                                    .focusable().tab_stop(true).px_2().py_2().cursor_pointer()
+                                    .text_size(px(12.)).font_weight(FontWeight::BOLD).child("Archived")
+                                    .on_click(cx.listener(|view, _, _, cx| { view.show_archived = !view.show_archived; cx.notify(); }))
+                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                        if activation_key(event) { view.show_archived = !view.show_archived; cx.stop_propagation(); cx.notify(); }
+                                    })))
+                                .when(self.show_archived, |d| d.children(self.state.repositories.iter().filter(|repo| repo.archived)
+                                    .map(|repo| repository_row(repo, false, false, cx))))))
                     )
                     .when(self.state.status != "Connected", |d| d.child(
                         div().px_2().pt_2().text_size(px(11.))
@@ -725,34 +906,120 @@ impl Chat {
                                         cx.stop_propagation();
                                     }
                                 })))))
-                    .when_some(self.state.account_name.clone(), |d, name| {
-                        let initials = name.split('-').filter_map(|part| part.chars().next())
-                            .take(2).collect::<String>().to_uppercase();
-                        d.child(div().id("profile-control").role(gpui::Role::Button)
-                            .aria_label(SharedString::from(format!("Account {name}")))
-                            .aria_expanded(self.show_profile).focusable().tab_stop(true)
-                            .w_full().px_2().py_2().rounded(px(6.)).cursor_pointer()
-                            .hover(|d| d.bg(rgb(0xECEEF1)))
-                            .flex().items_center().gap_2()
-                            .child(div().w(px(30.)).h(px(30.)).rounded_full()
-                                .bg(rgb(0xDDE5EB)).flex().items_center().justify_center()
-                                .text_size(px(11.)).font_weight(FontWeight::BOLD).child(initials))
-                            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(name))
-                            .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.show_profile = !view.show_profile;
-                                cx.stop_propagation(); cx.notify();
-                            }))
-                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
-                                if !event.keystroke.modifiers.modified() &&
-                                    matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                    view.show_profile = !view.show_profile;
-                                    cx.stop_propagation(); cx.notify();
-                                }
-                            })))
-                    })
             )
     }
+}
+fn rail_item(id: &'static str, label: &'static str, icon: &'static [u8], selected: bool,
+    section: NavSection, cx: &mut Context<Chat>) -> Stateful<Div> {
+    div().id(id).role(gpui::Role::Button).aria_label(label).aria_selected(selected)
+        .focusable().tab_stop(true).w(px(38.)).h(px(38.)).rounded(px(10.))
+        .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
+        .flex().items_center().justify_center().cursor_pointer()
+        .hover(|d| d.bg(rgb(0xECEEF1)))
+        .child(svg().data(icon).w(px(21.)).h(px(21.))
+            .text_color(rgb(if selected { 0x24262B } else { 0x626772 })))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.select_section(section, cx); cx.stop_propagation();
+        }))
+        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+            if activation_key(event) { view.select_section(section, cx); cx.stop_propagation(); }
+        }))
+}
+fn repository_row(repo: &morons_desktop::transport::NamedRepository, selected: bool, shortcut: bool,
+    cx: &mut Context<Chat>) -> Stateful<Div> {
+    let moron_id = repo.moron_id.clone();
+    let moron_key = moron_id.clone();
+    let pin_id = repo.id.clone();
+    let pin_key = pin_id.clone();
+    let archive_id = repo.id.clone();
+    let archive_key = archive_id.clone();
+    let pinned = repo.pinned;
+    let archived = repo.archived;
+    let name = repo.name.clone();
+    let group = SharedString::from(format!("repo-row-{}-{shortcut}", repo.id));
+    div().id(SharedString::from(format!("repository-{}-{}", if shortcut { "shortcut" } else { "list" }, repo.id)))
+        .group(group.clone())
+        .w_full().min_w_0().h(px(36.)).rounded(px(10.)).flex().items_center()
+        .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
+        .hover(|d| d.bg(rgb(0xECEEF1)))
+        .child(div().id(SharedString::from(format!("open-repository-{}-{}", repo.id, shortcut)))
+            .role(gpui::Role::Button).aria_label(SharedString::from(format!("Open repository {name}")))
+            .aria_selected(selected).focusable().tab_stop(true)
+            .flex_1().min_w_0().h_full().px_2().rounded(px(10.))
+            .flex().items_center().gap_2().cursor_pointer().text_size(px(14.))
+            .child(svg().data(ICON_FOLDER).w(px(18.)).h(px(18.)).text_color(rgb(0x626772)))
+            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.select_section(NavSection::Repositories, cx);
+                if view.state.selected_moron.as_deref() != Some(moron_id.as_str()) {
+                    view.command(Command::SelectMoron(moron_id.clone()), cx);
+                }
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if activation_key(event) { view.select_section(NavSection::Repositories, cx);
+                    if view.state.selected_moron.as_deref() != Some(moron_key.as_str()) {
+                        view.command(Command::SelectMoron(moron_key.clone()), cx);
+                    }
+                    cx.stop_propagation(); }
+            })))
+        .child(div().id(SharedString::from(format!("repository-pin-{}-{}", repo.id, shortcut)))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("{} repository {name}", if pinned { "Unpin" } else { "Pin" })))
+            .focusable().tab_stop(true).w(px(26.)).h(px(26.)).rounded(px(8.))
+            .invisible().group_hover(group.clone(), |d| d.visible()).focus(|d| d.visible())
+            .flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(rgb(0xDDE5EB)))
+            .text_color(if pinned { rgb(0x24313D) } else { rgb(0x626772) })
+            .child(svg().data(ICON_PIN).w(px(16.)).h(px(16.)).text_color(rgb(if pinned { 0x24313D } else { 0x626772 })))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.command(Command::ToggleRepositoryPin { id: pin_id.clone(), pinned: !pinned }, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if activation_key(event) { view.command(Command::ToggleRepositoryPin { id: pin_key.clone(), pinned: !pinned }, cx);
+                    cx.stop_propagation(); }
+            })))
+        .child(div().id(SharedString::from(format!("repository-archive-{}-{}", repo.id, shortcut)))
+            .role(gpui::Role::Button)
+            .aria_label(SharedString::from(format!("{} repository {name}", if archived { "Restore" } else { "Archive" })))
+            .focusable().tab_stop(true).w(px(26.)).h(px(26.)).rounded(px(8.))
+            .invisible().group_hover(group, |d| d.visible()).focus(|d| d.visible())
+            .flex().items_center().justify_center().cursor_pointer().hover(|d| d.bg(rgb(0xDDE5EB)))
+            .child(svg().data(ICON_ARCHIVE).w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.command(Command::ToggleRepositoryArchive { id: archive_id.clone(), archived: !archived }, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if activation_key(event) { view.command(Command::ToggleRepositoryArchive { id: archive_key.clone(), archived: !archived }, cx);
+                    cx.stop_propagation(); }
+            })))
+}
+fn session_row(moron_id: &str, session_id: &str, title: &str, selected: bool,
+    cx: &mut Context<Chat>) -> Stateful<Div> {
+    let moron = moron_id.to_owned();
+    let moron_key = moron.clone();
+    let id = session_id.to_owned();
+    let key = id.clone();
+    let label = if title == "New thread" && session_id != moron_id {
+        format!("Thread {}", &session_id[session_id.len().saturating_sub(6)..])
+    } else { title.to_owned() };
+    div().id(SharedString::from(format!("repository-session-{session_id}")))
+        .role(gpui::Role::Button).aria_label(SharedString::from(format!("Open thread {label}")))
+        .aria_selected(selected).focusable().tab_stop(true)
+        .ml_4().px_2().h(px(34.)).rounded(px(8.))
+        .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
+        .flex().items_center().min_w_0().cursor_pointer()
+        .hover(|d| d.bg(rgb(0xECEEF1)))
+        .child(div().truncate().text_size(px(13.)).child(label))
+        .on_click(cx.listener(move |view, _, _, cx| {
+            view.command(Command::SelectSession { moron_id: moron.clone(), session_id: id.clone() }, cx);
+            cx.stop_propagation();
+        }))
+        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+            if activation_key(event) { view.command(Command::SelectSession { moron_id: moron_key.clone(), session_id: key.clone() }, cx);
+                cx.stop_propagation(); }
+        }))
 }
 fn moron_row(id: &str, name: &str, selected: bool, pinned: bool, shortcut: bool,
     cx: &mut Context<Chat>) -> Stateful<Div> {
@@ -760,7 +1027,11 @@ fn moron_row(id: &str, name: &str, selected: bool, pinned: bool, shortcut: bool,
     let key_choice = id.to_owned();
     let pin_choice = id.to_owned();
     let pin_key_choice = id.to_owned();
+    let settings_choice = id.to_owned();
+    let settings_key_choice = id.to_owned();
+    let group = SharedString::from(format!("moron-row-{id}-{shortcut}"));
     div().id(SharedString::from(format!("sidebar-{}-{id}", if shortcut { "pin" } else { "moron" })))
+        .group(group.clone())
         .w_full().min_w_0().h(px(36.)).rounded(px(6.))
         .flex().items_center()
         .bg(if selected { rgb(0xECEEF1) } else { rgb(0xF7F7F8) })
@@ -772,23 +1043,29 @@ fn moron_row(id: &str, name: &str, selected: bool, pinned: bool, shortcut: bool,
             .flex().items_center().gap_2().cursor_pointer().hover(|d| d.bg(rgb(0xECEEF1)))
             .text_size(px(14.))
             .child(div().w(px(20.)).flex_shrink_0()
-                .child(svg().data(ICON_AGENT).w(px(18.)).h(px(18.))))
+                .child(svg().data(ICON_AGENT).w(px(18.)).h(px(18.)).text_color(rgb(0x626772))))
             .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
-            .on_click(cx.listener(move |view, _, _, cx| view.command(Command::SelectMoron(chosen.clone()), cx)))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.select_section(NavSection::Morons, cx);
+                view.command(Command::SelectMoron(chosen.clone()), cx);
+            }))
             .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
                 if !event.keystroke.modifiers.modified() &&
                     matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    view.select_section(NavSection::Morons, cx);
                     view.command(Command::SelectMoron(key_choice.clone()), cx);
                     cx.stop_propagation();
                 }
             })))
-        .when(!shortcut, |d| d.child(div().id(SharedString::from(format!("pin-{id}")))
+        .child(div().id(SharedString::from(format!("pin-{id}-{}", if shortcut { "shortcut" } else { "list" })))
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(if pinned { format!("Unpin {name}") } else { format!("Pin {name}") }))
             .focusable().tab_stop(true).w(px(28.)).h_full()
+            .invisible().group_hover(group.clone(), |d| d.visible()).focus(|d| d.visible())
             .flex().items_center().justify_center().cursor_pointer()
-            .child(svg().data(if pinned { ICON_STAR_FILLED } else { ICON_STAR })
-                .w(px(15.)).h(px(15.)))
+            .child(svg().data(ICON_PIN)
+                .w(px(15.)).h(px(15.)).text_color(rgb(if pinned { 0x24313D } else { 0x626772 })))
+            .text_color(if pinned { rgb(0x24313D) } else { rgb(0x626772) })
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.command(Command::ToggleMoronPin { id: pin_choice.clone(), pinned: !pinned }, cx);
             }))
@@ -798,7 +1075,21 @@ fn moron_row(id: &str, name: &str, selected: bool, pinned: bool, shortcut: bool,
                     view.command(Command::ToggleMoronPin { id: pin_key_choice.clone(), pinned: !pinned }, cx);
                     cx.stop_propagation();
                 }
-            }))))
+            })))
+        .child(div().id(SharedString::from(format!("settings-{id}-{}", if shortcut { "shortcut" } else { "list" })))
+            .role(gpui::Role::Button).aria_label(SharedString::from(format!("Settings for {name}")))
+            .focusable().tab_stop(true).w(px(28.)).h_full()
+            .invisible().group_hover(group, |d| d.visible()).focus(|d| d.visible())
+            .flex().items_center().justify_center().cursor_pointer()
+            .hover(|d| d.bg(rgb(0xECEEF1)))
+            .child(svg().data(ICON_SETTINGS).w(px(15.)).h(px(15.)).text_color(rgb(0x626772)))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.open_moron_settings(&settings_choice, cx); cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                if activation_key(event) { view.open_moron_settings(&settings_key_choice, cx);
+                    cx.stop_propagation(); }
+            })))
 }
 fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
     div()
@@ -856,6 +1147,11 @@ fn usage_row(label: String, metrics: &morons_desktop::transport::UsageMetrics) -
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = window.bounds().size.width < px(760.);
+        let show_chat = (self.nav_section == NavSection::Morons && self.state.selected_moron.is_some() &&
+            !self.state.repositories.iter().any(|repo|
+                self.state.selected_moron.as_deref() == Some(repo.moron_id.as_str()))) ||
+            (self.nav_section == NavSection::Repositories && self.state.repositories.iter().any(|repo|
+                !repo.archived && self.state.selected_moron.as_deref() == Some(repo.moron_id.as_str())));
         let active = self.state.snapshot.active_task_id.clone();
         let error = self
             .local_error
@@ -1037,7 +1333,7 @@ impl Render for Chat {
                     cx.notify();
                 }
             }))
-            .when(!self.state.account_login, |d| d.child(self.sidebar(narrow, cx)))
+            .when(!self.state.account_login, |d| d.child(self.sidebar(cx)))
             .child(div().id("main-pane").flex_1().min_w_0().h_full()
                 .flex().flex_col().bg(rgb(0xFFFFFF))
             .when(!self.state.account_login, |d| d.child(
@@ -1058,7 +1354,12 @@ impl Render for Chat {
                                 div()
                                     .text_xl()
                                     .font_weight(FontWeight::BOLD)
-                                    .child("Morons"),
+                                    .child(match self.nav_section {
+                                        NavSection::Morons => "Morons",
+                                        NavSection::Repositories => "Repositories",
+                                        NavSection::Usage => "Usage",
+                                        NavSection::Settings => "Settings",
+                                    }),
                             )
                             .when(status != "Connected", |d| d.child(
                                 div().text_sm().text_color(rgb(0x667786)).child(status))),
@@ -1146,7 +1447,14 @@ impl Render for Chat {
                     )
             ))
             .when(!self.state.account_login && self.show_usage, |d| d.child(self.usage_panel(cx)))
-            .when(!self.state.account_login && !self.show_usage, |d| d.child(
+            .when(!self.state.account_login && self.nav_section == NavSection::Settings, |d| d.child(self.settings_panel(cx)))
+            .when(!self.state.account_login && self.nav_section == NavSection::Repositories && !show_chat, |d| d.child(
+                div().flex_1().flex().items_center().justify_center().text_size(px(14.))
+                    .text_color(rgb(0x626772)).child("Choose a repository or restore an archived repository")))
+            .when(!self.state.account_login && self.nav_section == NavSection::Morons && !show_chat, |d| d.child(
+                div().flex_1().flex().items_center().justify_center().text_size(px(14.))
+                    .text_color(rgb(0x626772)).child("Create or choose a Moron")))
+            .when(!self.state.account_login && show_chat, |d| d.child(
                 div()
                     .id("history")
                     .role(gpui::Role::List)
@@ -1169,7 +1477,9 @@ impl Render for Chat {
                                     div()
                                         .py_8()
                                         .text_color(rgb(0x667786))
-                                        .child("One Moron. A conversation that stays with you."),
+                                        .child(if self.nav_section == NavSection::Repositories {
+                                            "A repository thread, ready for your next task."
+                                        } else { "One Moron. A conversation that stays with you." }),
                                 )
                             })
                             .children(messages)
@@ -1223,7 +1533,7 @@ impl Render for Chat {
                         .child(error),
                 )
             })
-            .when(!self.state.account_login && !self.show_usage, |d| d.child(
+            .when(!self.state.account_login && show_chat, |d| d.child(
                 div().px(px(if narrow { 12. } else { 16. }))
                     .pb(px(16.)).relative().child(
                     div()

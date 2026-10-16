@@ -37,6 +37,13 @@ export function openCatalog(path) {
     db.exec("ALTER TABLE morons ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'personal'");
   if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'pinned'))
     db.exec("ALTER TABLE morons ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  if (!db.prepare('PRAGMA table_info(sessions)').all().some((column) => column.name === 'title'))
+    db.exec("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT 'New thread'");
+  db.exec(`CREATE TABLE IF NOT EXISTS repository_sidebar (
+    workspace_id TEXT NOT NULL, repository_id TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(workspace_id, repository_id)
+  )`);
   db.exec('CREATE INDEX IF NOT EXISTS morons_workspace ON morons(workspace_id, created_at, id)');
   db.exec("UPDATE replies SET state = 'done' WHERE answer IS NOT NULL AND state = 'accepted'");
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
@@ -54,6 +61,27 @@ export function openCatalog(path) {
       db.prepare('UPDATE morons SET pinned = ? WHERE id = ?').run(Number(pinned), id);
       return moron(getMoron.get(id));
     },
+    updateMoron(id, { name, rules, preferences }) {
+      if (!validId(id) || !getMoron.get(id) || typeof name !== 'string' || !name.trim() || name.length > 80 ||
+          typeof rules !== 'string' || rules.length > 12000 || typeof preferences !== 'string' || preferences.length > 12000)
+        throw new Error('invalid_moron');
+      db.prepare('UPDATE morons SET name = ?, rules = ?, preferences = ? WHERE id = ?')
+        .run(name.trim(), rules, preferences, id);
+      return moron(getMoron.get(id));
+    },
+    repositorySidebar(workspaceId, repositoryId) {
+      const row = db.prepare('SELECT pinned, archived FROM repository_sidebar WHERE workspace_id = ? AND repository_id = ?')
+        .get(workspaceId, repositoryId);
+      return { pinned: Boolean(row?.pinned), archived: Boolean(row?.archived) };
+    },
+    setRepositorySidebar(workspaceId, repositoryId, field, value) {
+      if (!validId(workspaceId) || !validId(repositoryId) || !['pinned', 'archived'].includes(field) || typeof value !== 'boolean')
+        throw new Error('invalid_repository_sidebar');
+      db.prepare(`INSERT INTO repository_sidebar (workspace_id, repository_id, ${field}) VALUES (?, ?, ?)
+        ON CONFLICT(workspace_id, repository_id) DO UPDATE SET ${field} = excluded.${field}`)
+        .run(workspaceId, repositoryId, Number(value));
+      return this.repositorySidebar(workspaceId, repositoryId);
+    },
     createMoron({ id, name, rules, preferences, workspaceId = 'personal' }) {
       if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 80 ||
           typeof rules !== "string" || rules.length > 12000 ||
@@ -62,7 +90,7 @@ export function openCatalog(path) {
         .run(id, name.trim(), rules, preferences, Date.now(), workspaceId);
       return moron(getMoron.get(id));
     },
-    listSessions: (moronId) => db.prepare("SELECT id, moron_id, conversation_id, created_at FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
+    listSessions: (moronId) => db.prepare("SELECT id, moron_id, conversation_id, created_at, title FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
     saveExternalUsage({ id, sessionId, kind, provider, modelId, timestamp, usage }) {
       if (!getSession.get(sessionId) || !['memory'].includes(kind) ||
           typeof id !== 'string' || typeof provider !== 'string' || typeof modelId !== 'string' ||
@@ -80,9 +108,11 @@ export function openCatalog(path) {
     },
     getSession: (id) => session(getSession.get(id)),
     getSessionByConversation: (id) => session(db.prepare("SELECT * FROM sessions WHERE conversation_id = ?").get(id)),
-    createSession(id, moronId, conversationId) {
+    createSession(id, moronId, conversationId, title = 'New thread') {
       if (!validId(id) || !getMoron.get(moronId)) throw new Error("invalid_session");
-      db.prepare("INSERT INTO sessions VALUES (?, ?, ?, ?)").run(id, moronId, conversationId, Date.now());
+      if (typeof title !== 'string' || !title.trim() || title.length > 80) throw new Error('invalid_session');
+      db.prepare("INSERT INTO sessions (id, moron_id, conversation_id, created_at, title) VALUES (?, ?, ?, ?, ?)")
+        .run(id, moronId, conversationId, Date.now(), title.trim());
       return session(getSession.get(id));
     },
     getReply: (sessionId, requestId) => db.prepare("SELECT text, display_text, answer, state FROM replies WHERE session_id = ? AND request_id = ?").get(sessionId, requestId),
@@ -168,6 +198,6 @@ export function openCatalog(path) {
 
 function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, pinned: Boolean(row.pinned) }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id,
-  conversationId: Number(row.conversation_id), createdAt: row.created_at }; }
+  conversationId: Number(row.conversation_id), createdAt: row.created_at, title: row.title ?? 'New thread' }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }
 function reviewSummary(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, checks: JSON.parse(row.checks).map(({ ok }) => ({ ok })), decision: row.decision, createdAt: row.created_at }; }

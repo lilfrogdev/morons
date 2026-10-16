@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { timingSafeEqual, createHash, randomBytes } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
-import { dirname, resolve, sep } from "node:path";
+import { basename, dirname, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -117,6 +117,7 @@ function entryText(entry) {
 }
 
 export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true }) {
+  const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
     throw new Error("ownerToken must contain 32-256 characters");
@@ -148,6 +149,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
     memoryRuntime = createMemoryRuntime({ memory: optchat.memory, catalog, accountId,
+      sharedMoronId: repositoryPlan ? 'repo' : null,
       piContext: BACKGROUND_CONTEXT, compressor: createPiMemoryCompressor(models,
         ({ session, model, answer, callId }) => catalog.saveExternalUsage({
           id: callId,
@@ -202,6 +204,9 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     root = await harness.root(BACKGROUND_CONTEXT, {
       agent: { model: selectedModel, extensions: [] },
     });
+    if (repositoryPlan && !catalog.getMoron('repo'))
+      catalog.createMoron({ id: 'repo', name: repositoryName,
+        rules: '', preferences: '', workspaceId: 'personal' });
   } catch (error) {
     await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
     catalog?.close();
@@ -406,7 +411,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   function scopedHandoffText(handoff) {
     return `@${handoff.target_moron_id} ${handoff.question}\n\n[Scoped answer from @${handoff.target_moron_id}: ${handoff.answer}]`;
   }
-  async function createNamedSession(moron, id, { handoff = false, model = selectedModel } = {}) {
+  async function createNamedSession(moron, id, { handoff = false, model = selectedModel, title = 'New thread' } = {}) {
     const instructions = [moron.rules, moron.preferences].filter(Boolean).join("\n\n");
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
@@ -415,7 +420,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
           (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])] },
     }, BACKGROUND_CONTEXT);
     handoffConfigured.add(id);
-    return catalog.createSession(id, moron.id, conversation.id);
+    return catalog.createSession(id, moron.id, conversation.id, title);
   }
   async function executeDelegatedChat(source, body) {
     const parsed = /^@([a-z][a-z0-9-]{1,39})\s+([\s\S]+)$/.exec(body.text);
@@ -494,6 +499,25 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
+      if (request.method === 'GET' && path === '/v1/repositories') {
+        const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
+        const repositories = repositoryPlan && workspaceId === 'personal' ? [{
+          id: 'configured', name: repositoryName, moronId: 'repo',
+          ...catalog.repositorySidebar(workspaceId, 'configured'),
+        }] : [];
+        return send(response, 200, { repositories });
+      }
+      const repositorySidebar = /^\/v1\/repositories\/([^/]+)\/(pin|archive)$/.exec(path);
+      if (repositorySidebar && request.method === 'PATCH') {
+        const workspaceId = requestUrl.searchParams.get('workspaceId') ?? 'personal';
+        if (!repositoryPlan || workspaceId !== 'personal' || repositorySidebar[1] !== 'configured')
+          return send(response, 404, { error: 'repository_not_found' });
+        const body = await readBody(request);
+        const field = repositorySidebar[2] === 'pin' ? 'pinned' : 'archived';
+        if (typeof body?.[field] !== 'boolean') return send(response, 400, { error: 'invalid_repository_sidebar' });
+        return send(response, 200, { repository: { id: 'configured', name: repositoryName,
+          moronId: 'repo', ...catalog.setRepositorySidebar(workspaceId, 'configured', field, body[field]) } });
+      }
       const moronPin = /^\/v1\/morons\/([^/]+)\/pin$/.exec(path);
       if (moronPin && request.method === 'PATCH') {
         const body = await readBody(request);
@@ -501,6 +525,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (!catalog.getMoron(id)) return send(response, 404, { error: 'moron_not_found' });
         if (typeof body?.pinned !== 'boolean') return send(response, 400, { error: 'invalid_pin' });
         return send(response, 200, { moron: catalog.setMoronPinned(id, body.pinned) });
+      }
+      const moronEdit = /^\/v1\/morons\/([^/]+)$/.exec(path);
+      if (moronEdit && request.method === 'PATCH') {
+        const id = decodeURIComponent(moronEdit[1]);
+        if (!catalog.getMoron(id)) return send(response, 404, { error: 'moron_not_found' });
+        const body = await readBody(request);
+        return send(response, 200, { moron: catalog.updateMoron(id, body) });
       }
       const visualList = /^\/v1\/sessions\/([^/]+)\/visualizations$/.exec(path);
       if (visualList && request.method === 'GET') {
@@ -569,7 +600,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
           const body = await readBody(request);
           if (!validId(body?.id)) return send(response, 400, { error: "invalid_session" });
           if (catalog.getSession(body.id)) return send(response, 409, { error: "session_exists" });
-          return send(response, 201, { session: await createNamedSession(moron, body.id) });
+          return send(response, 201, { session: await createNamedSession(moron, body.id,
+            { title: body.title ?? 'New thread' }) });
         }
       }
       const sessionPath = /^\/v1\/sessions\/([^/]+)\/(history|chat)$/.exec(path);
