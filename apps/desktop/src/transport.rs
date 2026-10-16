@@ -249,7 +249,7 @@ async fn local_account(commands: &mut mpsc::Receiver<Command>, publisher: &Publi
                 .timeout(Duration::from_secs(15)).send().await;
             match result {
                 Ok(response) if response.status().is_success() => { state.first_account_available = false; },
-                Ok(_) => { state.error = Some("First account already exists or setup was rejected"); publisher.publish(&state); continue; },
+                Ok(_) => { state.error = Some("Sign up is unavailable on this Mac. Sign in to an existing account."); publisher.publish(&state); continue; },
                 Err(_) => { state.error = Some("Cannot reach local account server"); publisher.publish(&state); continue; },
             }
         }

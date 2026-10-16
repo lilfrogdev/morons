@@ -20,7 +20,7 @@ impl LocalBackend {
         let data_dir = std::env::var_os("MORONS_LOCAL_DATA_DIR").map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share/morons"));
         if create_account { private_dir(&config_dir)?; private_dir(&data_dir)?; }
-        else if !data_dir.join("accounts.sqlite").is_file() { return Err("Create your first account to get started"); }
+        else if !data_dir.join("accounts.sqlite").is_file() { return Err("Sign up to get started"); }
         let bootstrap_file = config_dir.join("bootstrap");
         let provider_file = config_dir.join("provider-key");
         let bootstrap = if create_account { private_secret(&bootstrap_file, 64)? }

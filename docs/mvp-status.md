@@ -7,9 +7,9 @@ app. The current local tryout is on Mac.
 
 ## Working local path
 
-GPUI can create the first local account and sign in within the app. The local
-server starts only after Create account or Sign in is selected. The owner secret
-is established internally on Create account, so local enrollment needs no
+GPUI provides Sign in and Sign up within the app. The local server starts only
+after one of those actions is selected. The owner secret is established
+internally on Sign up, so local enrollment needs no
 terminal setup code. Separate-server enrollment retains its private setup
 code. The password field is masked; the device bearer stays in app memory
 and can be revoked by Sign out. A loopback account gateway maps the bearer to

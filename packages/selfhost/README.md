@@ -11,12 +11,12 @@ cd ../../apps/desktop
 cargo run --locked
 ```
 
-The app opens to **Create your first account**. Enter an account name and a
-password of at least 12 characters, then select **Create first account**. This
-action starts a loopback-only local account server, establishes a private owner
-secret, creates the account and its Personal workspace, and signs in. No setup
-code needs to be copied. The app does not create local credentials or start
-the server before Create account or Sign in is selected. The password is masked.
+The app opens to **Sign in**, with **Sign up** for a new local account. Enter a
+username and a password of at least 12 characters, then select **Sign up**.
+This action starts a loopback-only local account server, establishes a private
+owner secret, creates the account and its Personal workspace, and signs in.
+No setup code needs to be copied. The app does not create local credentials or
+start the server before Sign up or Sign in is selected. The password is masked.
 For a returning account, select **Sign in**. The 30-day device token stays in
 app memory and is revoked by **Sign out**; sign in again after an app restart.
 The server stores only a hash of each device token. Each account has separate

@@ -54,6 +54,7 @@ struct Chat {
     show_model: bool,
     model_section: String,
     model_cursor: usize,
+    auth_signup: bool,
     drafts: drafts::Drafts,
     _input_subscription: Subscription,
 }
@@ -63,9 +64,9 @@ impl Chat {
         let model_search = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("model-search"); field.set_placeholder("Search models…"); field });
         let input_subscription = cx.observe(&input, |_, _, cx| cx.notify());
         cx.observe(&model_search, |_, _, cx| cx.notify()).detach();
-        let login_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("account-name"); field.set_placeholder("Account name"); field });
+        let login_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("account-name"); field.set_placeholder("Username"); field });
         let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
-        let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("First-account setup code"); field });
+        let bootstrap_token = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("bootstrap-token"); field.set_placeholder("Setup code"); field });
         let provider_callback = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("provider-callback"); field.set_placeholder("Paste final callback URL if needed"); field });
         let (worker, updates) = Worker::start(config);
         let task = cx.spawn(async move |view, cx| {
@@ -86,6 +87,7 @@ impl Chat {
                         }
                         let follow = view.scroll.max_offset().y + view.scroll.offset().y < px(60.);
                         if view.state.account_login && !state.account_login {
+                            view.auth_signup = false;
                             view.login_password.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             view.bootstrap_token.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
@@ -137,6 +139,7 @@ impl Chat {
             show_model: false,
             model_section: String::new(),
             model_cursor: 0,
+            auth_signup: false,
             drafts: drafts::Drafts::default(),
             _input_subscription: input_subscription,
         }
@@ -182,7 +185,7 @@ impl Chat {
             return;
         }
         if self.state.account_login {
-            self.account_action(false, cx);
+            self.account_action(self.auth_signup, cx);
             return;
         }
         if !self.state.ready {
@@ -224,6 +227,11 @@ impl Chat {
         self.command(command, cx);
         self.login_password.update(cx, |field, cx| { field.reset(); cx.notify(); });
         self.bootstrap_token.update(cx, |field, cx| { field.reset(); cx.notify(); });
+    }
+    fn auth_mode(&mut self, sign_up: bool, cx: &mut Context<Self>) {
+        self.auth_signup = sign_up;
+        self.local_error = None;
+        cx.notify();
     }
     fn submit_provider_callback(&mut self, cx: &mut Context<Self>) {
         let url = self.provider_callback.read(cx).text().to_owned();
@@ -324,6 +332,12 @@ fn button(id: &'static str, label: &'static str) -> Stateful<Div> {
         .cursor_pointer()
         .hover(|s| s.bg(rgb(0xD9E2E8)))
         .child(label)
+}
+fn primary_button(id: &'static str, label: &'static str) -> Stateful<Div> {
+    div().id(id).role(gpui::Role::Button).aria_label(label)
+        .focusable().tab_stop(true).px_3().py_2().rounded_sm()
+        .bg(rgb(0x24313D)).text_color(rgb(0xFFFFFF)).text_sm()
+        .cursor_pointer().hover(|s| s.bg(rgb(0x35495A))).child(label)
 }
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -521,45 +535,54 @@ impl Render for Chat {
             ))
             .when(self.state.account_login, |d| d.child(
                 div().id("account-form").role(gpui::Role::Region)
-                    .aria_label("Morons account setup and sign in")
+                    .aria_label("Morons sign in and sign up")
                     .w_full().max_w(px(520.)).mx_auto().mt_8().p_6()
                     .rounded_sm().border_1().border_color(rgb(0xBAC8D3))
                     .bg(rgb(0xFFFFFF)).flex().flex_col().gap_3()
-                    .child(div().text_xl().font_weight(FontWeight::BOLD).child(
-                        if self.state.local_mode { "Welcome to Morons" } else if self.state.first_account_available { "Create your first account" } else { "Sign in" }))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0x626772)).child("Morons"))
+                    .child(div().text_xl().font_weight(FontWeight::BOLD)
+                        .child(if self.auth_signup { "Sign up" } else { "Sign in" }))
                     .child(div().text_sm().child(
-                        if self.state.local_mode {
-                            "Create your account on this Mac and open your Personal workspace."
+                        if self.auth_signup && self.state.local_mode {
+                            "Your Personal workspace will be ready when you sign up."
+                        } else if self.auth_signup {
+                            "Choose a username and password to get started."
+                        } else if self.state.local_mode {
+                            "Welcome back. Sign in to your local workspace."
                         } else if self.state.account_server_reachable {
-                            "Your account keeps your Morons and conversations together."
+                            "Welcome back. Sign in to continue."
                         } else {
                             "Start the local Morons account server, then check the connection."
                         }))
                     .when(!self.state.account_server_reachable, |d| d.child(
                         button("account-check-server", "Check server").on_click(cx.listener(|view, _, _, cx| view.command(Command::Reconnect, cx)))))
                     .child(div().flex().flex_col().gap_1()
-                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Account name"))
+                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Username"))
                         .child(div().px_2().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
                             .child(self.login_name.clone()))
-                        .child(div().text_xs().text_color(rgb(0x626772))
-                            .child("3–40 lowercase letters, digits, or hyphens; start with a letter")))
+                        .when(self.auth_signup, |d| d.child(div().text_xs().text_color(rgb(0x626772))
+                            .child("3–40 lowercase letters, digits, or hyphens; start with a letter"))))
                     .child(div().flex().flex_col().gap_1()
                         .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Password"))
                         .child(div().px_2().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
                             .child(self.login_password.clone()))
-                        .child(div().text_xs().text_color(rgb(0x626772)).child("At least 12 characters")))
-                    .when(self.state.first_account_available, |d| d
-                        .when(!self.state.local_mode, |d| d
-                            .child(div().text_sm().child("The server owner supplies a private setup code for the first account."))
-                            .child(self.bootstrap_token.clone()))
-                        .child(button("account-create", if self.state.local_mode { "Create account" } else { "Create first account" })
-                            .bg(rgb(0x24313D)).text_color(rgb(0xFFFFFF))
-                            .hover(|s| s.bg(rgb(0x35495A)))
-                            .on_click(cx.listener(|view, _, _, cx| view.account_action(true, cx))))
-                        .child(div().mt_3().text_sm().child("Already have an account?")))
-                    .child(button("account-sign-in", "Sign in").bg(rgb(0xFFFFFF))
-                        .border_1().border_color(rgb(0xBAC8D3))
-                        .on_click(cx.listener(|view, _, _, cx| view.account_action(false, cx))))
+                        .when(self.auth_signup, |d| d.child(div().text_xs().text_color(rgb(0x626772))
+                            .child("At least 12 characters"))))
+                    .when(self.auth_signup && !self.state.local_mode, |d| d
+                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Setup code"))
+                        .child(div().px_2().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
+                            .child(self.bootstrap_token.clone())))
+                    .child(primary_button(if self.auth_signup { "account-sign-up" } else { "account-sign-in" },
+                            if self.auth_signup { "Sign up" } else { "Sign in" })
+                        .on_click(cx.listener(|view, _, _, cx| view.account_action(view.auth_signup, cx))))
+                    .when(self.state.local_mode || self.state.first_account_available, |d| d
+                        .child(div().mt_3().text_sm().text_color(rgb(0x626772))
+                            .child(if self.auth_signup { "Already have an account?" } else { "New to Morons?" }))
+                        .child(button(if self.auth_signup { "auth-switch-sign-in" } else { "auth-switch-sign-up" },
+                                if self.auth_signup { "Sign in" } else { "Sign up" })
+                            .bg(rgb(0xFFFFFF)).border_1().border_color(rgb(0xBAC8D3))
+                            .on_click(cx.listener(|view, _, _, cx| view.auth_mode(!view.auth_signup, cx)))))
             ))
             .when(self.state.local_mode && self.state.selected_moron.is_some() && !self.state.provider_available, |d| d.child(
                 div().id("provider-local-setup").role(gpui::Role::Region)
