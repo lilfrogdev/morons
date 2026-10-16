@@ -15,6 +15,8 @@ The app opens to **Sign in**, with **Sign up** for a new local account. Enter a
 username and a password of at least 12 characters, then select **Sign up**.
 This action starts a loopback-only local account server, establishes a private
 owner secret, creates the account and its Personal workspace, and signs in.
+The new workspace starts with no Morons. Select **New Moron** to create one;
+no repository is connected automatically.
 No setup code needs to be copied. The app does not create local credentials or
 start the server before Sign up or Sign in is selected. The password is masked.
 For a returning account, select **Sign in**. The 30-day device token stays in
@@ -25,7 +27,7 @@ Pi Durable and OptChat SQLite files.
 After sign-in, **Enable provider storage** explicitly creates a private
 encryption key and restarts the local server. It does not start ChatGPT sign-in.
 The model menu offers **Set up provider** for a separate human-triggered
-connection. The offline model remains available throughout. No real OAuth or
+connection. The synthetic local demo model remains available throughout. No real OAuth or
 paid model call was made while building this branch.
 
 ## Separate account server

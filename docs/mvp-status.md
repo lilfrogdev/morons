@@ -17,7 +17,15 @@ an account-private Pi Durable and OptChat owner. Named morons keep rules,
 preferences, durable sessions, bounded memory, and scoped `@mention` question
 and answer handoffs. Multiple device sessions see the same account history;
 other accounts have separate databases. New and existing accounts receive a
-Personal workspace record; additional workspace management is pending.
+Personal workspace record. The source now supports account-owned workspace
+creation, renaming, and switching; Morons are listed within their workspace.
+New accounts start with an empty Moron list and an explicit New Moron action;
+previously saved Repository Morons and their conversations are preserved.
+The updated desktop bundle has not yet replaced the app in the user's active test.
+Packaged Mac launches use backend resources inside the app bundle, avoiding a
+runtime read of the development checkout in Documents. New local accounts use
+`~/Library/Application Support/Morons`; accounts already created at the prior
+`~/.local/share/morons` path continue there without moving data.
 
 The offline fixture model can call `/source PATH` for one exact allowlisted
 committed file and `/review` followed by a unified diff. The latter commits a
@@ -41,11 +49,17 @@ requires an owner-private 32-byte unlock key before exposing this path, keeps
 provider credentials in an encrypted per-account store, and never returns
 them to GPUI. The real Pi model path passed mocked responses through durable
 chat; repository tools are gated on a verified container runner in that mode.
-The default remains offline even with a provider key. The server now presents Pi's authenticated
+The default remains a synthetic local demo even with a provider key. The server now presents Pi's authenticated
 catalog per account, checks availability again when a model is selected,
 persists that choice per durable session, and blocks changes while a turn is
 active. GPUI exposes search, provider filtering, and account-private model
-favorites. Pi's OpenAI catalog does not provide a remote entitlement probe;
+favorites. A visibly filled star reflects persisted favorites. Pi Durable
+persists per-session reasoning effort where the selected model supports it.
+The picker sorts models by provider release date when present, then by parsed
+model version and ID; the Pi catalog currently supplies no release dates for
+its bundled OpenAI models.
+The current durable stream API does not expose a verified 1.5× speed setting,
+so the picker does not offer one. Pi's OpenAI catalog does not provide a remote entitlement probe;
 actual remote model access remains unverified until a human signs in and uses
 it. No actual OAuth or paid call was made. Local
 credential metadata restores provider status after a restart.

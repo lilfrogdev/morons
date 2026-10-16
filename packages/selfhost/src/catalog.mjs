@@ -6,7 +6,7 @@ export function validId(value) { return typeof value === "string" && idPattern.t
 export function openCatalog(path) {
   const db = new DatabaseSync(path, { timeout: 5000 });
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
-    CREATE TABLE IF NOT EXISTS morons (id TEXT PRIMARY KEY, name TEXT NOT NULL, rules TEXT NOT NULL, preferences TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS morons (id TEXT PRIMARY KEY, name TEXT NOT NULL, rules TEXT NOT NULL, preferences TEXT NOT NULL, created_at INTEGER NOT NULL, workspace_id TEXT NOT NULL DEFAULT 'personal');
     CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, moron_id TEXT NOT NULL REFERENCES morons(id), conversation_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS replies (session_id TEXT NOT NULL REFERENCES sessions(id), request_id TEXT NOT NULL, text TEXT NOT NULL, display_text TEXT NOT NULL, answer TEXT, PRIMARY KEY(session_id, request_id));
     CREATE TABLE IF NOT EXISTS memory_entry_dates (entry_id TEXT PRIMARY KEY, date TEXT NOT NULL);
@@ -27,6 +27,9 @@ export function openCatalog(path) {
     db.exec('ALTER TABLE review_intents ADD COLUMN base_revision TEXT');
   if (!db.prepare('PRAGMA table_info(replies)').all().some((column) => column.name === 'state'))
     db.exec("ALTER TABLE replies ADD COLUMN state TEXT NOT NULL DEFAULT 'accepted'");
+  if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'workspace_id'))
+    db.exec("ALTER TABLE morons ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'personal'");
+  db.exec('CREATE INDEX IF NOT EXISTS morons_workspace ON morons(workspace_id, created_at, id)');
   db.exec("UPDATE replies SET state = 'done' WHERE answer IS NOT NULL AND state = 'accepted'");
   const getMoron = db.prepare("SELECT * FROM morons WHERE id = ?");
   const getSession = db.prepare("SELECT * FROM sessions WHERE id = ?");
@@ -36,13 +39,14 @@ export function openCatalog(path) {
       if (favorite) db.prepare('INSERT OR IGNORE INTO model_favorites VALUES (?, ?)').run(provider, id);
       else db.prepare('DELETE FROM model_favorites WHERE provider = ? AND model_id = ?').run(provider, id);
     },
-    listMorons: () => db.prepare("SELECT * FROM morons ORDER BY created_at, id").all().map(moron),
+    listMorons: (workspaceId = 'personal') => db.prepare("SELECT * FROM morons WHERE workspace_id = ? ORDER BY created_at, id").all(workspaceId).map(moron),
     getMoron: (id) => moron(getMoron.get(id)),
-    createMoron({ id, name, rules, preferences }) {
+    createMoron({ id, name, rules, preferences, workspaceId = 'personal' }) {
       if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 80 ||
           typeof rules !== "string" || rules.length > 12000 ||
-          typeof preferences !== "string" || preferences.length > 12000) throw new Error("invalid_moron");
-      db.prepare("INSERT INTO morons VALUES (?, ?, ?, ?, ?)").run(id, name.trim(), rules, preferences, Date.now());
+          typeof preferences !== "string" || preferences.length > 12000 || !validId(workspaceId)) throw new Error("invalid_moron");
+      db.prepare("INSERT INTO morons (id, name, rules, preferences, created_at, workspace_id) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, name.trim(), rules, preferences, Date.now(), workspaceId);
       return moron(getMoron.get(id));
     },
     listSessions: (moronId) => db.prepare("SELECT id, moron_id, created_at FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
@@ -134,7 +138,7 @@ export function openCatalog(path) {
   };
 }
 
-function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at }; }
+function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id, conversationId: row.conversation_id, createdAt: row.created_at }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }
 function reviewSummary(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, checks: JSON.parse(row.checks).map(({ ok }) => ({ ok })), decision: row.decision, createdAt: row.created_at }; }

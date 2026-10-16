@@ -7,6 +7,9 @@ const scrypt = promisify(scryptCallback);
 const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 const validName = (name) => typeof name === 'string' && /^[a-z][a-z0-9-]{2,39}$/.test(name);
 const validPassword = (password) => typeof password === 'string' && Buffer.byteLength(password) >= 12 && Buffer.byteLength(password) <= 256;
+const validWorkspaceId = (id) => typeof id === 'string' && /^w-[a-f0-9]{16}$/.test(id);
+const validWorkspaceName = (name) => typeof name === 'string' && name.trim() === name &&
+  name.length >= 1 && name.length <= 80 && !/[\u0000-\u001f\u007f]/.test(name);
 const tokenHash = (token) => createHash('sha256').update(token).digest('hex');
 
 export async function openAccounts(path) {
@@ -53,6 +56,23 @@ export async function openAccounts(path) {
     workspaces(accountId) {
       return db.prepare('SELECT id, name FROM workspaces WHERE account_id = ? ORDER BY created_at, id')
         .all(accountId);
+    },
+    workspace(accountId, id) {
+      return db.prepare('SELECT id, name FROM workspaces WHERE account_id = ? AND id = ?').get(accountId, id) ?? null;
+    },
+    createWorkspace(accountId, id, name) {
+      if (!validWorkspaceId(id) || !validWorkspaceName(name)) throw new Error('invalid_workspace');
+      if (this.workspaces(accountId).length >= 32) throw new Error('workspace_limit');
+      db.prepare('INSERT INTO workspaces (account_id, id, name, created_at) VALUES (?, ?, ?, ?)')
+        .run(accountId, id, name, Date.now());
+      return this.workspace(accountId, id);
+    },
+    renameWorkspace(accountId, id, name) {
+      if ((id !== 'personal' && !validWorkspaceId(id)) || !validWorkspaceName(name))
+        throw new Error('invalid_workspace');
+      const changed = db.prepare('UPDATE workspaces SET name = ? WHERE account_id = ? AND id = ?')
+        .run(name, accountId, id);
+      return changed.changes ? this.workspace(accountId, id) : null;
     },
     revoke(token) { if (typeof token === 'string') db.prepare('DELETE FROM device_sessions WHERE token_hash = ?').run(tokenHash(token)); },
     close: () => db.close(),

@@ -18,9 +18,12 @@ pub struct State {
     pub model: Option<String>,
     pub models: Vec<ModelOption>,
     pub selected_model: Option<(String, String)>,
+    pub selected_effort: Option<String>,
     pub model_favorites: Vec<(String, String)>,
     pub named_morons: Vec<(String, String)>,
     pub selected_moron: Option<String>,
+    pub workspaces: Vec<(String, String)>,
+    pub selected_workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub review: Option<NamedReview>,
     pub error: Option<&'static str>,
@@ -46,9 +49,12 @@ impl Default for State {
             model: None,
             models: vec![],
             selected_model: None,
+            selected_effort: None,
             model_favorites: vec![],
             named_morons: vec![],
             selected_moron: None,
+            workspaces: vec![],
+            selected_workspace: None,
             workspace_name: None,
             review: None,
             error: None,
@@ -75,7 +81,12 @@ pub enum Command {
     Reconnect,
     Retry,
     SelectMoron(String),
+    SelectWorkspace(String),
+    CreateWorkspace { id: String, name: String },
+    RenameWorkspace(String),
+    CreateMoron { id: String, name: String },
     SelectModel { provider: String, id: String },
+    SelectEffort(String),
     ToggleModelFavorite { provider: String, id: String, favorite: bool },
     ReviewDecision {
         id: String,
@@ -541,8 +552,10 @@ async fn handle(
             }
         }
         Command::Reconnect => Ok(()),
-        Command::SelectMoron(_) | Command::SelectModel { .. } | Command::ToggleModelFavorite { .. } =>
-            Err("Model and moron selection require the self-hosted backend"),
+        Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
+        Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::SelectModel { .. } |
+        Command::SelectEffort(_) | Command::ToggleModelFavorite { .. } =>
+            Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
         Command::ProviderUnlock | Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
@@ -599,11 +612,17 @@ pub struct ModelOption {
     pub id: String,
     pub label: String,
     pub available: bool,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(rename = "releaseDate")]
+    pub release_date: Option<String>,
 }
 #[derive(serde::Deserialize)]
 struct NamedModels {
     models: Vec<ModelOption>,
     selected: Option<SelectedModel>,
+    #[serde(rename = "selectedEffort")]
+    selected_effort: Option<String>,
     #[serde(default)]
     favorites: Vec<SelectedModel>,
 }
@@ -650,17 +669,27 @@ impl NamedApi {
             Err("Model is unavailable for this account")
         } else if route.ends_with("/model") && response.status().as_u16() == 409 {
             Err("Wait for the current task before changing models")
+        } else if route.ends_with("/effort") && response.status().as_u16() == 403 {
+            Err("Effort is unavailable for this model")
+        } else if route.ends_with("/effort") && response.status().as_u16() == 409 {
+            Err("Wait for the current task before changing effort")
         } else if response.status().as_u16() == 409 {
             Err("Named request conflicts with existing state")
         } else {
             Err("Named backend rejected request")
         }
     }
-    async fn selected_session(&self, moron_id: &str) -> Result<String, &'static str> {
+    async fn patch(&self, route: &str, body: serde_json::Value) -> Result<(), &'static str> {
+        let response = self.request(reqwest::Method::PATCH, route).json(&body).send().await
+            .map_err(|_| "Request outcome uncertain; refresh the workspace list")?;
+        if response.status().is_success() { Ok(()) }
+        else { Err("Workspace update was rejected") }
+    }
+    async fn selected_session(&self, moron_id: &str, workspace_id: &str) -> Result<String, &'static str> {
         if !valid_named_id(moron_id) {
             return Err("Invalid named moron");
         }
-        let morons: NamedMorons = self.get("v1/morons").await?;
+        let morons: NamedMorons = self.get(&format!("v1/morons?workspaceId={workspace_id}")).await?;
         if morons.morons.len() > 32 {
             return Err("Named moron catalog exceeds client limit");
         }
@@ -722,6 +751,11 @@ struct AccountIdentity { id: String }
 struct NamedWorkspaces { workspaces: Vec<NamedWorkspace> }
 #[derive(serde::Deserialize)]
 struct NamedWorkspace { id: String, name: String }
+
+fn valid_workspace_name(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && name.chars().count() <= 80 &&
+        !name.chars().any(char::is_control)
+}
 
 async fn login_account(client: &Client, url: &Url, name: &str, password: &str) -> Result<String, &'static str> {
     let response = client.post(url.join("v1/session/login").expect("static route"))
@@ -831,29 +865,39 @@ async fn named_http(
     let mut state = State { local_mode: local_backend.is_some(), ..State::default() };
     let mut pending: Option<(String, String)> = None;
     let mut selected = "repo".to_owned();
+    let mut selected_workspace = "personal".to_owned();
     loop {
         let refreshed = async {
-            let mut catalog: NamedMorons = api.get("v1/morons").await?;
-            if catalog.morons.is_empty() {
-                let _ = api.post("v1/morons", serde_json::json!({
-                    "id":"repo", "name":"Repository",
-                    "rules":"Read repository source, explain evidence, and propose isolated review changes. Never merge or update the running application automatically.",
-                    "preferences":"Use concise answers and cite source paths."
-                })).await;
-                catalog = api.get("v1/morons").await?;
+            let workspaces: NamedWorkspaces = api.get("v1/workspaces").await?;
+            if workspaces.workspaces.is_empty() || workspaces.workspaces.len() > 32 ||
+                workspaces.workspaces.iter().any(|item| !valid_named_id(&item.id) || !valid_workspace_name(&item.name)) {
+                return Err("Invalid workspace catalog");
             }
+            if !workspaces.workspaces.iter().any(|item| item.id == selected_workspace) {
+                selected_workspace = workspaces.workspaces.first().ok_or("No workspace available")?.id.clone();
+            }
+            let workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
+                .ok_or("Workspace unavailable")?.name.clone();
+            let catalog: NamedMorons = api.get(&format!("v1/morons?workspaceId={selected_workspace}")).await?;
             if catalog.morons.len() > 32 || catalog.morons.iter().any(|m| !valid_named_id(&m.id) || m.name.len() > 80) {
                 return Err("Invalid named moron catalog");
+            }
+            if catalog.morons.is_empty() {
+                return Ok::<_, &'static str>(None);
             }
             if !catalog.morons.iter().any(|m| m.id == selected) {
                 selected = catalog.morons.first().ok_or("No named moron available")?.id.clone();
             }
-            let session = api.selected_session(&selected).await?;
+            let session = api.selected_session(&selected, &selected_workspace).await?;
             let models: NamedModels = api.get(&format!("v1/sessions/{session}/models")).await?;
             if models.models.len() > 128 {
                 return Err("Model catalog exceeds client limit");
             }
-            if models.models.iter().any(|model| model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128) {
+            if models.models.iter().any(|model| model.provider.len() > 80 || model.id.len() > 128 || model.label.len() > 128 ||
+                model.efforts.len() > 7 || model.efforts.iter().any(|level|
+                    !matches!(level.as_str(), "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")) ||
+                model.release_date.as_ref().is_some_and(|date| date.len() != 10 ||
+                    !date.bytes().enumerate().all(|(i, byte)| if i == 4 || i == 7 { byte == b'-' } else { byte.is_ascii_digit() }))) {
                 return Err("Invalid model catalog");
             }
             let model_selection = models.selected.map(|value| (value.provider, value.id)).or_else(|| {
@@ -886,9 +930,6 @@ async fn named_http(
                 Some(detail.review)
             } else { None };
             let me: AccountMe = api.get("v1/session/me").await?;
-            let workspaces: NamedWorkspaces = api.get("v1/workspaces").await?;
-            let workspace_name = workspaces.workspaces.iter().find(|item| item.id == "personal" && item.name.len() <= 80)
-                .map(|item| item.name.clone()).ok_or("Personal workspace unavailable")?;
             let visual: serde_json::Value = api.get(&format!("v1/sessions/{session}/visualizations")).await?;
             let now = Instant::now();
             let epoch = visual.get("accessEpoch").and_then(|v| v.as_str()).unwrap_or("");
@@ -898,18 +939,66 @@ async fn named_http(
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>((selected_model, model.available, model_selection, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name))
+            Ok::<_, &'static str>(Some((selected_model, model.available, model_selection, models.selected_effort, models.models, favorites, history.into_snapshot()?, session, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces)))
         }
         .await;
         let session = match refreshed {
-            Ok((model, model_available, selected_model, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name)) => {
+            Ok(None) => {
+                let workspaces: NamedWorkspaces = match api.get("v1/workspaces").await {
+                    Ok(workspaces) => workspaces,
+                    Err(_) => { state.error = Some("Cannot load workspaces"); publisher.publish(&state); continue; }
+                };
+                state.workspaces = workspaces.workspaces.iter().map(|item| (item.id.clone(), item.name.clone())).collect();
+                state.selected_workspace = Some(selected_workspace.clone());
+                state.workspace_name = workspaces.workspaces.iter().find(|item| item.id == selected_workspace)
+                    .map(|item| item.name.clone());
+                state.named_morons.clear();
+                state.selected_moron = None;
+                state.snapshot = Snapshot::empty();
+                state.models.clear();
+                state.selected_model = None;
+                state.model = None;
+                state.ready = false;
+                state.status = "No Morons yet";
+                state.error = None;
+                publisher.publish(&state);
+                let Some(command) = commands.recv().await else { return false; };
+                match command {
+                    Command::CreateMoron { id, name } if valid_named_id(&id) && valid_workspace_name(&name) => {
+                        state.request_error = api.post("v1/morons", serde_json::json!({
+                            "id":id, "name":name, "workspaceId":selected_workspace,
+                            "rules":"", "preferences":""
+                        })).await.err();
+                        if state.request_error.is_none() { selected = id; }
+                    }
+                    Command::SelectWorkspace(id) if state.workspaces.iter().any(|(known, _)| known == &id) => {
+                        selected_workspace = id; selected.clear(); state.request_error = None;
+                    }
+                    Command::CreateWorkspace { id, name } if valid_named_id(&id) && valid_workspace_name(&name) => {
+                        state.request_error = api.post("v1/workspaces", serde_json::json!({"id":id,"name":name})).await.err();
+                        if state.request_error.is_none() { selected_workspace = id; selected.clear(); }
+                    }
+                    Command::RenameWorkspace(name) if valid_workspace_name(&name) => {
+                        state.request_error = api.patch(&format!("v1/workspaces/{selected_workspace}"),
+                            serde_json::json!({"name":name})).await.err();
+                    }
+                    Command::AccountLogout => { let _ = api.post("v1/session/logout", serde_json::json!({})).await; return true; }
+                    _ => { state.request_error = Some("Choose a workspace or create a Moron"); }
+                }
+                publisher.publish(&state);
+                continue;
+            }
+            Ok(Some((model, model_available, selected_model, selected_effort, models, favorites, snapshot, session, catalog, review, provider, documents, expires_at, workspace_name, workspaces))) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
+                state.selected_effort = selected_effort;
                 state.model_favorites = favorites;
                 state.snapshot = snapshot;
                 state.named_morons = catalog.morons.into_iter().map(|m| (m.id, m.name)).collect();
                 state.selected_moron = Some(selected.clone());
+                state.workspaces = workspaces.workspaces.into_iter().map(|item| (item.id, item.name)).collect();
+                state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = Some(workspace_name);
                 state.review = review;
                 state.visualizations = documents;
@@ -965,6 +1054,42 @@ async fn named_http(
                             state.request_error = None;
                         }
                     }
+                    Command::SelectWorkspace(id) => {
+                        if pending.is_none() && state.workspaces.iter().any(|(known, _)| known == &id) {
+                            selected_workspace = id;
+                            selected.clear();
+                            state.request_error = None;
+                        }
+                    }
+                    Command::CreateMoron { id, name } => {
+                        if !valid_named_id(&id) || !valid_workspace_name(&name) {
+                            state.request_error = Some("Enter a Moron name of 1–80 characters");
+                        } else if state.named_morons.len() >= 32 {
+                            state.request_error = Some("Workspace Moron limit reached");
+                        } else {
+                            state.request_error = api.post("v1/morons", serde_json::json!({
+                                "id":id, "name":name, "workspaceId":selected_workspace,
+                                "rules":"", "preferences":""
+                            })).await.err();
+                            if state.request_error.is_none() { selected = id; }
+                        }
+                    }
+                    Command::CreateWorkspace { id, name } => {
+                        if !valid_named_id(&id) || id == "personal" || !valid_workspace_name(&name) {
+                            state.request_error = Some("Enter a workspace name of 1–80 characters");
+                        } else {
+                            state.request_error = api.post("v1/workspaces", serde_json::json!({"id":id,"name":name})).await.err();
+                            if state.request_error.is_none() { selected_workspace = id; selected.clear(); }
+                        }
+                    }
+                    Command::RenameWorkspace(name) => {
+                        if !valid_workspace_name(&name) {
+                            state.request_error = Some("Enter a workspace name of 1–80 characters");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/workspaces/{selected_workspace}"),
+                                serde_json::json!({"name":name})).await.err();
+                        }
+                    }
                     Command::SelectModel { provider, id } => {
                         if pending.is_some() || state.snapshot.active_task_id.is_some() {
                             state.request_error = Some("Wait for the current task before changing models");
@@ -975,6 +1100,16 @@ async fn named_http(
                         } else {
                             state.request_error = Some("Model is unavailable for this account");
                         }
+                    }
+                    Command::SelectEffort(effort) => {
+                        if pending.is_some() || state.snapshot.active_task_id.is_some() {
+                            state.request_error = Some("Wait for the current task before changing effort");
+                        } else if state.selected_model.as_ref().is_some_and(|(provider, id)|
+                            state.models.iter().any(|model| model.available && &model.provider == provider &&
+                                &model.id == id && model.efforts.contains(&effort))) {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/effort"),
+                                serde_json::json!({"effort":effort})).await.err();
+                        } else { state.request_error = Some("Effort is unavailable for this model"); }
                     }
                     Command::ToggleModelFavorite { provider, id, favorite } => {
                         if state.models.iter().any(|model| model.provider == provider && model.id == id) {
@@ -996,10 +1131,13 @@ async fn named_http(
                         state.review = None;
                         state.named_morons.clear();
                         state.selected_moron = None;
+                        state.workspaces.clear();
+                        state.selected_workspace = None;
                         state.workspace_name = None;
                         state.model = None;
                         state.models.clear();
                         state.selected_model = None;
+                        state.selected_effort = None;
                         state.model_favorites.clear();
                         state.ready = false;
                         state.account_login = true;

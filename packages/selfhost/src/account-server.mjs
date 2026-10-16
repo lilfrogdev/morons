@@ -109,7 +109,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
   }
   const server = createServer(async (request, response) => {
     if (closing) return send(response, 503, { error: 'closing' });
-    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    const requestUrl = new URL(request.url ?? '/', 'http://localhost');
+    const path = requestUrl.pathname;
     try {
       if (path === '/v1/accounts/setup' && request.method === 'GET')
         return send(response, 200, { firstAccountAvailable: accounts.count() === 0 });
@@ -141,6 +142,16 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         return send(response, 200, { account: { id: account.id, name: account.name, administrator: account.administrator }, expiresAt: account.expiresAt });
       if (path === '/v1/workspaces' && request.method === 'GET')
         return send(response, 200, { workspaces: accounts.workspaces(account.id) });
+      if (path === '/v1/workspaces' && request.method === 'POST') {
+        const body = json(await bytes(request, 2048));
+        return send(response, 201, { workspace: accounts.createWorkspace(account.id, body?.id, body?.name) });
+      }
+      const workspacePath = /^\/v1\/workspaces\/([^/]+)$/.exec(path);
+      if (workspacePath && request.method === 'PATCH') {
+        const body = json(await bytes(request, 2048));
+        const workspace = accounts.renameWorkspace(account.id, workspacePath[1], body?.name);
+        return workspace ? send(response, 200, { workspace }) : send(response, 404, { error: 'workspace_not_found' });
+      }
       if (path === '/v1/session/logout' && request.method === 'POST') {
         accounts.revoke(token); return send(response, 200, { signedOut: true });
       }
@@ -167,8 +178,13 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         return send(response, 404, { error: 'not_found' });
       }
       if (!path.startsWith('/v1/')) return send(response, 404, { error: 'not_found' });
-      const target = await runtime(account);
       const body = ['POST', 'PUT', 'PATCH'].includes(request.method) ? await bytes(request) : undefined;
+      if (path === '/v1/morons' && ['GET', 'POST'].includes(request.method)) {
+        const workspaceId = request.method === 'GET' ? requestUrl.searchParams.get('workspaceId') ?? 'personal' : json(body)?.workspaceId ?? 'personal';
+        if (!accounts.workspace(account.id, workspaceId))
+          return send(response, 404, { error: 'workspace_not_found' });
+      }
+      const target = await runtime(account);
       const upstream = await fetch(`${target.server.url}${request.url}`, { method: request.method,
         headers: { Authorization: `Bearer ${target.internalToken}`, 'Content-Type': 'application/json' },
         body, redirect: 'manual' });
@@ -179,7 +195,9 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(output);
     } catch (error) {
-      const status = error?.message === 'invalid_json' || error?.message === 'invalid_account' || error?.message === 'invalid_callback' ? 400 :
+      const status = error?.message === 'invalid_json' || error?.message === 'invalid_account' ||
+        error?.message === 'invalid_workspace' || error?.message === 'invalid_callback' ? 400 :
+        error?.message === 'workspace_limit' ? 409 :
         error?.message === 'request_too_large' ? 413 : error?.code === 'SQLITE_CONSTRAINT_UNIQUE' ? 409 : 500;
       send(response, status, { error: status === 500 ? 'internal' : error.message });
     }

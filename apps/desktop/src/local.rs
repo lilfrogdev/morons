@@ -15,10 +15,13 @@ pub struct LocalBackend {
 impl LocalBackend {
     pub fn launch(create_account: bool) -> Result<(Self, Url, String), &'static str> {
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("Home directory unavailable")?;
+        let legacy_data = home.join(".local/share/morons");
+        let legacy_account = legacy_data.join("accounts.sqlite").is_file();
+        let app_data = home.join("Library/Application Support/Morons");
         let config_dir = std::env::var_os("MORONS_LOCAL_CONFIG_DIR").map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".config/morons"));
+            .unwrap_or_else(|| if legacy_account { home.join(".config/morons") } else { app_data.clone() });
         let data_dir = std::env::var_os("MORONS_LOCAL_DATA_DIR").map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share/morons"));
+            .unwrap_or_else(|| if legacy_account { legacy_data } else { app_data });
         if create_account { private_dir(&config_dir)?; private_dir(&data_dir)?; }
         else if !data_dir.join("accounts.sqlite").is_file() { return Err("Sign up to get started"); }
         let bootstrap_file = config_dir.join("bootstrap");
@@ -26,7 +29,8 @@ impl LocalBackend {
         let bootstrap = if create_account { private_secret(&bootstrap_file, 64)? }
             else { read_secret(&bootstrap_file, 64)? };
         let script = std::env::var_os("MORONS_LOCAL_SERVER_SCRIPT").map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/selfhost/src/account-server.mjs"));
+            .unwrap_or_else(|| bundled_script().unwrap_or_else(||
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/selfhost/src/account-server.mjs")));
         if !script.is_file() { return Err("Local account server is missing"); }
         let mut child = spawn(&script, &data_dir, &bootstrap_file, &provider_file)?;
         let url = match read_url(&mut child) { Ok(url) => url, Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error); } };
@@ -51,6 +55,13 @@ impl LocalBackend {
         self.url = read_url(&mut self.child)?;
         Ok(self.url.clone())
     }
+}
+
+fn bundled_script() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let contents = executable.parent()?.parent()?;
+    (contents.file_name()?.to_str()? == "Contents")
+        .then(|| contents.join("Resources/selfhost/src/account-server.mjs"))
 }
 
 impl Drop for LocalBackend {

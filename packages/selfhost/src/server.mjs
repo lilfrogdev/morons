@@ -20,6 +20,8 @@ import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
+const isRepositoryMoron = (moron) => moron &&
+  moron.id === (moron.workspaceId === 'personal' ? 'repo' : `repo-${moron.workspaceId}`);
 function displayAnswer(raw) {
   if (!raw.startsWith(VIZ_PREFIX)) return raw;
   try {
@@ -159,7 +161,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (!entry) return null;
         return catalog.displayTextForSubmitted(source.id, entryText(entry)) ?? null;
       },
-      authorizeTarget: async ({ source, target }) => source.moronId !== target.id,
+      authorizeTarget: async ({ source, target }) => source.moronId !== target.id &&
+        catalog.getMoron(source.moronId)?.workspaceId === target.workspaceId,
       ensureTargetSession: async ({ id, target, source }) => {
         const existing = catalog.getSession(id);
         if (existing) {
@@ -225,7 +228,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   }
   function extensionsFor(session, model) {
     if (isHandoffTarget(session)) return [];
-    return [handoffExtension, ...(session.moronId === 'repo' && repoExtension &&
+    return [handoffExtension, ...(isRepositoryMoron(catalog.getMoron(session.moronId)) && repoExtension &&
       (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])];
   }
   async function ensureHandoffTool(conversation, session) {
@@ -235,6 +238,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     handoffConfigured.add(session.id);
   }
   let modelRefreshAt = 0;
+  const effortOptions = (model) => {
+    if (!model.reasoning) return [];
+    const map = model.thinkingLevelMap ?? {};
+    return ['off', 'low', 'medium', 'high', 'xhigh', 'max']
+      .filter((level) => level === 'off' || map[level] === level ||
+        (['low', 'medium', 'high'].includes(level) && map[level] === undefined));
+  };
   async function modelCatalog(conversation) {
     if (providerModels && await models.checkAuth('openai')) {
       if (Date.now() - modelRefreshAt > 60_000) {
@@ -244,15 +254,19 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     }
     const available = await models.getAvailable();
     const allowed = new Set(available.map((model) => `${model.provider}\0${model.id}`));
-    const selected = (await conversation.agent(BACKGROUND_CONTEXT)).model;
+    const agent = await conversation.agent(BACKGROUND_CONTEXT);
+    const selected = agent.model;
     const known = models.getModels().slice(0, 127).map((model) => ({
       provider: model.provider, id: model.id, label: model.name,
       available: allowed.has(`${model.provider}\0${model.id}`),
+      efforts: effortOptions(model),
+      ...(typeof model.releaseDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(model.releaseDate)
+        ? { releaseDate: model.releaseDate } : {}),
     }));
     if (selected && !known.some((model) => model.provider === selected.provider && model.id === selected.modelId))
-      known.push({ provider: selected.provider, id: selected.modelId, label: selected.modelId, available: false });
+      known.push({ provider: selected.provider, id: selected.modelId, label: selected.modelId, available: false, efforts: [] });
     return { selected: selected && { provider: selected.provider, id: selected.modelId },
-      models: known, favorites: catalog.listModelFavorites() };
+      selectedEffort: agent.thinkingLevel, models: known, favorites: catalog.listModelFavorites() };
   }
   async function chat(conversation, session, body, displayText = body?.text, waitForAnswer = true) {
     const sessionId = session.id;
@@ -382,7 +396,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
       agent: { model, instructions,
-        extensions: handoff ? [] : [handoffExtension, ...(moron.id === 'repo' && repoExtension &&
+        extensions: handoff ? [] : [handoffExtension, ...(isRepositoryMoron(moron) && repoExtension &&
           (model?.provider === 'morons-fixture' || repositoryPlan?.runnerImage) ? [repoExtension] : [])] },
     }, BACKGROUND_CONTEXT);
     handoffConfigured.add(id);
@@ -394,7 +408,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       return { status: 400, body: { error: "invalid_mention" } };
     const [, targetId, question] = parsed;
     const target = catalog.getMoron(targetId);
-    if (!target || targetId === source.moronId)
+    if (!target || targetId === source.moronId ||
+        catalog.getMoron(source.moronId)?.workspaceId !== target.workspaceId)
       return { status: 404, body: { error: "mention_target_not_found" } };
     if (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))
       return { status: 400, body: { error: "invalid_request_id" } };
@@ -439,7 +454,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     if (shuttingDown) return send(response, 503, { error: "closing" });
     if (!safeTokenMatch(request.headers.authorization, ownerToken))
       return send(response, 401, { error: "unauthorized" });
-    const path = new URL(request.url ?? "/", `http://${host}`).pathname;
+    const requestUrl = new URL(request.url ?? "/", `http://${host}`);
+    const path = requestUrl.pathname;
     try {
       if (request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
@@ -455,7 +471,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return send(response, 200, { favorites: catalog.listModelFavorites() });
       }
       if (request.method === "GET" && path === "/v1/morons")
-        return send(response, 200, { morons: catalog.listMorons() });
+        return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
       const visualList = /^\/v1\/sessions\/([^/]+)\/visualizations$/.exec(path);
       if (visualList && request.method === 'GET') {
         const session = catalog.getSession(decodeURIComponent(visualList[1]));
@@ -528,6 +544,32 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       const sessionPath = /^\/v1\/sessions\/([^/]+)\/(history|chat)$/.exec(path);
       const sessionModelPath = /^\/v1\/sessions\/([^/]+)\/models?$/.exec(path);
+      const sessionEffortPath = /^\/v1\/sessions\/([^/]+)\/effort$/.exec(path);
+      if (sessionEffortPath && request.method === 'POST') {
+        const session = catalog.getSession(decodeURIComponent(sessionEffortPath[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        const body = await readBody(request);
+        if (typeof body?.effort !== 'string') return send(response, 400, { error: 'invalid_effort' });
+        if (modelChanges.has(session.id) || sessionTail.has(session.id) ||
+            catalog.pendingReplies().some((reply) => reply.session_id === session.id))
+          return send(response, 409, { error: 'session_busy' });
+        modelChanges.add(session.id);
+        try {
+          const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+          const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+          if (inspection.tasks.some((task) => task.record.conversationId === conversation.id) ||
+              inspection.submissions.some((submission) => submission.conversationId === conversation.id &&
+                (submission.status === 'queued' || submission.status === 'placed')))
+            return send(response, 409, { error: 'session_busy' });
+          const view = await modelCatalog(conversation);
+          const selected = view.models.find((model) => model.provider === view.selected?.provider &&
+            model.id === view.selected?.id);
+          if (!selected?.available || !selected.efforts.includes(body.effort))
+            return send(response, 403, { error: 'effort_unavailable' });
+          await conversation.configure({ thinkingLevel: body.effort }, BACKGROUND_CONTEXT);
+          return send(response, 200, await modelCatalog(conversation));
+        } finally { modelChanges.delete(session.id); }
+      }
       if (sessionModelPath) {
         const session = catalog.getSession(decodeURIComponent(sessionModelPath[1]));
         if (!session) return send(response, 404, { error: 'session_not_found' });
@@ -553,7 +595,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
             if (!catalogView.models.some((model) => model.provider === body.provider &&
                 model.id === body.id && model.available))
               return send(response, 403, { error: 'model_unavailable' });
+            const currentEffort = (await conversation.agent(BACKGROUND_CONTEXT)).thinkingLevel;
             await conversation.configure({ model: { provider: body.provider, modelId: body.id },
+              thinkingLevel: catalogView.models.find((model) => model.provider === body.provider && model.id === body.id)
+                ?.efforts.includes(currentEffort) ? currentEffort : 'off',
               extensions: extensionsFor(session, { provider: body.provider, modelId: body.id }) }, BACKGROUND_CONTEXT);
             handoffConfigured.add(session.id);
             return send(response, 200, await modelCatalog(conversation));
