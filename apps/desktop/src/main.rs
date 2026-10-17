@@ -1285,6 +1285,7 @@ fn usage_row(label: String, metrics: &morons_desktop::transport::UsageMetrics) -
 impl Render for Chat {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let narrow = window.bounds().size.width < px(760.);
+        let compact_model_menu = window.bounds().size.width < px(680.);
         let show_chat = (self.nav_section == NavSection::Morons && self.state.selected_moron.is_some() &&
             !self.state.repositories.iter().any(|repo|
                 self.state.selected_moron.as_deref() == Some(repo.moron_id.as_str()))) ||
@@ -1806,7 +1807,7 @@ impl Render for Chat {
                                     .role(gpui::Role::Dialog)
                                     .aria_label("Choose a model")
                                     .absolute().bottom(px(72.)).left(px(if narrow { 26. } else { 30. }))
-                                    .w(px(362.)).max_w_full().h(px(348.))
+                                    .w(px(if compact_model_menu { 320. } else { 362. })).max_w_full().h(px(348.))
                                     .rounded(px(10.))
                                     .border_1()
                                     .border_color(rgb(0xE3E5E8))
