@@ -692,6 +692,12 @@ impl Chat {
                     .when_some(self.state.pi_version.clone(), |d, version| d.child(
                         div().text_sm().child(format!("Installed Pi: ai {}, durable {}",
                             version.installed.ai, version.installed.durable))))
+                    .when(self.state.provider_available && self.state.provider_state.as_deref() == Some("connected"), |d| d.child(
+                        button("settings-disconnect-chatgpt", "Disconnect ChatGPT")
+                            .on_click(cx.listener(|view, _, _, cx| view.command(Command::ProviderLogout, cx)))
+                            .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.command(Command::ProviderLogout, cx); cx.stop_propagation(); }
+                            }))))
                     .child(button("settings-sign-out", "Sign out")
                         .on_click(cx.listener(|view, _, _, cx| view.command(Command::AccountLogout, cx)))))
             )
@@ -1735,7 +1741,7 @@ impl Render for Chat {
                                 .child(svg().data(model_icon(selected_model.as_ref().map(|item| item.1.as_str()).unwrap_or("")))
                                     .w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                 .child(div().min_w_0().truncate().child(model_display.clone()))
-                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.open_model_menu(window, cx);
                                     cx.stop_propagation();
@@ -1757,7 +1763,7 @@ impl Render for Chat {
                                     .hover(|d| d.bg(rgb(0xECEEF1)))
                                     .flex().items_center().gap_1().text_size(px(12.))
                                     .child(effort_label.unwrap_or("Off"))
-                                    .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)))
+                                    .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.show_effort = !view.show_effort;
                                         view.show_model = false;
@@ -1781,7 +1787,7 @@ impl Render for Chat {
                                 .aria_label("Dictation unavailable")
                                 .w(px(32.)).h(px(32.)).rounded(px(16.))
                                 .flex().items_center().justify_center()
-                                .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                                .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0xB9BDC4))))
                             .when(self.state.ready && !self.state.pending, |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
                                     .w(px(28.)).h(px(28.)).rounded(px(14.))
@@ -1884,22 +1890,19 @@ impl Render for Chat {
                                                 }))
                                         })))
                                     .child(div().flex_1().min_w_0().pt(px(7.)).px(px(12.)).pb(px(9.)).flex().flex_col()
-                                        .when((needs_provider && provider_state.as_deref() != Some("connected")) ||
-                                            (!needs_provider && provider_state.as_deref() == Some("connected")), |d| d.child(
+                                        .when(needs_provider && provider_state.as_deref() != Some("connected"), |d| d.child(
                                             div().id("provider-setup-choice").role(gpui::Role::Button)
-                                                .aria_label(if provider_state.as_deref() == Some("connected") { "Disconnect ChatGPT" } else { "Set up provider" })
+                                                .aria_label("Set up provider")
                                                 .h(px(42.)).px_2().mb_1().rounded(px(6.))
                                                 .bg(rgb(0xF7F7F8)).flex().items_center()
-                                                .child(div().flex_1().child(if provider_state.as_deref() == Some("connected") { "Disconnect ChatGPT" } else { "Set up provider" }))
+                                                .child(div().flex_1().child("Set up provider"))
                                                 .child(div().text_size(px(11.)).text_color(rgb(0x626772))
                                                     .child(if self.state.provider_available { "ChatGPT" } else { "Server setup required" }))
                                                 .when(self.state.provider_available, |d| d.focusable().tab_stop(true).cursor_pointer())
                                                 .on_click(cx.listener(|view, _, _, cx| {
                                                     if view.state.provider_available {
                                                         view.show_model = false;
-                                                        view.command(if view.state.provider_state.as_deref() == Some("connected") {
-                                                            Command::ProviderLogout
-                                                        } else { Command::ProviderStart }, cx);
+                                                        view.command(Command::ProviderStart, cx);
                                                     }
                                                     cx.stop_propagation();
                                                 }))
@@ -1907,9 +1910,7 @@ impl Render for Chat {
                                                     if view.state.provider_available && !event.keystroke.modifiers.modified() &&
                                                         matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                         view.show_model = false;
-                                                        view.command(if view.state.provider_state.as_deref() == Some("connected") {
-                                                            Command::ProviderLogout
-                                                        } else { Command::ProviderStart }, cx);
+                                                        view.command(Command::ProviderStart, cx);
                                                         cx.stop_propagation();
                                                     }
                                                 }))
