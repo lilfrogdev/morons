@@ -1741,7 +1741,6 @@ impl Render for Chat {
                                 .child(svg().data(model_icon(selected_model.as_ref().map(|item| item.1.as_str()).unwrap_or("")))
                                     .w(px(16.)).h(px(16.)).text_color(rgb(0x626772)))
                                 .child(div().min_w_0().truncate().child(model_display.clone()))
-                                .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
                                 .on_click(cx.listener(|view, _, window, cx| {
                                     view.open_model_menu(window, cx);
                                     cx.stop_propagation();
@@ -1763,7 +1762,6 @@ impl Render for Chat {
                                     .hover(|d| d.bg(rgb(0xECEEF1)))
                                     .flex().items_center().gap_1().text_size(px(12.))
                                     .child(effort_label.unwrap_or("Off"))
-                                    .child(svg().data(ICON_CHEVRON).w(px(13.)).h(px(13.)).text_color(rgb(0x626772)))
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.show_effort = !view.show_effort;
                                         view.show_model = false;
