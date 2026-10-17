@@ -347,7 +347,7 @@ function docker(args, input = '', timeout = 180_000, signal) {
     const child = spawn('docker', ['--context', 'desktop-linux', ...args], { stdio: ['pipe', 'pipe', 'pipe'],
 
 
-      env: { PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME ?? '/tmp' },
+      env: { PATH: `${join(process.env.HOME ?? '/tmp', '.docker', 'bin')}:/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, HOME: process.env.HOME ?? '/tmp' },
       windowsHide: true });
     let output = '', error = '';
     let settled = false;
@@ -357,7 +357,7 @@ function docker(args, input = '', timeout = 180_000, signal) {
       signal?.removeEventListener('abort', onAbort); child.kill('SIGKILL'); reject(new Error(reason)); } };
     signal?.addEventListener('abort', onAbort, { once: true });
     timer = setTimeout(() => fail(`container_runner_timeout_${args[0]}`), timeout);
-    child.on('error', () => fail('container_runner_unavailable'));
+    child.on('error', (error) => fail(error.code === 'ENOENT' ? 'docker_not_found' : 'container_runner_unavailable'));
     child.stdout.on('data', (chunk) => {
       output += chunk;
       if (Buffer.byteLength(output) > MAX_OUTPUT) fail('container_result_too_large');
@@ -565,16 +565,22 @@ export async function stopContainerWorkspace(plan) {
 }
 
 
-export async function verifyContainerRunner(image) {
+export async function downloadContainerRunner(image, { signal } = {}) {
   if (!validRunnerImage(image)) throw new Error('runner_image_digest_required');
-  const daemon = await docker(['info', '--format', '{{.ServerVersion}}'], '', 10_000);
+  const result = await docker(['pull', image], '', 1_200_000, signal);
+  if (result.code !== 0) throw new Error('runner_download_failed');
+}
+
+export async function verifyContainerRunner(image, { signal } = {}) {
+  if (!validRunnerImage(image)) throw new Error('runner_image_digest_required');
+  const daemon = await docker(['info', '--format', '{{.ServerVersion}}'], '', 10_000, signal);
   if (daemon.code !== 0) throw new Error('container_engine_not_running');
-  const inspect = await docker(['image', 'inspect', image, '--format', '{{.Id}}'], '', 10_000);
+  const inspect = await docker(['image', 'inspect', image, '--format', '{{.Id}}'], '', 10_000, signal);
   if (inspect.code !== 0) throw new Error('runner_image_not_present');
   for (const [entrypoint, expected] of [['node', /^v(2[2-9]|[3-9]\d)\./], ['git', /^git version /]]) {
     const check = await docker(['run', '--pull=never', '--rm', '--network=none', '--read-only',
       '--cap-drop=ALL', '--security-opt=no-new-privileges=true', '--entrypoint', entrypoint,
-      image, '--version'], '', 60_000);
+      image, '--version'], '', 60_000, signal);
     if (check.code !== 0 || !expected.test(check.output)) throw new Error('runner_image_missing_node_or_git');
   }
 
@@ -610,7 +616,7 @@ export async function verifyContainerRunner(image) {
     const args = containerArgs({ image, repository: await realpath(source),
       reviewRoot: await realpath(reviews), workerRoot: await trustedWorkerStage() });
     args.splice(-1, 1, '-e', script);
-    const probe = await docker(args, '', 60_000);
+    const probe = await docker(args, '', 60_000, signal);
     let answer;
     try { answer = JSON.parse(probe.output); } catch { throw new Error('container_boundary_probe_failed'); }
     if (probe.code !== 0 || Object.values(answer).some(Boolean) || Object.keys(answer).length !== 6)

@@ -2,7 +2,14 @@ use gpui::{prelude::*, *};
 use morons_desktop::{permissions::{PermissionState, MODES, mode_label}, transport::Command};
 use super::{Chat, activation_key, button};
 
-const LOCK: &[u8] = include_bytes!("assets/tabler/lock.svg");
+fn mode_icon(mode: &str) -> &'static [u8] {
+    match mode {
+        "auto-accept-edits" => include_bytes!("assets/lucide/pen-line.svg"),
+        "auto" => include_bytes!("assets/lucide/sparkles.svg"),
+        "full-access" => include_bytes!("assets/lucide/lock-open.svg"),
+        _ => include_bytes!("assets/lucide/lock.svg"),
+    }
+}
 const CHEVRON: &[u8] = include_bytes!("assets/tabler/chevron-down.svg");
 pub(super) fn trigger(chat: &Chat, permissions: PermissionState, compact: bool, cx: &mut Context<Chat>) -> Stateful<Div> {
     div().id("permission-selector").role(gpui::Role::Button)
@@ -10,7 +17,7 @@ pub(super) fn trigger(chat: &Chat, permissions: PermissionState, compact: bool, 
         .aria_expanded(chat.show_permissions).focusable().tab_stop(true).cursor_pointer()
         .max_w(px(if compact { 100. } else { 155. })).min_w_0().h(px(28.)).px(px(5.)).rounded(px(6.)).hover(|d| d.bg(rgb(0xECEEF1)))
         .flex().items_center().gap(px(4.)).text_size(px(12.))
-        .child(svg().data(LOCK).w(px(14.)).h(px(14.)).text_color(rgb(0x626772)))
+        .child(svg().data(mode_icon(&permissions.mode)).w(px(14.)).h(px(14.)).flex_shrink_0().text_color(rgb(0x626772)))
         .child(div().min_w_0().truncate().child(mode_label(&permissions.mode)))
         .child(svg().data(CHEVRON).w(px(12.)).h(px(12.)).text_color(rgb(0x80858D)))
         .on_click(cx.listener(|view, _, _, cx| {
@@ -38,12 +45,12 @@ pub(super) fn menu(chat: &Chat, narrow: bool, cx: &mut Context<Chat>) -> Statefu
             let selected = state.mode == mode;
             let session = state.session_id.clone(); let key_session = session.clone(); let revision = state.revision;
             Some(div().id(SharedString::from(format!("permission-{mode}")))
-                .role(gpui::Role::Button).aria_label(SharedString::from(format!("{label}. {description}")))
+                .role(gpui::Role::Button).aria_label(SharedString::from(format!("{label}. {description}{}", if selected { " Selected." } else { "" })))
                 .aria_selected(selected).focusable().tab_stop(true).cursor_pointer()
                 .px(px(10.)).py(px(7.)).rounded(px(5.)).bg(if selected { rgb(0xECEEF1) } else { rgb(0xFFFFFF) })
                 .hover(|d| d.bg(rgb(0xF3F4F6)))
                 .flex().items_start().gap(px(8.))
-                .child(div().w(px(14.)).text_size(px(12.)).child(if selected { "✓" } else { "" }))
+                .child(svg().data(mode_icon(mode)).w(px(14.)).h(px(14.)).mt(px(1.)).flex_shrink_0().text_color(rgb(0x626772)))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(3.))
                     .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).child(label))
                     .child(div().text_size(px(11.)).text_color(rgb(0x626772)).child(description)))

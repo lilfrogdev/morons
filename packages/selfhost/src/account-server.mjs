@@ -47,7 +47,7 @@ async function privateFile(path) {
 }
 
 
-export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0 }) {
+export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0, runnerInspect, runnerDownload }) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('tls_ingress_required');
   if (typeof bootstrapToken !== 'string' || bootstrapToken.length < 32 || bootstrapToken.length > 256)
     throw new Error('bootstrap_token_required');
@@ -100,6 +100,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
           ownerToken: internalToken, repositoryPlan: accountPlan,
           runnerImage: account.administrator ? runnerImage : null, privateDataRoot: dataDir, accountId: account.id,
           runnerUnavailableReason: account.administrator ? 'not_configured' : 'administrator_required',
+          ...(runnerInspect ? { runnerInspect } : {}), ...(runnerDownload ? { runnerDownload } : {}),
           providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
           providerRuntime, accountPlan };
@@ -142,6 +143,8 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       if (!account) return send(response, 401, { error: 'unauthorized' });
       if (path === '/v1/session/me' && request.method === 'GET')
         return send(response, 200, { account: { id: account.id, name: account.name, administrator: account.administrator }, expiresAt: account.expiresAt });
+      if (request.method === 'POST' && ['/v1/runtime/runner/recheck', '/v1/runtime/runner/download', '/v1/runtime/runner/cancel'].includes(path) && !account.administrator)
+        return send(response, 403, { error: 'administrator_required' });
       if (path === '/v1/runtime/pi/version' && request.method === 'GET')
         return send(response, 200, await piVersionStatus());
       if (path === '/v1/workspaces' && request.method === 'GET')

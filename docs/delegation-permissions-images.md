@@ -37,6 +37,13 @@ The reference is official T3 Code revision
 [Pi tool gate](https://github.com/pingdotgg/t3code/blob/2fbd4318fc5b610c3e7fcfcbd5bbd80b73521d8f/packages/provider-pi/src/server/mcpExtensionSource.ts#L317-L338),
 and [mode documentation](https://github.com/pingdotgg/t3code/blob/2fbd4318fc5b610c3e7fcfcbd5bbd80b73521d8f/docs/user/permission-modes.md).
 
+The selector uses T3's canonical Lucide mode icons: Lock for Supervised,
+PenLine for Auto-accept edits, Sparkles for Auto, and LockOpen for Full access.
+The menu highlights its selected row and announces the selected state without
+an added checkmark. Both the pinned reference and official revision
+`13aa882c22d584de5388dfce3b3ca413387ba059` use this mapping in
+[`runtimeModeConfig.ts`](https://github.com/pingdotgg/t3code/blob/13aa882c22d584de5388dfce3b3ca413387ba059/apps/web/src/components/chat/runtimeModeConfig.ts).
+
 New threads default to **Full access**. Existing threads without a stored mode
 retain **Supervised** behavior. The selected mode is stored for that thread.
 Trusted reads run without a prompt in every mode. Supervised asks before edits
@@ -79,18 +86,41 @@ interrupted outcomes remain uncertain and are not automatically retried.
 
 ## Remaining live setup
 
-Normal local Mac app launches now configure the installed
+Normal local Mac app launches configure the pinned
 `docker.io/library/node@sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729`
 runner automatically. An explicit `MORONS_RUNNER_IMAGE` override is preserved;
 an explicit empty value disables it. Separately managed servers still use
-their operator's runner configuration. The app never starts Docker Desktop or
-pulls an image. If Docker or the configured image is unavailable, account
-sign-in and chat remain available, repository tools are disabled, and Settings
-and repository threads show the recovery action. Open Docker Desktop or install
-the configured image, then restart Morons to repeat the safety verification.
+their operator's runner configuration.
+
+Repository setup distinguishes Docker missing, installed but unreachable,
+the pinned image missing, and verified ready. It appears in Settings and the
+repository landing view; a repository thread has one actionable setup entry.
+Sign-in and regular chat remain usable. The guide links to Docker's official
+[installation instructions](https://docs.docker.com/desktop/setup/install/mac-install/)
+and [license terms](https://docs.docker.com/subscription-billing/desktop-license/).
+The local Mac Open Docker Desktop button starts it only on that explicit action.
+The current official user-local CLI location is supported without installing
+symlinks, changing privileges, or exposing the Docker socket.
+
+The runner download requires a separate confirmation showing the exact image,
+Docker Desktop's `desktop-linux` image-store destination, and the transfer size
+when known. The pinned manifest reports 401,699,727 compressed bytes (about
+402 MB); existing shared layers can reduce transfer. Custom image sizes remain
+unknown. Downloading is an authenticated administrator-only endpoint, bound to
+the configured digest, and is never an agent tool or startup action. Cancel,
+logout, and shutdown interrupt the download. Partial Docker layers may remain.
+Recheck readiness repeats the existing containment verification and enables
+repository tools for later turns when successful, without restarting Morons.
+Setup changes wait for idle agent work. Every source application still requires
+the main review and an exact human approval.
 
 Disposable validation used synthetic in-process Pi model streams, mocked
-image HTTP responses, and the already installed Docker image. No real model
+image HTTP responses, and the already installed Docker image. The setup flow
+was also checked with process-local missing-CLI/engine/image conditions and
+controlled account-server readiness/download callbacks. These covered exact
+image confirmation, administrator authorization, cancellation (including during
+verification), readiness recovery, and wide/minimum-width native UI. Real
+Docker installation, engine-start, and image-download actions were not run. No real model
 inference, image generation, OAuth, credential setup, image pull, or publishing
 was performed. A real coding run still needs a human-selected available model,
 an explicit repository registration, the available local digest-pinned runner,

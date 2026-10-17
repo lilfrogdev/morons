@@ -146,6 +146,9 @@ pub enum Command {
     AccountCreate { name: String, password: String, bootstrap: String },
     AccountLogout,
     CheckPiVersion,
+    RecheckRunner,
+    DownloadRunner(String),
+    CancelRunnerDownload,
     LoadUsage { window: String, provider: Option<String>, model: Option<String> },
     CancelImage(String),
     LoadImage(String),
@@ -729,7 +732,7 @@ async fn handle(
         Command::ReviewDecision { .. } | Command::ApplyReview { .. } => Err("Reviews require the self-hosted backend"),
         Command::SelectPermission { .. } | Command::PermissionDecision { .. } => Err("Permissions require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
-        Command::CheckPiVersion |
+        Command::CheckPiVersion | Command::RecheckRunner | Command::DownloadRunner(_) | Command::CancelRunnerDownload |
         Command::LoadUsage { .. } |
         Command::ProviderUnlock | Command::ProviderStart | Command::ProviderCallback(_) | Command::ProviderCancel |
         Command::ProviderLogout => Err("Account and provider login require the named backend"),
@@ -815,14 +818,22 @@ pub struct ModelOption {
 pub struct RunnerStatus {
     pub configured: bool,
     pub available: bool,
+    pub state: String,
+    pub activity: Option<String>,
     pub image: Option<String>,
+    #[serde(rename = "downloadBytes")]
+    pub download_bytes: Option<u64>,
     pub reason: Option<String>,
     pub message: String,
 }
 impl RunnerStatus {
     fn valid(&self) -> bool {
-        self.message.len() <= 512 && self.image.as_ref().is_none_or(|value| value.len() <= 255) &&
+        matches!(self.state.as_str(), "docker-missing" | "docker-stopped" | "image-missing" | "ready" | "disabled" | "restricted" | "unavailable") &&
+            self.activity.as_deref().is_none_or(|value| matches!(value, "checking" | "downloading")) &&
+            self.download_bytes.is_none_or(|value| value <= 10_000_000_000_000) &&
+            self.message.len() <= 512 && self.image.as_ref().is_none_or(|value| value.len() <= 255) &&
             self.reason.as_ref().is_none_or(|value| value.len() <= 160) &&
+            (self.available == (self.state == "ready")) &&
             (!self.available || self.configured && self.image.is_some() && self.reason.is_none())
     }
 }
@@ -899,6 +910,10 @@ impl NamedApi {
             Err("Effort is unavailable for this model")
         } else if route.ends_with("/effort") && response.status().as_u16() == 409 {
             Err("Wait for the current task before changing effort")
+        } else if route.starts_with("v1/runtime/runner/") && response.status().as_u16() == 409 {
+            Err("Finish the current task or setup operation, then recheck readiness")
+        } else if route.starts_with("v1/runtime/runner/") && response.status().as_u16() == 403 {
+            Err("An administrator account is required for repository setup")
         } else if route.contains("/permissions") && response.status().as_u16() == 409 {
             Err("Permission request changed or expired; refresh this thread")
         } else if response.status().as_u16() == 409 {
@@ -1591,6 +1606,19 @@ async fn named_http(
                             state.request_error = api.post("v1/models/favorite",
                                 serde_json::json!({"provider": provider, "id": id, "favorite": favorite})).await.err();
                         }
+                    }
+                    Command::CancelRunnerDownload => {
+                        state.request_error = api.post("v1/runtime/runner/cancel", serde_json::json!({})).await.err();
+                    }
+                    Command::RecheckRunner => {
+                        state.request_error = api.post("v1/runtime/runner/recheck", serde_json::json!({})).await.err();
+                    }
+                    Command::DownloadRunner(image) => {
+                        if state.runner_status.as_ref().is_some_and(|runner| runner.state == "image-missing" &&
+                            runner.activity.is_none() && runner.image.as_deref() == Some(image.as_str())) {
+                            state.request_error = api.post("v1/runtime/runner/download",
+                                serde_json::json!({"confirmed":true,"image":image})).await.err();
+                        } else { state.request_error = Some("Repository setup changed; recheck readiness"); }
                     }
                     Command::SelectPermission { session_id, mode, revision } => {
                         if session_id == session && valid_mode(&mode) && state.permissions.as_ref()

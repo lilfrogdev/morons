@@ -8,6 +8,7 @@ mod input;
 mod drafts;
 mod image_ui;
 mod permission_ui;
+mod runner_ui;
 use gpui::{prelude::*, *};
 use morons_desktop::{
     model::{Role, TaskStatus},
@@ -84,6 +85,7 @@ struct Chat {
     show_model: bool,
     show_effort: bool,
     show_permissions: bool,
+    runner_download_confirmation: Option<String>,
     model_section: String,
     model_cursor: usize,
     auth_signup: bool,
@@ -197,6 +199,10 @@ impl Chat {
                             view.show_create_moron = false;
                             view.moron_input.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
+                        if view.state.account_name != state.account_name ||
+                            state.runner_status.as_ref().and_then(|runner| runner.image.as_ref()) != view.runner_download_confirmation.as_ref() {
+                            view.runner_download_confirmation = None;
+                        }
                         view.state = state;
                         if follow {
                             view.scroll.scroll_to_bottom();
@@ -231,6 +237,7 @@ impl Chat {
             show_model: false,
             show_effort: false,
             show_permissions: false,
+            runner_download_confirmation: None,
             model_section: String::new(),
             model_cursor: 0,
             auth_signup: false,
@@ -632,6 +639,7 @@ impl Chat {
             .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
             .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
                 .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
+                .when_some(self.state.runner_status.clone(), |d, runner| d.child(runner_ui::card(self, runner, cx)))
                 .when_some(self.state.image_provider.clone(), |d, status| d.child(
                     div().flex().flex_col().gap_2().p_4().rounded(px(10.))
                         .border_1().border_color(rgb(0xE3E5E8))
@@ -719,11 +727,6 @@ impl Chat {
                                         }))))
                         })
                 )})
-                .when_some(self.state.runner_status.clone(), |d, runner| d.child(
-                    div().flex().flex_col().gap_2().p_4().rounded(px(10.)).border_1().border_color(rgb(0xE3E5E8))
-                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Repository coding"))
-                        .child(div().text_sm().text_color(if runner.available { rgb(0x626772) } else { rgb(0xA04438) })
-                            .child(runner.message))))
                 .child(div().flex().flex_col().gap_3().p_4().rounded(px(10.))
                     .border_1().border_color(rgb(0xE3E5E8))
                     .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Account"))
@@ -1643,12 +1646,16 @@ impl Render for Chat {
             ))
             .when(!self.state.account_login && self.show_usage, |d| d.child(self.usage_panel(cx)))
             .when(!self.state.account_login && show_chat && self.nav_section == NavSection::Repositories, |d|
-                d.when_some(self.state.runner_status.as_ref().filter(|runner| !runner.available), |d, runner| d.child(
-                    div().px_6().py_2().text_sm().text_color(rgb(0xA04438)).child(runner.message.clone()))))
+                d.when_some(self.state.runner_status.as_ref().filter(|runner| !runner.available), |d, _| d.child(
+                    runner_ui::entry(cx))))
             .when(!self.state.account_login && self.nav_section == NavSection::Settings, |d| d.child(self.settings_panel(cx)))
             .when(!self.state.account_login && self.nav_section == NavSection::Repositories && !show_chat, |d| d.child(
-                div().flex_1().flex().items_center().justify_center().text_size(px(14.))
-                    .text_color(rgb(0x626772)).child("Choose a repository or restore an archived repository")))
+                div().id("repository-setup-landing").flex_1().min_h_0().overflow_y_scroll().p_6()
+                    .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
+                        .when_some(self.state.runner_status.clone().filter(|runner| !runner.available), |d, runner|
+                            d.child(runner_ui::card(self, runner, cx)))
+                        .child(div().text_size(px(14.)).text_color(rgb(0x626772))
+                            .child("Choose a repository or restore an archived repository")))))
             .when(!self.state.account_login && self.nav_section == NavSection::Morons && !show_chat, |d| d.child(
                 div().flex_1().flex().items_center().justify_center().text_size(px(14.))
                     .text_color(rgb(0x626772)).child("Create or choose a Moron")))

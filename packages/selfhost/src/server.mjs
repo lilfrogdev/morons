@@ -15,8 +15,8 @@ import { createMemoryRuntime, createPiMemoryCompressor } from "./memory-runtime.
 import { createHandoffExtension, openHandoffStore } from "./handoff-runtime.mjs";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
-import { assertRunnerPathSeparation, stopContainerWorkspace } from './container-review.mjs';
-import { inspectRunner } from './runner-status.mjs';
+import { assertRunnerPathSeparation, stopContainerWorkspace, downloadContainerRunner } from './container-review.mjs';
+import { inspectRunner, unavailableRunner } from './runner-status.mjs';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
@@ -167,7 +167,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, runnerUnavailableReason = 'not_configured', privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, runnerUnavailableReason = 'not_configured', privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch, runnerInspect = inspectRunner, runnerDownload = downloadContainerRunner }) {
   const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
@@ -186,7 +186,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
   let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
   let permissions, implementationRuntime, images, applications;
-  let runnerStatus;
+  let runnerStatus, runnerOperation, runnerController;
+  let runnerBusy = false;
+  const configuredRunnerImage = runnerImage;
+  const configuredRepositoryPlan = repositoryPlan;
   const permissionSessionIds = new Set();
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
@@ -194,7 +197,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     handoffStore = openHandoffStore(`${databasePath}.model-handoffs.sqlite`);
     permissions = openPermissionPolicy(`${databasePath}.permissions.sqlite`);
     const registry = createRegistry();
-    runnerStatus = await inspectRunner(runnerImage, runnerUnavailableReason);
+    runnerStatus = await runnerInspect(runnerImage, runnerUnavailableReason);
     if (!runnerStatus.available) {
       runnerImage = null;
       if (repositoryPlan?.runnerImage) repositoryPlan = { ...repositoryPlan, runnerImage: null };
@@ -204,8 +207,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       await assertRunnerPathSeparation(repositoryPlan.repository, dirname(databasePath));
       await assertRunnerPathSeparation(repositoryPlan.repository, repositoryPlan.reviewRoot);
     }
-    repoExtension = (providerModelId && !runnerImage) || (!runnerImage && !repositoryPlan)
-      ? null : repoTools(catalog, repositoryPlanForSession, { admitOperation: admitRepositoryOperation });
+    repoExtension = repoTools(catalog, repositoryPlanForSession, { admitOperation: admitRepositoryOperation });
     if (repoExtension) registry.install(repoExtension);
     implementationRuntime = createImplementationRuntime({ catalog, planForSession: repositoryPlanForSession,
       getHarness: () => harness, context: BACKGROUND_CONTEXT, admitOperation: admitRepositoryOperation });
@@ -370,6 +372,50 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
     await conversation.abort(BACKGROUND_CONTEXT);
   }
+  function applyRunnerStatus(status) {
+    runnerStatus = status;
+    runnerImage = status.available ? configuredRunnerImage : null;
+    repositoryPlan = configuredRepositoryPlan && { ...configuredRepositoryPlan,
+      runnerImage: status.available ? configuredRepositoryPlan.runnerImage : null };
+    handoffConfigured.clear();
+  }
+  async function startRunnerSetup(download, image) {
+    if (runnerUnavailableReason === 'administrator_required')
+      return { status: 403, body: { error: 'administrator_required' } };
+    if (!configuredRunnerImage || (download && (image !== configuredRunnerImage || runnerStatus.state !== 'image-missing')))
+      return { status: 409, body: { error: 'runner_setup_changed' } };
+    if (runnerBusy) return { status: 409, body: { error: 'runner_setup_busy' } };
+    runnerBusy = true;
+    runnerController = new AbortController();
+    const signal = runnerController.signal;
+    try {
+      const inspection = await harness.inspect(BACKGROUND_CONTEXT);
+      signal.throwIfAborted();
+      if (shuttingDown || inFlight.size || sessionTail.size || reviewRecoveries.size || inspection.tasks.length ||
+          inspection.submissions.some((item) => ['queued', 'placed'].includes(item.status)))
+        return { status: 409, body: { error: 'runner_setup_busy' } };
+      if (configuredRepositoryPlan?.runnerImage) {
+        trustedCheckPlan(configuredRepositoryPlan.checkProfile, configuredRepositoryPlan.allowedPaths);
+        await assertRunnerPathSeparation(configuredRepositoryPlan.repository, dirname(databasePath));
+        await assertRunnerPathSeparation(configuredRepositoryPlan.repository, configuredRepositoryPlan.reviewRoot);
+      }
+      signal.throwIfAborted();
+      const previousRunnerStatus = runnerStatus;
+      runnerStatus = { ...runnerStatus, activity: download ? 'downloading' : 'checking',
+        message: download ? 'Downloading the pinned coding runner…' : 'Checking Docker and runner isolation…' };
+      runnerOperation = (async () => {
+        if (download) await runnerDownload(configuredRunnerImage, { signal });
+        signal.throwIfAborted();
+        const status = await runnerInspect(configuredRunnerImage, runnerUnavailableReason, { signal });
+        signal.throwIfAborted();
+        applyRunnerStatus(status);
+      })().catch((error) => {
+        applyRunnerStatus(signal.aborted ? previousRunnerStatus : unavailableRunner(configuredRunnerImage,
+          download ? 'runner_download_failed' : error?.message));
+      }).finally(() => { runnerBusy = false; runnerOperation = null; runnerController = null; });
+      return { status: 202, body: { accepted: true } };
+    } finally { if (!runnerOperation) { runnerBusy = false; runnerController = null; } }
+  }
   async function repositoryPlanForSession(session, baseRevision = null) {
     const repository = catalog.repositoryForMoron(session.moronId);
     const moron = catalog.getMoron(session.moronId);
@@ -460,6 +506,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const assertAdmission = () => {
       if (shuttingDown || epoch !== (sessionEpochs.get(sessionId) ?? 0)) throw new Error('chat_admission_cancelled');
     };
+    if (runnerBusy && catalog.repositoryForMoron(session.moronId))
+      return { status: 409, body: { error: 'runner_setup_busy' } };
     if (!fixtureEnabled && (await conversation.agent(BACKGROUND_CONTEXT)).model?.provider === 'morons-fixture')
       return { status: 409, body: { error: 'provider_setup_required' } };
     assertAdmission();
@@ -476,6 +524,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const admit = async () => {
       assertAdmission();
       permissionSession(session);
+      if (runnerBusy && catalog.repositoryForMoron(session.moronId)) throw new Error('runner_setup_busy');
       await ensureHandoffTool(conversation, session);
       assertAdmission();
       const previous = catalog.getReply(sessionId, body.requestId);
@@ -695,6 +744,19 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return send(response, 200, images.status());
       if (request.method === 'GET' && path === '/v1/runtime/runner/status')
         return send(response, 200, runnerStatus);
+      if (request.method === 'POST' && path === '/v1/runtime/runner/cancel') {
+        if (runnerUnavailableReason === 'administrator_required') return send(response, 403, { error: 'administrator_required' });
+        runnerController?.abort();
+        await runnerOperation;
+        return send(response, 200, { cancelled: true });
+      }
+      if (request.method === 'POST' && ['/v1/runtime/runner/recheck', '/v1/runtime/runner/download'].includes(path)) {
+        const body = await readBody(request);
+        const download = path.endsWith('/download');
+        if (download && body?.confirmed !== true) return send(response, 400, { error: 'runner_download_confirmation_required' });
+        const result = await startRunnerSetup(download, body?.image);
+        return send(response, result.status, result.body);
+      }
       const imageList = /^\/v1\/sessions\/([^/]+)\/images$/.exec(path);
       if (imageList && request.method === 'GET')
         return send(response, 200, { images: images.list(decodeURIComponent(imageList[1])) });
@@ -1035,7 +1097,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return send(response, 409, { error: 'repository_limit_or_conflict' });
       if (error?.message === "memory_source_conflict") return send(response, 409, { error: "memory_conflict" });
       if (error?.message?.startsWith('permission_') || error?.message === 'invalid_permission_mode' ||
-          error?.message === 'invalid_permission_decision' || ['session_stopped', 'operation_cancelled',
+          error?.message === 'invalid_permission_decision' || ['runner_setup_busy', 'session_stopped', 'operation_cancelled',
             'account_session_revoked', 'server_shutdown', 'chat_admission_cancelled'].includes(error?.message))
         return send(response, 409, { error: error.message });
       if (error?.message?.startsWith('image_')) return send(response, 403, { error: error.message });
@@ -1082,6 +1144,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   return {
     url: `http://${host}:${server.address().port}`,
     async revokeOperations() {
+      runnerController?.abort();
+      await runnerOperation;
       for (const sessionId of permissionSessionIds) {
         const session = catalog.getSession(sessionId);
         if (session) await stopSession(session, 'account_session_revoked').catch(() => {});
@@ -1089,6 +1153,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     },
     async close() {
       shuttingDown = true;
+      runnerController?.abort();
+      await runnerOperation;
       const failures = [];
       for (const sessionId of permissionSessionIds) permissions.revokeSession(sessionId, 'server_shutdown');
       for (const cleanup of [

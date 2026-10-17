@@ -8,9 +8,13 @@ source application requires the main agent's exact review and a human action.
 New threads use T3 Code's Full access default inside the configured runner.
 Normal Mac app launches select the already installed pinned runner automatically
 unless `MORONS_RUNNER_IMAGE` is explicitly overridden. Docker Desktop must
-already be available; the app does not start it or pull an image. An unavailable
-runner disables repository tools and shows a recovery message while preserving
-sign-in and chat. Restart Morons after resolving the unavailable state.
+be set up before coding. Settings distinguishes missing Docker, an unreachable
+engine, a missing pinned image, and verified readiness. Official installation
+guidance, an explicit local Open Docker Desktop action, a separately confirmed
+administrator-only runner download, and readiness rechecks are available.
+No install, engine start, or image pull happens automatically. An unavailable
+runner disables repository tools while preserving sign-in and regular chat.
+A successful recheck enables repository tools for later turns without restart.
 Images require a separate account-bound Images API key; ChatGPT OAuth does
 not supply that capability. Development used synthetic providers and mocked
 image responses only.
