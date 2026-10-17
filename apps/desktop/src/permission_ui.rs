@@ -4,10 +4,10 @@ use super::{Chat, activation_key, button};
 
 fn mode_icon(mode: &str) -> &'static [u8] {
     match mode {
-        "auto-accept-edits" => include_bytes!("assets/lucide/pen-line.svg"),
-        "auto" => include_bytes!("assets/lucide/sparkles.svg"),
-        "full-access" => include_bytes!("assets/lucide/lock-open.svg"),
-        _ => include_bytes!("assets/lucide/lock.svg"),
+        "auto-accept-edits" => include_bytes!("assets/tabler/pencil.svg"),
+        "auto" => include_bytes!("assets/tabler/sparkles.svg"),
+        "full-access" => include_bytes!("assets/tabler/lock-open.svg"),
+        _ => include_bytes!("assets/tabler/lock.svg"),
     }
 }
 const CHEVRON: &[u8] = include_bytes!("assets/tabler/chevron-down.svg");

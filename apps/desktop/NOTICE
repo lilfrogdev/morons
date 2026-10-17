@@ -15,8 +15,3 @@ The GPUI implementation is native Rust; no React component was copied.
 Interface icons are from Tabler Icons 3.48.0, matching Pitcrew's icon set.
 https://tabler.io/icons
 Licensed under MIT; see LICENSE-TABLER.
-
-Permission mode icons are canonical Lucide 0.564.0 assets, matching T3 Code's
-Lock, PenLine, Sparkles, and LockOpen mapping.
-https://github.com/lucide-icons/lucide/tree/0.564.0/icons
-Licensed under ISC with Feather portions under MIT; see LICENSE-LUCIDE.

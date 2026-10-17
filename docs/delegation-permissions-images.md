@@ -37,8 +37,9 @@ The reference is official T3 Code revision
 [Pi tool gate](https://github.com/pingdotgg/t3code/blob/2fbd4318fc5b610c3e7fcfcbd5bbd80b73521d8f/packages/provider-pi/src/server/mcpExtensionSource.ts#L317-L338),
 and [mode documentation](https://github.com/pingdotgg/t3code/blob/2fbd4318fc5b610c3e7fcfcbd5bbd80b73521d8f/docs/user/permission-modes.md).
 
-The selector uses T3's canonical Lucide mode icons: Lock for Supervised,
-PenLine for Auto-accept edits, Sparkles for Auto, and LockOpen for Full access.
+The selector uses Morons’ canonical Tabler Icons 3.48.0 assets: lock for
+Supervised, pencil for Auto-accept edits, sparkles for Auto, and lock-open for
+Full access. T3 provides the semantic and interaction reference.
 The menu highlights its selected row and announces the selected state without
 an added checkmark. Both the pinned reference and official revision
 `13aa882c22d584de5388dfce3b3ca413387ba059` use this mapping in
