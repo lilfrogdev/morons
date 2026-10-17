@@ -79,11 +79,21 @@ interrupted outcomes remain uncertain and are not automatically retried.
 
 ## Remaining live setup
 
+Normal local Mac app launches now configure the installed
+`docker.io/library/node@sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729`
+runner automatically. An explicit `MORONS_RUNNER_IMAGE` override is preserved;
+an explicit empty value disables it. Separately managed servers still use
+their operator's runner configuration. The app never starts Docker Desktop or
+pulls an image. If Docker or the configured image is unavailable, account
+sign-in and chat remain available, repository tools are disabled, and Settings
+and repository threads show the recovery action. Open Docker Desktop or install
+the configured image, then restart Morons to repeat the safety verification.
+
 Disposable validation used synthetic in-process Pi model streams, mocked
 image HTTP responses, and the already installed Docker image. No real model
 inference, image generation, OAuth, credential setup, image pull, or publishing
 was performed. A real coding run still needs a human-selected available model,
-an explicit repository registration, the configured local digest-pinned runner,
+an explicit repository registration, the available local digest-pinned runner,
 and the user's permission/review decisions. A real image run additionally needs
 the separately configured account-bound API key and provider access to the
 image model. Provider entitlement, remote output quality, real compaction, and

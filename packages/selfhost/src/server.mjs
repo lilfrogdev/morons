@@ -15,7 +15,8 @@ import { createMemoryRuntime, createPiMemoryCompressor } from "./memory-runtime.
 import { createHandoffExtension, openHandoffStore } from "./handoff-runtime.mjs";
 import { openCatalog, validId } from "./catalog.mjs";
 import { repoTools } from "./repo-tools.mjs";
-import { assertRunnerPathSeparation, stopContainerWorkspace, verifyContainerRunner } from './container-review.mjs';
+import { assertRunnerPathSeparation, stopContainerWorkspace } from './container-review.mjs';
+import { inspectRunner } from './runner-status.mjs';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 import { acquireOwnerLock } from "./owner-lock.mjs";
 import { runReviewOperation } from "./review.mjs";
@@ -166,7 +167,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, runnerUnavailableReason = 'not_configured', privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch }) {
   const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
@@ -185,6 +186,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
   let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
   let permissions, implementationRuntime, images, applications;
+  let runnerStatus;
   const permissionSessionIds = new Set();
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
@@ -192,8 +194,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     handoffStore = openHandoffStore(`${databasePath}.model-handoffs.sqlite`);
     permissions = openPermissionPolicy(`${databasePath}.permissions.sqlite`);
     const registry = createRegistry();
-    if (runnerImage) {
-      await verifyContainerRunner(runnerImage);
+    runnerStatus = await inspectRunner(runnerImage, runnerUnavailableReason);
+    if (!runnerStatus.available) {
+      runnerImage = null;
+      if (repositoryPlan?.runnerImage) repositoryPlan = { ...repositoryPlan, runnerImage: null };
     }
     if (repositoryPlan?.runnerImage) {
       trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
@@ -689,6 +693,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       }
       if (request.method === 'GET' && path === '/v1/image-generation/status')
         return send(response, 200, images.status());
+      if (request.method === 'GET' && path === '/v1/runtime/runner/status')
+        return send(response, 200, runnerStatus);
       const imageList = /^\/v1\/sessions\/([^/]+)\/images$/.exec(path);
       if (imageList && request.method === 'GET')
         return send(response, 200, { images: images.list(decodeURIComponent(imageList[1])) });

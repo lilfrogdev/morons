@@ -57,6 +57,7 @@ pub struct State {
     pub provider_url: Option<String>,
     pub generated_images: Vec<GeneratedImage>,
     pub image_provider: Option<ImageProviderStatus>,
+    pub runner_status: Option<RunnerStatus>,
     pub visualizations: Vec<VisualizationDocument>,
     pub visualization_expires_at: Option<Instant>,
 }
@@ -105,6 +106,7 @@ impl Default for State {
             provider_url: None,
             generated_images: Vec::new(),
             image_provider: None,
+            runner_status: None,
             visualizations: Vec::new(),
             visualization_expires_at: None,
         }
@@ -809,6 +811,21 @@ pub struct ModelOption {
     #[serde(rename = "releaseDate")]
     pub release_date: Option<String>,
 }
+#[derive(Clone, serde::Deserialize)]
+pub struct RunnerStatus {
+    pub configured: bool,
+    pub available: bool,
+    pub image: Option<String>,
+    pub reason: Option<String>,
+    pub message: String,
+}
+impl RunnerStatus {
+    fn valid(&self) -> bool {
+        self.message.len() <= 512 && self.image.as_ref().is_none_or(|value| value.len() <= 255) &&
+            self.reason.as_ref().is_none_or(|value| value.len() <= 160) &&
+            (!self.available || self.configured && self.image.is_some() && self.reason.is_none())
+    }
+}
 #[derive(serde::Deserialize)]
 struct NamedModels {
     models: Vec<ModelOption>,
@@ -1146,6 +1163,7 @@ async fn named_http(
     let mut selected_workspace = "personal".to_owned();
     loop {
         let refreshed = async {
+            state.runner_status = api.get::<RunnerStatus>("v1/runtime/runner/status").await.ok().filter(RunnerStatus::valid);
             let workspaces: NamedWorkspaces = api.get("v1/workspaces").await?;
             if workspaces.workspaces.is_empty() || workspaces.workspaces.len() > 32 ||
                 workspaces.workspaces.iter().any(|item| !valid_named_id(&item.id) || !valid_workspace_name(&item.name)) {
@@ -1390,6 +1408,7 @@ async fn named_http(
                 state.permissions = None;
                 state.generated_images.clear();
                 state.image_provider = None;
+                state.runner_status = None;
                 state.visualizations.clear();
                 state.visualization_expires_at = None;
                 publisher.publish(&state);
@@ -1632,6 +1651,7 @@ async fn named_http(
                         state.review = None;
                         state.named_morons.clear();
                         state.selected_moron = None;
+                        state.runner_status = None;
                         state.workspaces.clear();
                         state.selected_workspace = None;
                         state.workspace_name = None;

@@ -719,6 +719,11 @@ impl Chat {
                                         }))))
                         })
                 )})
+                .when_some(self.state.runner_status.clone(), |d, runner| d.child(
+                    div().flex().flex_col().gap_2().p_4().rounded(px(10.)).border_1().border_color(rgb(0xE3E5E8))
+                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Repository coding"))
+                        .child(div().text_sm().text_color(if runner.available { rgb(0x626772) } else { rgb(0xA04438) })
+                            .child(runner.message))))
                 .child(div().flex().flex_col().gap_3().p_4().rounded(px(10.))
                     .border_1().border_color(rgb(0xE3E5E8))
                     .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Account"))
@@ -1637,6 +1642,9 @@ impl Render for Chat {
                     )
             ))
             .when(!self.state.account_login && self.show_usage, |d| d.child(self.usage_panel(cx)))
+            .when(!self.state.account_login && show_chat && self.nav_section == NavSection::Repositories, |d|
+                d.when_some(self.state.runner_status.as_ref().filter(|runner| !runner.available), |d, runner| d.child(
+                    div().px_6().py_2().text_sm().text_color(rgb(0xA04438)).child(runner.message.clone()))))
             .when(!self.state.account_login && self.nav_section == NavSection::Settings, |d| d.child(self.settings_panel(cx)))
             .when(!self.state.account_login && self.nav_section == NavSection::Repositories && !show_chat, |d| d.child(
                 div().flex_1().flex().items_center().justify_center().text_size(px(14.))

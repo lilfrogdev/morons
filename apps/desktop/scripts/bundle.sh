@@ -12,6 +12,7 @@ runtime="$bundle/Contents/Resources"
 mkdir -p "$runtime/selfhost" "$runtime/review-runner"
 cp -R ../../packages/selfhost/src "$runtime/selfhost/"
 cp -R ../../packages/review-runner/src "$runtime/review-runner/"
+cp ../../packages/review-runner/package.json "$runtime/review-runner/"
 cp -R ../../packages/selfhost/node_modules "$runtime/selfhost/"
 for package in credential-store optchat visualization auth; do
   cp -R "../../packages/$package" "$runtime/"

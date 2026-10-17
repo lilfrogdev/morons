@@ -9,7 +9,7 @@ import { piVersionStatus } from './pi-version.mjs';
 import { acquireOwnerLock } from './owner-lock.mjs';
 import { createProviderFlow } from './provider-flow.mjs';
 import { openProviderRuntime } from './provider-runtime.mjs';
-import { assertRunnerPathSeparation, stopContainerWorkspace, verifyContainerRunner } from './container-review.mjs';
+import { assertRunnerPathSeparation, stopContainerWorkspace } from './container-review.mjs';
 import { trustedCheckPlan } from '../../review-runner/src/check-policy.mjs';
 
 function send(response, status, body) {
@@ -59,7 +59,6 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
   if (!(await lstat(dataDir)).isDirectory() || (await lstat(dataDir)).isSymbolicLink())
     throw new Error('private_data_directory_required');
   await chmod(dataDir, 0o700);
-  if (runnerImage) await verifyContainerRunner(runnerImage);
   if (repositoryPlan?.runnerImage) {
     trustedCheckPlan(repositoryPlan.checkProfile, repositoryPlan.allowedPaths);
     await assertRunnerPathSeparation(repositoryPlan.repository, dataDir);
@@ -100,6 +99,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         server = await openFixtureServer({ databasePath: join(directory, 'pi.sqlite'),
           ownerToken: internalToken, repositoryPlan: accountPlan,
           runnerImage: account.administrator ? runnerImage : null, privateDataRoot: dataDir, accountId: account.id,
+          runnerUnavailableReason: account.administrator ? 'not_configured' : 'administrator_required',
           providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
           providerRuntime, accountPlan };

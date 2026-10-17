@@ -3,6 +3,8 @@ use std::{fs::{self, OpenOptions}, io::{BufRead, BufReader, Write}, path::{Path,
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+const DEFAULT_RUNNER_IMAGE: &str = "docker.io/library/node@sha256:80503c2cadca910dfe16f1516025a2133cdfb0e839f02e79191f83548f2ec729";
+
 pub struct LocalBackend {
     child: Child,
     data_dir: PathBuf,
@@ -126,6 +128,9 @@ fn spawn(script: &Path, data_dir: &Path, bootstrap_file: &Path, provider_file: &
         .env("PORT", "0")
         .stdout(Stdio::piped()).stderr(Stdio::null());
     if provider_file.exists() { command.env("MORONS_PROVIDER_KEY_FILE", provider_file); }
+    if std::env::var_os("MORONS_RUNNER_IMAGE").is_none() {
+        command.env("MORONS_RUNNER_IMAGE", DEFAULT_RUNNER_IMAGE);
+    }
     command.spawn().map_err(|_| "Cannot start local account server; install Node.js")
 }
 
