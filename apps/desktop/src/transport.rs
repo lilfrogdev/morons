@@ -118,6 +118,7 @@ pub enum Command {
     CreateMoron { id: String, name: String },
     ToggleMoronPin { id: String, pinned: bool },
     UpdateMoron { id: String, name: String, rules: String, preferences: String },
+    ToggleMoronArchive { id: String, archived: bool },
     ToggleRepositoryPin { id: String, pinned: bool },
     ToggleRepositoryArchive { id: String, archived: bool },
     SelectModel { provider: String, id: String },
@@ -678,7 +679,8 @@ async fn handle(
         Command::SelectMoron(_) | Command::SelectWorkspace(_) | Command::CreateWorkspace { .. } |
         Command::SelectSession { .. } | Command::CreateSession { .. } | Command::RegisterRepository(_) |
         Command::RenameWorkspace(_) | Command::CreateMoron { .. } | Command::ToggleMoronPin { .. } |
-        Command::UpdateMoron { .. } | Command::ToggleRepositoryPin { .. } | Command::ToggleRepositoryArchive { .. } |
+        Command::UpdateMoron { .. } | Command::ToggleMoronArchive { .. } |
+        Command::ToggleRepositoryPin { .. } | Command::ToggleRepositoryArchive { .. } |
         Command::SelectModel { .. } |
         Command::SelectEffort(_) | Command::SelectFast(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
@@ -718,6 +720,8 @@ pub struct MoronDetails {
     pub preferences: String,
     #[serde(default)]
     pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 impl MoronDetails { pub fn id(&self) -> &str { &self.id } }
 #[derive(Clone, serde::Deserialize)]
@@ -1104,14 +1108,15 @@ async fn named_http(
             }
             state.repositories = repositories.repositories;
             let catalog: NamedMorons = api.get(&format!("v1/morons?workspaceId={selected_workspace}")).await?;
-            if catalog.morons.len() > 32 || catalog.morons.iter().any(|m| !valid_named_id(&m.id) || m.name.len() > 80) {
+            if catalog.morons.len() > 256 || catalog.morons.iter().any(|m| !valid_named_id(&m.id) || m.name.len() > 80) {
                 return Err("Invalid named moron catalog");
             }
-            if catalog.morons.is_empty() {
+            if !catalog.morons.iter().any(|m| !m.archived) {
                 return Ok::<_, &'static str>(None);
             }
-            if !catalog.morons.iter().any(|m| m.id == selected) {
-                selected = catalog.morons.first().ok_or("No named moron available")?.id.clone();
+            if !catalog.morons.iter().any(|m| m.id == selected && !m.archived) {
+                selected = catalog.morons.iter().find(|m| !m.archived)
+                    .ok_or("No named moron available")?.id.clone();
                 selected_session = None;
             }
             let (session, sessions) = api.selected_session(&selected, &selected_workspace, selected_session.as_deref()).await?;
@@ -1192,6 +1197,9 @@ async fn named_http(
                 state.named_morons.clear();
                 state.moron_details.clear();
                 state.pinned_morons.clear();
+                if let Ok(catalog) = api.get::<NamedMorons>(&format!("v1/morons?workspaceId={selected_workspace}")).await {
+                    state.moron_details = catalog.morons;
+                }
                 state.sessions.clear();
                 state.selected_session = None;
                 state.selected_moron = None;
@@ -1214,6 +1222,11 @@ async fn named_http(
                             "id":id, "name":name, "workspaceId":selected_workspace,
                             "rules":"", "preferences":""
                         })).await.err();
+                        if state.request_error.is_none() { selected = id; }
+                    }
+                    Command::ToggleMoronArchive { id, archived: false } if state.moron_details.iter().any(|m| m.id == id && m.archived) => {
+                        state.request_error = api.patch(&format!("v1/morons/{id}/archive?workspaceId={selected_workspace}"),
+                            serde_json::json!({"archived":false})).await.err();
                         if state.request_error.is_none() { selected = id; }
                     }
                     Command::RegisterRepository(path) => {
@@ -1252,8 +1265,9 @@ async fn named_http(
                 state.fast_available = fast_available;
                 state.model_favorites = favorites;
                 state.snapshot = snapshot;
-                state.pinned_morons = catalog.morons.iter().filter(|m| m.pinned).map(|m| m.id.clone()).collect();
-                state.named_morons = catalog.morons.iter().map(|m| (m.id.clone(), m.name.clone())).collect();
+                state.pinned_morons = catalog.morons.iter().filter(|m| m.pinned && !m.archived).map(|m| m.id.clone()).collect();
+                state.named_morons = catalog.morons.iter().filter(|m| !m.archived)
+                    .map(|m| (m.id.clone(), m.name.clone())).collect();
                 state.moron_details = catalog.morons;
                 state.sessions = sessions;
                 state.selected_session = Some(session.clone());
@@ -1390,6 +1404,15 @@ async fn named_http(
                         } else {
                             state.request_error = api.patch(&format!("v1/morons/{id}"),
                                 serde_json::json!({"name":name,"rules":rules,"preferences":preferences})).await.err();
+                        }
+                    }
+                    Command::ToggleMoronArchive { id, archived } => {
+                        if pending.is_some() || !state.moron_details.iter().any(|item| item.id == id && item.archived != archived) ||
+                            state.repositories.iter().any(|item| item.moron_id == id) {
+                            state.request_error = Some("Moron cannot be moved to or from Recently deleted");
+                        } else {
+                            state.request_error = api.patch(&format!("v1/morons/{id}/archive?workspaceId={selected_workspace}"),
+                                serde_json::json!({"archived":archived})).await.err();
                         }
                     }
                     Command::ToggleRepositoryPin { id, pinned } => {

@@ -183,8 +183,10 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
       }
       if (!path.startsWith('/v1/')) return send(response, 404, { error: 'not_found' });
       const body = ['POST', 'PUT', 'PATCH'].includes(request.method) ? await bytes(request) : undefined;
-      if (path === '/v1/morons' && ['GET', 'POST'].includes(request.method)) {
-        const workspaceId = request.method === 'GET' ? requestUrl.searchParams.get('workspaceId') ?? 'personal' : json(body)?.workspaceId ?? 'personal';
+      if ((path === '/v1/morons' && ['GET', 'POST'].includes(request.method)) ||
+          /^\/v1\/morons\/[^/]+\/archive$/.test(path)) {
+        const workspaceId = request.method === 'POST' && path === '/v1/morons'
+          ? json(body)?.workspaceId ?? 'personal' : requestUrl.searchParams.get('workspaceId') ?? 'personal';
         if (!accounts.workspace(account.id, workspaceId))
           return send(response, 404, { error: 'workspace_not_found' });
       }

@@ -28,6 +28,7 @@ const ICON_STAR: &[u8] = include_bytes!("assets/tabler/star.svg");
 const ICON_STAR_FILLED: &[u8] = include_bytes!("assets/tabler/star-filled.svg");
 const ICON_CHEVRON: &[u8] = include_bytes!("assets/tabler/chevron-down.svg");
 const ICON_BOLT: &[u8] = include_bytes!("assets/tabler/bolt.svg");
+const ICON_BOLT_FILLED: &[u8] = include_bytes!("assets/tabler/bolt-filled.svg");
 fn provider_icon(provider: &str) -> &'static [u8] { if provider == "openai" { ICON_OPENAI } else { ICON_CPU } }
 fn activation_key(event: &KeyDownEvent) -> bool {
     !event.keystroke.modifiers.modified() && matches!(event.keystroke.key.as_str(), "enter" | "space")
@@ -90,6 +91,7 @@ struct Chat {
     show_archived: bool,
     nav_section: NavSection,
     settings_moron_id: Option<String>,
+    delete_moron_confirmation: Option<String>,
     show_profile: bool,
     show_usage: bool,
     usage_window: String,
@@ -153,6 +155,7 @@ impl Chat {
                             view.show_usage = false;
                             view.nav_section = NavSection::Morons;
                             view.settings_moron_id = None;
+                            view.delete_moron_confirmation = None;
                             view.usage_menu = None;
                             view.usage_provider = None;
                             view.usage_model = None;
@@ -231,6 +234,7 @@ impl Chat {
             show_archived: false,
             nav_section: NavSection::Morons,
             settings_moron_id: None,
+            delete_moron_confirmation: None,
             show_profile: false,
             show_usage: false,
             usage_window: "all".into(),
@@ -308,6 +312,7 @@ impl Chat {
     }
     fn open_moron_settings(&mut self, id: &str, cx: &mut Context<Self>) {
         self.load_moron_settings(id, cx);
+        self.delete_moron_confirmation = None;
         self.nav_section = NavSection::Settings;
         self.show_usage = false;
         self.show_profile = false;
@@ -597,7 +602,12 @@ impl Chat {
             .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
             .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
                 .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
-                .when_some(self.settings_moron_id.clone(), |d, id| d.child(
+                .when_some(self.settings_moron_id.clone(), |d, id| {
+                    let archived = self.state.moron_details.iter().find(|item| item.id() == id).is_some_and(|item| item.archived);
+                    let deletable = !self.state.repositories.iter().any(|repo| repo.moron_id == id);
+                    let confirm = self.delete_moron_confirmation.as_deref() == Some(id.as_str());
+                    let archive_id = id.clone();
+                    d.child(
                     div().flex().flex_col().gap_3().p_4().rounded(px(10.))
                         .border_1().border_color(rgb(0xE3E5E8))
                         .child(div().text_lg().font_weight(FontWeight::SEMIBOLD)
@@ -616,7 +626,60 @@ impl Chat {
                             .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                                 if activation_key(event) { view.save_moron_settings(cx); cx.stop_propagation(); }
                             })))
-                ))
+                        .when(deletable && archived, |d| d.child(button("restore-moron", "Restore Moron")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.command(Command::ToggleMoronArchive { id: archive_id.clone(), archived: false }, cx);
+                            }))
+                            .on_key_down(cx.listener({ let id = self.settings_moron_id.clone().unwrap_or_default();
+                                move |view, event: &KeyDownEvent, _, cx| {
+                                    if activation_key(event) {
+                                        view.command(Command::ToggleMoronArchive { id: id.clone(), archived: false }, cx);
+                                        cx.stop_propagation();
+                                    }
+                                }
+                            }))))
+                        .when(deletable && !archived && !confirm, |d| d.child(button("delete-moron", "Delete Moron")
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.delete_moron_confirmation = Some(id.clone()); cx.notify();
+                            }))
+                            .on_key_down(cx.listener({ let id = self.settings_moron_id.clone().unwrap_or_default();
+                                move |view, event: &KeyDownEvent, _, cx| {
+                                    if activation_key(event) {
+                                        view.delete_moron_confirmation = Some(id.clone());
+                                        cx.stop_propagation(); cx.notify();
+                                    }
+                                }
+                            }))))
+                        .when(deletable && !archived && confirm, |d| {
+                            let id = self.settings_moron_id.clone().unwrap_or_default();
+                            d.child(div().text_sm().child("Move this Moron to Recently deleted? Its conversations remain available if you restore it."))
+                                .child(div().flex().gap_2()
+                                    .child(button("confirm-delete-moron", "Move to Recently deleted")
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.command(Command::ToggleMoronArchive { id: id.clone(), archived: true }, cx);
+                                            view.delete_moron_confirmation = None; cx.notify();
+                                        }))
+                                        .on_key_down(cx.listener({ let id = self.settings_moron_id.clone().unwrap_or_default();
+                                            move |view, event: &KeyDownEvent, _, cx| {
+                                                if activation_key(event) {
+                                                    view.command(Command::ToggleMoronArchive { id: id.clone(), archived: true }, cx);
+                                                    view.delete_moron_confirmation = None;
+                                                    cx.stop_propagation(); cx.notify();
+                                                }
+                                            }
+                                        })))
+                                    .child(button("cancel-delete-moron", "Cancel")
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.delete_moron_confirmation = None; cx.notify();
+                                        }))
+                                        .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                            if activation_key(event) {
+                                                view.delete_moron_confirmation = None;
+                                                cx.stop_propagation(); cx.notify();
+                                            }
+                                        }))))
+                        })
+                )})
                 .child(div().flex().flex_col().gap_3().p_4().rounded(px(10.))
                     .border_1().border_color(rgb(0xE3E5E8))
                     .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).child("Account"))
@@ -771,6 +834,7 @@ impl Chat {
                                         !self.state.repositories.iter().any(|repo| repo.moron_id == *id)).map(|(id, name)|
                                         moron_row(id, name, active == Some(id.as_str()), true, true, cx)))))))
                         .when(self.nav_section != NavSection::Repositories, |d| d.child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons")
+                            .child(div().flex().items_center().justify_between()
                             .child(div().id("morons-heading").role(gpui::Role::Button).aria_label("Morons")
                                 .aria_expanded(self.show_morons).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
@@ -781,19 +845,26 @@ impl Chat {
                                         matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                         view.show_morons = !view.show_morons; cx.stop_propagation(); cx.notify();
                                     }
-                                })))
-                            .when(self.show_morons, |d| d
-                                .child(button("new-moron", "New Moron")
+                                }))
+                            .child(div().id("new-moron").role(gpui::Role::Button).aria_label("Add Moron")
+                                    .focusable().tab_stop(true).cursor_pointer()
+                                    .w(px(26.)).h(px(26.)).mr(px(5.)).rounded(px(6.))
+                                    .flex().items_center().justify_center()
+                                    .hover(|d| d.bg(rgb(0xECEEF1)))
+                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
                                     .on_click(cx.listener(|view, _, _, cx| {
-                                        view.show_create_moron = !view.show_create_moron; cx.notify();
+                                        view.show_create_moron = !view.show_create_moron;
+                                        view.show_morons = true; cx.stop_propagation(); cx.notify();
                                     }))
                                     .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                                         if !event.keystroke.modifiers.modified() &&
                                             matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                             view.show_create_moron = !view.show_create_moron;
+                                            view.show_morons = true;
                                             cx.stop_propagation(); cx.notify();
                                         }
-                                    })))
+                                    }))))
+                            .when(self.show_morons, |d| d
                                 .when(self.show_create_moron, |d| d.child(
                                     div().p_2().flex().flex_col().gap_1()
                                         .child(div().px_1().py_1().rounded_sm().border_1().border_color(rgb(0xBAC8D3))
@@ -815,8 +886,30 @@ impl Chat {
                                     .children(self.state.named_morons.iter().filter(|(id, _)|
                                         !self.state.repositories.iter().any(|repo| repo.moron_id == *id)).map(|(id, name)|
                                         moron_row(id, name, active == Some(id.as_str()),
-                                            self.state.pinned_morons.contains(id), false, cx)))))))
+                                            self.state.pinned_morons.contains(id), false, cx)))
+                                .when(self.state.moron_details.iter().any(|item| item.archived), |d| d.child(
+                                    div().id("recently-deleted-morons").flex().flex_col().gap_1().mt_3()
+                                        .child(div().px_2().text_size(px(12.)).font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(0x626772)).child("Recently deleted"))
+                                        .children(self.state.moron_details.iter().filter(|item| item.archived).map(|item| {
+                                            let id = item.id().to_owned();
+                                            let name = item.name.clone();
+                                            div().id(SharedString::from(format!("archived-moron-{id}")))
+                                                .role(gpui::Role::Button).aria_label(SharedString::from(format!("Restore or edit {name}")))
+                                                .focusable().tab_stop(true).cursor_pointer().px_2().py_1()
+                                                .rounded(px(6.)).hover(|d| d.bg(rgb(0xECEEF1)))
+                                                .text_size(px(13.)).text_color(rgb(0x626772)).child(name)
+                                                .on_click(cx.listener({ let id = id.clone();
+                                                    move |view, _, _, cx| view.open_moron_settings(&id, cx)
+                                                }))
+                                                .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                                    if activation_key(event) {
+                                                        view.open_moron_settings(&id, cx); cx.stop_propagation();
+                                                    }
+                                                }))
+                                        })))))))))
                         .when(self.nav_section == NavSection::Repositories, |d| d.child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories")
+                            .child(div().flex().items_center().justify_between()
                             .child(div().id("repositories-heading").role(gpui::Role::Button).aria_label("Repositories")
                                 .aria_expanded(self.show_repositories).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
@@ -833,13 +926,18 @@ impl Chat {
                                         view.show_repositories = !view.show_repositories;
                                         cx.stop_propagation(); cx.notify();
                                     }
-                                })))
+                                }))
+                            .child(div().id("add-repository").role(gpui::Role::Button).aria_label("Add repository")
+                                .focusable().tab_stop(true).cursor_pointer()
+                                .w(px(26.)).h(px(26.)).mr(px(5.)).rounded(px(6.))
+                                .flex().items_center().justify_center()
+                                .hover(|d| d.bg(rgb(0xECEEF1)))
+                                .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
+                                .on_click(cx.listener(|view, _, _, cx| view.add_repository(cx)))
+                                .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
+                                    if activation_key(event) { view.add_repository(cx); cx.stop_propagation(); }
+                                }))))
                             .when(self.show_repositories, |d| d
-                                .child(button("add-repository", "Add repository")
-                                    .on_click(cx.listener(|view, _, _, cx| view.add_repository(cx)))
-                                    .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
-                                        if activation_key(event) { view.add_repository(cx); cx.stop_propagation(); }
-                                    })))
                                 .when(self.state.repositories.is_empty(), |d| d.child(
                                     div().px_2().py_2().text_size(px(12.))
                                         .text_color(rgb(0x626772)).child("No repositories connected")))
@@ -847,13 +945,29 @@ impl Chat {
                                     .map(|repo| div().flex().flex_col()
                                         .child(repository_row(repo, active == Some(repo.moron_id.as_str()), false, cx))
                                         .when(active == Some(repo.moron_id.as_str()), |d| d
-                                            .child(button("new-repo-thread", "New thread")
-                                                .on_click(cx.listener({ let moron_id = repo.moron_id.clone();
-                                                    move |view, _, _, cx| view.command(Command::CreateSession { moron_id: moron_id.clone() }, cx)
-                                                })))
+                                            .child(div().flex().items_center().justify_between().px_2().mt_2()
+                                                .child(div().text_size(px(12.)).font_weight(FontWeight::BOLD)
+                                                    .text_color(rgb(0x626772)).child("Threads"))
+                                                .child(div().id("new-repo-thread").role(gpui::Role::Button)
+                                                    .aria_label("New thread").focusable().tab_stop(true).cursor_pointer()
+                                                    .w(px(26.)).h(px(26.)).rounded(px(6.))
+                                                    .flex().items_center().justify_center()
+                                                    .hover(|d| d.bg(rgb(0xECEEF1)))
+                                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
+                                                    .on_click(cx.listener({ let moron_id = repo.moron_id.clone();
+                                                        move |view, _, _, cx| view.command(Command::CreateSession { moron_id: moron_id.clone() }, cx)
+                                                    }))
+                                                    .on_key_down(cx.listener({ let moron_id = repo.moron_id.clone();
+                                                        move |view, event: &KeyDownEvent, _, cx| {
+                                                            if activation_key(event) {
+                                                                view.command(Command::CreateSession { moron_id: moron_id.clone() }, cx);
+                                                                cx.stop_propagation();
+                                                            }
+                                                        }
+                                                    }))))
                                             .children(self.state.sessions.iter().map(|(id, title)|
                                                 session_row(&repo.moron_id, id, title,
-                                                    self.state.selected_session.as_deref() == Some(id.as_str()), cx)))))))))
+                                                    self.state.selected_session.as_deref() == Some(id.as_str()), cx))))))))))
                         .when(self.nav_section == NavSection::Repositories && self.state.repositories.iter().any(|repo| repo.archived), |d| d.child(
                             div().id("archived-section").role(gpui::Role::Region).aria_label("Archived repositories")
                                 .child(div().id("archived-heading").role(gpui::Role::Button)
@@ -1379,10 +1493,14 @@ impl Render for Chat {
                                     .text_xl()
                                     .font_weight(FontWeight::BOLD)
                                     .child(match self.nav_section {
-                                        NavSection::Morons => "Morons",
-                                        NavSection::Repositories => "Repositories",
-                                        NavSection::Usage => "Usage",
-                                        NavSection::Settings => "Settings",
+                                        NavSection::Morons | NavSection::Repositories => self.state.selected_moron.as_ref()
+                                            .and_then(|id| self.state.named_morons.iter().find(|(known, _)| known == id))
+                                            .map(|(_, name)| name.clone())
+                                            .unwrap_or_else(|| if self.nav_section == NavSection::Repositories {
+                                                "Repositories".into()
+                                            } else { "Morons".into() }),
+                                        NavSection::Usage => "Usage".into(),
+                                        NavSection::Settings => "Settings".into(),
                                     }),
                             )
                             .when(status != "Connected", |d| d.child(
@@ -1581,17 +1699,18 @@ impl Render for Chat {
                                 .aria_label("Attachments unavailable for this connection")
                                 .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
                                 .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                            .child(div().flex().items_center().gap(px(2.))
                             .when(self.state.fast_available, |d| d.child(
                                 div().id("fast-mode").role(gpui::Role::Button)
                                     .aria_label(if self.state.fast_mode {
                                         "Turn Fast mode off"
                                     } else { "Turn Fast mode on; uses more subscription usage" })
-                                    .aria_selected(self.state.fast_mode)
+                                    .aria_toggled(if self.state.fast_mode { Toggled::True } else { Toggled::False })
                                     .focusable().tab_stop(true).cursor_pointer()
                                     .w(px(28.)).h(px(28.)).rounded(px(6.))
-                                    .bg(if self.state.fast_mode { rgb(0xFFF5D9) } else { rgb(0xFFFFFF) })
+                                    .hover(|d| d.bg(rgb(0xF1F3F5)))
                                     .flex().items_center().justify_center()
-                                    .child(svg().data(ICON_BOLT).w(px(17.)).h(px(17.))
+                                    .child(svg().data(if self.state.fast_mode { ICON_BOLT_FILLED } else { ICON_BOLT }).w(px(17.)).h(px(17.))
                                         .text_color(if self.state.fast_mode { rgb(0xB77900) } else { rgb(0x80858D) }))
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.command(Command::SelectFast(!view.state.fast_mode), cx);
@@ -1608,7 +1727,7 @@ impl Render for Chat {
                                 .aria_label("Choose a model")
                                 .aria_expanded(self.show_model)
                                 .focusable().tab_stop(true)
-                                .min_w_0().max_w(px(230.)).h(px(28.)).px(px(7.))
+                                .min_w_0().max_w(px(230.)).h(px(28.)).px(px(5.))
                                 .rounded(px(6.)).flex().items_center().gap_1()
                                 .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
                                 .text_size(px(12.))
@@ -1628,12 +1747,12 @@ impl Render for Chat {
                                     }
                                 })))
                             .when(!selected_efforts.is_empty(), |d| d
-                                .child(div().h(px(14.)).border_l_1().border_color(rgb(0xE3E5E8)).mx(px(2.)))
+                                .child(div().h(px(14.)).border_l_1().border_color(rgb(0xE3E5E8)).mx(px(1.)))
                                 .child(div().id("effort").role(gpui::Role::Button)
                                     .aria_label("Choose reasoning effort")
                                     .aria_expanded(self.show_effort)
                                     .focusable().tab_stop(true).cursor_pointer()
-                                    .h(px(28.)).px(px(7.)).rounded(px(6.))
+                                    .h(px(28.)).px(px(5.)).rounded(px(6.))
                                     .hover(|d| d.bg(rgb(0xECEEF1)))
                                     .flex().items_center().gap_1().text_size(px(12.))
                                     .child(effort_label.unwrap_or("Off"))
@@ -1651,6 +1770,7 @@ impl Render for Chat {
                                             cx.stop_propagation(); cx.notify();
                                         }
                                     }))))
+                            )
                             .child(div().flex_1())
                             .when(self.state.pending, |d| d.child(button("retry", "Retry")
                                 .on_click(cx.listener(|view, _, _, cx| view.command(Command::Retry, cx)))))

@@ -39,6 +39,8 @@ export function openCatalog(path) {
     db.exec("ALTER TABLE morons ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
   if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'role'))
     db.exec("ALTER TABLE morons ADD COLUMN role TEXT NOT NULL DEFAULT 'named'");
+  if (!db.prepare('PRAGMA table_info(morons)').all().some((column) => column.name === 'archived'))
+    db.exec('ALTER TABLE morons ADD COLUMN archived INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(sessions)').all().some((column) => column.name === 'title'))
     db.exec("ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT 'New thread'");
   db.exec(`CREATE TABLE IF NOT EXISTS repository_sidebar (
@@ -74,7 +76,8 @@ export function openCatalog(path) {
     registerRepository({ id, workspaceId, moronId, path, name }) {
       if (!validId(id) || !validId(workspaceId) || !validId(moronId) ||
           typeof path !== 'string' || !path || typeof name !== 'string' || !name.trim() || name.length > 80 ||
-          this.listRepositories(workspaceId).length >= 32 || this.listMorons(workspaceId).length >= 32)
+          this.listRepositories(workspaceId).length >= 32 ||
+          this.listMorons(workspaceId).filter((item) => !item.archived).length >= 32)
         throw new Error('invalid_repository');
       db.exec('BEGIN IMMEDIATE');
       try {
@@ -105,6 +108,14 @@ export function openCatalog(path) {
         .run(name.trim(), rules, preferences, id);
       return moron(getMoron.get(id));
     },
+    setMoronArchived(id, archived) {
+      const current = getMoron.get(id);
+      if (!validId(id) || typeof archived !== 'boolean' || !current || current.role !== 'named' ||
+          this.repositoryForMoron(id)) throw new Error('invalid_moron_archive');
+      db.prepare('UPDATE morons SET archived = ?, pinned = CASE WHEN ? THEN 0 ELSE pinned END WHERE id = ?')
+        .run(Number(archived), Number(archived), id);
+      return moron(getMoron.get(id));
+    },
     repositorySidebar(workspaceId, repositoryId) {
       const row = db.prepare('SELECT pinned, archived FROM repository_sidebar WHERE workspace_id = ? AND repository_id = ?')
         .get(workspaceId, repositoryId);
@@ -122,7 +133,9 @@ export function openCatalog(path) {
       if (!validId(id) || typeof name !== "string" || !name.trim() || name.length > 80 ||
           typeof rules !== "string" || rules.length > 12000 ||
           typeof preferences !== "string" || preferences.length > 12000 || !validId(workspaceId) ||
-          !['named', 'implementation', 'coordinator'].includes(role)) throw new Error("invalid_moron");
+          !['named', 'implementation', 'coordinator'].includes(role) ||
+          this.listMorons(workspaceId).filter((item) => !item.archived).length >= 32)
+        throw new Error("invalid_moron");
       db.prepare("INSERT INTO morons (id, name, rules, preferences, created_at, workspace_id, role) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(id, name.trim(), rules, preferences, Date.now(), workspaceId, role);
       return moron(getMoron.get(id));
@@ -233,7 +246,7 @@ export function openCatalog(path) {
   };
 }
 
-function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, role: row.role, pinned: Boolean(row.pinned) }; }
+function moron(row) { return row && { id: row.id, name: row.name, rules: row.rules, preferences: row.preferences, createdAt: row.created_at, workspaceId: row.workspace_id, role: row.role, pinned: Boolean(row.pinned), archived: Boolean(row.archived) }; }
 function session(row) { return row && { id: row.id, moronId: row.moron_id,
   conversationId: Number(row.conversation_id), createdAt: row.created_at, title: row.title ?? 'New thread' }; }
 function review(row) { return row && { id: row.id, sessionId: row.session_id, branch: row.branch, baseRevision: row.base_revision, diff: row.diff, checks: JSON.parse(row.checks), decision: row.decision, createdAt: row.created_at }; }

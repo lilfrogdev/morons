@@ -227,7 +227,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         return catalog.displayTextForSubmitted(source.id, entryText(entry)) ?? null;
       },
       authorizeTarget: async ({ source, target }) => source.moronId !== target.id &&
-        catalog.getMoron(source.moronId)?.workspaceId === target.workspaceId,
+        !target.archived && catalog.getMoron(source.moronId)?.workspaceId === target.workspaceId,
       ensureTargetSession: async ({ id, target, source }) => {
         const existing = catalog.getSession(id);
         if (existing) {
@@ -634,6 +634,17 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (typeof body?.pinned !== 'boolean') return send(response, 400, { error: 'invalid_pin' });
         return send(response, 200, { moron: catalog.setMoronPinned(id, body.pinned) });
       }
+      const moronArchive = /^\/v1\/morons\/([^/]+)\/archive$/.exec(path);
+      if (moronArchive && request.method === 'PATCH') {
+        const id = decodeURIComponent(moronArchive[1]);
+        const current = catalog.getMoron(id);
+        if (!current || current.workspaceId !== (requestUrl.searchParams.get('workspaceId') ?? 'personal'))
+          return send(response, 404, { error: 'moron_not_found' });
+        const body = await readBody(request);
+        if (typeof body?.archived !== 'boolean' || current.role !== 'named' || catalog.repositoryForMoron(id))
+          return send(response, 400, { error: 'invalid_moron_archive' });
+        return send(response, 200, { moron: catalog.setMoronArchived(id, body.archived) });
+      }
       const moronEdit = /^\/v1\/morons\/([^/]+)$/.exec(path);
       if (moronEdit && request.method === 'PATCH') {
         const id = decodeURIComponent(moronEdit[1]);
@@ -707,6 +718,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         if (!moron) return send(response, 404, { error: "moron_not_found" });
         if (request.method === "GET") return send(response, 200, { sessions: catalog.listSessions(moronId) });
         if (request.method === "POST") {
+          if (moron.archived) return send(response, 409, { error: 'moron_archived' });
           const body = await readBody(request);
           if (!validId(body?.id)) return send(response, 400, { error: "invalid_session" });
           if (catalog.getSession(body.id)) return send(response, 409, { error: "session_exists" });
