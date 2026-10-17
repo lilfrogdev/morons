@@ -341,7 +341,8 @@ export function workspaceCreateArgs({ image, repository, reviewRoot, workspaceRo
   ];
 }
 
-function docker(args, input = '', timeout = 180_000) {
+function docker(args, input = '', timeout = 180_000, signal) {
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn('docker', ['--context', 'desktop-linux', ...args], { stdio: ['pipe', 'pipe', 'pipe'],
 
@@ -350,8 +351,12 @@ function docker(args, input = '', timeout = 180_000) {
       windowsHide: true });
     let output = '', error = '';
     let settled = false;
-    const fail = (reason) => { if (!settled) { settled = true; child.kill('SIGKILL'); reject(new Error(reason)); } };
-    const timer = setTimeout(() => fail(`container_runner_timeout_${args[0]}`), timeout);
+    let timer;
+    const onAbort = () => fail('container_operation_cancelled');
+    const fail = (reason) => { if (!settled) { settled = true; clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort); child.kill('SIGKILL'); reject(new Error(reason)); } };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => fail(`container_runner_timeout_${args[0]}`), timeout);
     child.on('error', () => fail('container_runner_unavailable'));
     child.stdout.on('data', (chunk) => {
       output += chunk;
@@ -363,6 +368,7 @@ function docker(args, input = '', timeout = 180_000) {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       if (settled) return;
       settled = true;
       resolve({ code, output, error });
@@ -496,12 +502,13 @@ export async function openDockerWorkspaceProvider(plan) {
   return {
     workspacePath: configuration.workspaceRoot,
     provision: () => serializeWorkspace(key, () => provisionWorkspace(configuration)),
-    execute: (input) => serializeWorkspace(key, async () => {
+    execute: (input, { signal } = {}) => serializeWorkspace(key, async () => {
+      signal?.throwIfAborted();
       if (poisonedWorkspaces.has(key)) throw new Error('workspace_requires_manual_recovery');
       await provisionWorkspace(configuration);
       try {
         const result = await docker(['exec', '--interactive', '--workdir', '/worker',
-          name, 'node', '/worker/src/worker.mjs'], input, 360_000);
+          name, 'node', '/worker/src/worker.mjs'], input, 360_000, signal);
         await checkpointRuntimeMounts(configuration);
         return result;
       } catch (error) {
@@ -611,11 +618,12 @@ export async function verifyContainerRunner(image) {
   } finally { await rm(probeRoot, { recursive: true, force: true }); }
 }
 
-export async function runContainerReviewOperation(plan, operation) {
+export async function runContainerReviewOperation(plan, operation, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!validRunnerImage(plan.runnerImage)) throw new Error('runner_image_digest_required');
   trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
   let scopedPlan = { ...plan, reviewWritable: false };
-  if (operation.operation === 'review') {
+  if (['review', 'implementation'].includes(operation.operation)) {
     if (typeof operation.branch !== 'string' ||
         !/^morons-review\/[a-z0-9][a-z0-9-]{0,63}$/.test(operation.branch))
       throw new Error('invalid_review_branch');
@@ -639,14 +647,14 @@ export async function runContainerReviewOperation(plan, operation) {
     scopedPlan = { ...plan, reviewRoot: join(dirname(plan.reviewRoot), 'proposal-reviews', id),
       workspaceRoot: join(dirname(plan.workspaceRoot), 'proposal-homes', id), reviewWritable: true };
   }
-  if (operation.operation === 'review') scopedPlan.baseRevision = operation.baseRevision;
+  if (['review', 'implementation'].includes(operation.operation)) scopedPlan.baseRevision = operation.baseRevision;
   const provider = await openDockerWorkspaceProvider(scopedPlan);
   const input = JSON.stringify({ plan: { repository: '/source', reviewRoot: '/reviews',
     allowedPaths: plan.allowedPaths, checkProfile: plan.checkProfile, isolatedClone: true }, ...operation });
   if (Buffer.byteLength(input) > 300_000) throw new Error('review_request_too_large');
   let result;
-  try { result = await provider.execute(input); }
-  finally { if (operation.operation === 'review') await provider.stop(); }
+  try { result = await provider.execute(input, { signal }); }
+  finally { if (['review', 'implementation'].includes(operation.operation)) await provider.stop(); }
   let response;
   try { response = JSON.parse(result.output); } catch { throw new Error('container_review_failed'); }
   if (result.code !== 0 || response?.ok !== true) throw new Error('container_review_failed');

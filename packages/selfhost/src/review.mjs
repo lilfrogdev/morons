@@ -6,10 +6,12 @@ const worker = fileURLToPath(new URL('../../review-runner/src/worker.mjs', impor
 const MAX_RESULT_BYTES = 512 * 1024;
 
 
-export async function runReviewOperation(plan, operation) {
+export async function runReviewOperation(plan, operation, { signal } = {}) {
+  signal?.throwIfAborted();
   if (!plan || typeof plan.repository !== 'string' || !Array.isArray(plan.allowedPaths) ||
       plan.allowedPaths.length === 0) throw new Error('review_plan_unavailable');
-  if (plan.runnerImage) return runContainerReviewOperation(plan, operation);
+  if (operation.operation === 'implementation' && !plan.runnerImage) throw new Error('implementation_requires_container');
+  if (plan.runnerImage) return runContainerReviewOperation(plan, operation, { signal });
   if (process.platform !== 'darwin') throw new Error('review_sandbox_unavailable');
 
 
@@ -20,6 +22,9 @@ export async function runReviewOperation(plan, operation) {
     env: { PATH: '/usr/bin:/bin', HOME: '/tmp', TMPDIR: '/tmp', LANG: 'C' },
     windowsHide: true,
   });
+  const onAbort = () => child.kill('SIGKILL');
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   const input = JSON.stringify({ plan, ...operation });
   if (Buffer.byteLength(input) > 300_000) {
     child.kill();
@@ -40,6 +45,8 @@ export async function runReviewOperation(plan, operation) {
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (signal?.aborted) return reject(new Error('review_operation_cancelled'));
       if (Buffer.byteLength(output) > MAX_RESULT_BYTES) return reject(new Error('review_result_too_large'));
       try {
         const response = JSON.parse(output);

@@ -1,4 +1,4 @@
-import { inspectSource, readSourceAtHead, prepareReview } from './index.mjs';
+import { inspectSource, readSourceAtHead, prepareReview, implementationOperation } from './index.mjs';
 import { trustedCheckPlan } from './check-policy.mjs';
 
 
@@ -38,6 +38,14 @@ try {
       checks,
       requiredScript,
     });
+  } else if (request.operation === 'implementation') {
+    if (plan.isolatedClone !== true) throw new Error('implementation_requires_container');
+    const policy = trustedCheckPlan(plan.checkProfile, plan.allowedPaths);
+    result = await implementationOperation({ repository: plan.repository, reviewRoot: plan.reviewRoot,
+      allowedPaths: plan.allowedPaths, branch: request.branch, baseRevision: request.baseRevision,
+      action: request.action, path: request.path, text: request.text, callId: request.callId,
+      checks: policy.checks, requiredScript: policy.manifest ? { manifest: policy.manifest,
+        scriptName: policy.scriptName, script: policy.script } : null });
   } else {
     throw new Error('Invalid review operation');
   }

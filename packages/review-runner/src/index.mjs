@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile, lstat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -208,4 +209,116 @@ export async function prepareReview({ repository, branch, patch, allowedPaths, c
     }
     throw error;
   }
+}
+
+
+export async function implementationOperation({ repository, reviewRoot, allowedPaths, branch, baseRevision,
+  action, path, text, callId, checks = [], requiredScript = null }) {
+  if (!validBranch(branch) || !/^[0-9a-f]{40}$/.test(baseRevision) || !reviewRoot ||
+      !Array.isArray(allowedPaths) || !allowedPaths.length || allowedPaths.length > 128 ||
+      allowedPaths.some((item) => !validSourcePath(item))) throw new Error('invalid_implementation_plan');
+  const directory = join(reviewRoot, branch.split('/')[1]);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const worktree = join(directory, 'checkout');
+  const metadataPath = join(directory, 'implementation.json');
+  const binding = JSON.stringify({ branch, baseRevision, allowedPaths });
+  let metadata = await readFile(metadataPath, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (metadata !== null && metadata !== binding) throw new Error('implementation_plan_conflict');
+  if (metadata === null) await writeFile(metadataPath, binding, { mode: 0o600, flag: 'wx' });
+  if (!await stat(worktree).catch(() => null)) {
+    const clone = await command('git', ['clone', '--no-local', '--no-checkout', '--quiet', repository, worktree], directory, 120_000);
+    if (!clone.ok) throw new Error('implementation_clone_failed');
+  }
+  const selected = await command('git', ['symbolic-ref', '--short', 'HEAD'], worktree);
+  if (!selected.ok || selected.stdout.trim() !== branch) {
+    const checkout = await command('git', ['checkout', '-b', branch, baseRevision], worktree);
+    if (!checkout.ok) throw new Error('implementation_checkout_failed');
+  }
+  const sealPath = join(directory, 'implementation-sealed.json');
+  const sealed = await readFile(sealPath, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (sealed) {
+    if (action !== 'finalize') throw new Error('implementation_already_sealed');
+    const result = JSON.parse(sealed);
+    const head = await command('git', ['rev-parse', 'HEAD'], worktree);
+    const diff = await command('git', ['diff', '--no-ext-diff', '--binary', baseRevision, 'HEAD'], worktree);
+    const dirty = await command('git', ['status', '--porcelain=v1'], worktree);
+    if (!head.ok || head.stdout.trim() !== result.proposalRevision || !diff.ok ||
+        diff.stdout !== result.diff || !dirty.ok || dirty.stdout.trim()) throw new Error('implementation_seal_changed');
+    return result;
+  }
+  const head = await command('git', ['rev-parse', 'HEAD'], worktree);
+  const parent = await command('git', ['rev-parse', 'HEAD^'], worktree);
+  if (!head.ok || (head.stdout.trim() !== baseRevision &&
+      !(action === 'finalize' && parent.ok && parent.stdout.trim() === baseRevision)))
+    throw new Error('implementation_history_changed');
+  if (action === 'read' || action === 'write') {
+    if (!allowedPaths.includes(path) || !validSourcePath(path)) throw new Error('implementation_path_forbidden');
+    let current = worktree;
+    for (const part of path.split('/')) {
+      current = join(current, part);
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) throw new Error('implementation_symlink_forbidden');
+    }
+    const info = await lstat(current);
+    if (!info.isFile() || info.size > MAX_OUTPUT_BYTES) throw new Error('implementation_regular_text_required');
+    if (action === 'read') {
+      const contents = await readFile(current, 'utf8');
+      if (contents.includes('\0')) throw new Error('implementation_text_required');
+      return { path, text: contents };
+    }
+    if (typeof text !== 'string' || text.includes('\0') || Buffer.byteLength(text) > MAX_OUTPUT_BYTES ||
+        typeof callId !== 'string' || !/^[a-f0-9]{64}$/.test(callId)) throw new Error('invalid_implementation_write');
+    const receipt = join(directory, `write-${callId}.json`);
+    const requested = JSON.stringify({ path, text });
+    const previous = await readFile(receipt, 'utf8').catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (previous && previous !== requested) throw new Error('implementation_write_conflict');
+    if (!previous) {
+      const temporary = join(directory, `write-${callId}.tmp`);
+      await writeFile(temporary, text, { mode: info.mode & 0o777 });
+      await rename(temporary, current);
+      await writeFile(receipt, requested, { mode: 0o600, flag: 'wx' });
+    }
+    return { path, bytes: Buffer.byteLength(text) };
+  }
+  if (action !== 'check' && action !== 'finalize') throw new Error('invalid_implementation_action');
+  if (requiredScript) {
+    const manifest = JSON.parse(await readFile(join(worktree, requiredScript.manifest), 'utf8'));
+    if (manifest?.scripts?.[requiredScript.scriptName] !== requiredScript.script) throw new Error('review_check_script_changed');
+  }
+  const changed = await command('git', ['diff', '--name-only', '-z', baseRevision, '--'], worktree);
+  const untracked = await command('git', ['ls-files', '--others', '--exclude-standard', '-z'], worktree);
+  const paths = changed.stdout.split('\0').filter(Boolean);
+  if (!changed.ok || !untracked.ok || untracked.stdout || paths.some((item) => !allowedPaths.includes(item)))
+    throw new Error('implementation_paths_changed');
+  const results = [];
+  for (const check of checks) results.push({ file: check.file, args: check.args, cwd: check.cwd ?? '.',
+    ...await command(check.file, check.file === 'git' && check.args.join('\0') === 'diff\0--check' ?
+      ['diff', '--check', baseRevision] : check.args, join(worktree, check.cwd ?? '.'), 120_000) });
+  const diff = await command('git', ['diff', '--no-ext-diff', '--binary', baseRevision, '--'], worktree);
+  if (!diff.ok || Buffer.byteLength(diff.stdout) > MAX_OUTPUT_BYTES) throw new Error('implementation_diff_too_large');
+  if (action === 'check') return { baseRevision, diff: diff.stdout, checks: results };
+  if (!paths.length) throw new Error('implementation_no_changes');
+  if (head.stdout.trim() === baseRevision) {
+    const stage = await command('git', ['add', '--', ...paths], worktree);
+    if (!stage.ok) throw new Error('implementation_stage_failed');
+    const commit = await command('git', ['-c', 'user.name=Morons Implementation', '-c',
+      'user.email=implementation@morons.invalid', '-c', 'commit.gpgSign=false', 'commit', '--no-verify',
+      '-m', `Implementation proposal ${branch}`], worktree);
+    if (!commit.ok) throw new Error('implementation_commit_failed');
+  }
+  const proposal = await command('git', ['rev-parse', 'HEAD'], worktree);
+  if (!proposal.ok) throw new Error('implementation_revision_failed');
+  const result = { branch, baseRevision, proposalRevision: proposal.stdout.trim(), diff: diff.stdout,
+    diffHash: createHash('sha256').update(diff.stdout).digest('hex'), checks: results };
+  await writeFile(sealPath, JSON.stringify(result), { mode: 0o600, flag: 'wx' });
+  return result;
 }

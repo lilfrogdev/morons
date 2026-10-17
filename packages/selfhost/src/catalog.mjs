@@ -27,6 +27,15 @@ export function openCatalog(path) {
     source_count INTEGER NOT NULL DEFAULT 0 CHECK(source_count >= 0)
   );
   CREATE INDEX IF NOT EXISTS replies_by_submitted_text ON replies(session_id, text);`);
+  db.exec(`CREATE TABLE IF NOT EXISTS implementation_jobs (
+    id TEXT PRIMARY KEY, source_session_id TEXT NOT NULL REFERENCES sessions(id),
+    source_call_id TEXT NOT NULL, child_session_id TEXT NOT NULL UNIQUE,
+    state_json TEXT NOT NULL, UNIQUE(source_session_id, source_call_id)
+  );
+  CREATE TABLE IF NOT EXISTS review_attestations (
+    review_id TEXT PRIMARY KEY REFERENCES reviews(id), proposal_revision TEXT NOT NULL,
+    diff_hash TEXT NOT NULL, assessment TEXT NOT NULL, source_call_id TEXT NOT NULL
+  );`);
   if (!db.prepare('PRAGMA table_info(memory_sync_cursors)').all().some((column) => column.name === 'source_count'))
     db.exec('ALTER TABLE memory_sync_cursors ADD COLUMN source_count INTEGER NOT NULL DEFAULT 0');
   if (!db.prepare('PRAGMA table_info(review_intents)').all().some((column) => column.name === 'base_revision'))
@@ -142,7 +151,7 @@ export function openCatalog(path) {
     },
     listSessions: (moronId) => db.prepare("SELECT id, moron_id, conversation_id, created_at, title FROM sessions WHERE moron_id = ? ORDER BY created_at, id").all(moronId).map(session),
     saveExternalUsage({ id, sessionId, kind, provider, modelId, timestamp, usage }) {
-      if (!getSession.get(sessionId) || !['memory'].includes(kind) ||
+      if (!getSession.get(sessionId) || !['memory', 'image'].includes(kind) ||
           typeof id !== 'string' || typeof provider !== 'string' || typeof modelId !== 'string' ||
           !Number.isSafeInteger(timestamp)) throw new Error('invalid_external_usage');
       db.prepare('INSERT OR IGNORE INTO external_usage VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -199,6 +208,59 @@ export function openCatalog(path) {
     isHandoffTarget: (sessionId) => !!db.prepare("SELECT 1 FROM handoffs WHERE target_session_id = ? LIMIT 1").get(sessionId),
     createHandoff: (sourceSessionId, requestId, targetMoronId, question, targetSessionId) => db.prepare("INSERT OR IGNORE INTO handoffs VALUES (?, ?, ?, ?, ?, NULL)").run(sourceSessionId, requestId, targetMoronId, question, targetSessionId),
     saveHandoffAnswer: (sourceSessionId, requestId, answer) => db.prepare("UPDATE handoffs SET answer = ? WHERE source_session_id = ? AND request_id = ?").run(answer, sourceSessionId, requestId),
+    getImplementation: (id) => {
+      const row = db.prepare('SELECT state_json FROM implementation_jobs WHERE id = ?').get(id);
+      return row && JSON.parse(row.state_json);
+    },
+    listImplementations: (sessionId) => db.prepare('SELECT state_json FROM implementation_jobs WHERE source_session_id = ? ORDER BY id')
+      .all(sessionId).map((row) => JSON.parse(row.state_json)),
+    implementationForChild: (sessionId) => {
+      const row = db.prepare('SELECT state_json FROM implementation_jobs WHERE child_session_id = ?').get(sessionId);
+      return row && JSON.parse(row.state_json);
+    },
+    reserveImplementation(job) {
+      db.prepare('INSERT OR IGNORE INTO implementation_jobs VALUES (?, ?, ?, ?, ?)')
+        .run(job.id, job.sourceSessionId, job.sourceCallId, job.childSessionId, JSON.stringify(job));
+      const saved = this.getImplementation(job.id);
+      if (!saved || ['sourceSessionId', 'sourceCallId', 'childSessionId', 'task', 'baseRevision', 'repositoryId', 'workspaceId', 'branch', 'planHash', 'allowedPaths', 'requestId']
+        .some((key) => JSON.stringify(saved[key]) !== JSON.stringify(job[key]))) throw new Error('implementation_intent_conflict');
+      return saved;
+    },
+    updateImplementation(id, expectedStatus, change) {
+      const saved = this.getImplementation(id);
+      if (!saved || !expectedStatus.includes(saved.status)) throw new Error('implementation_state_conflict');
+      const next = { ...saved, ...change };
+      if (['id', 'sourceSessionId', 'sourceCallId', 'childSessionId', 'task', 'baseRevision', 'repositoryId', 'workspaceId', 'branch', 'planHash', 'allowedPaths', 'requestId']
+        .some((key) => JSON.stringify(saved[key]) !== JSON.stringify(next[key]))) throw new Error('implementation_intent_conflict');
+      const updated = db.prepare('UPDATE implementation_jobs SET state_json = ? WHERE id = ? AND state_json = ?')
+        .run(JSON.stringify(next), id, JSON.stringify(saved));
+      if (updated.changes !== 1) throw new Error('implementation_state_conflict');
+      return next;
+    },
+    publishImplementationReview(id, sourceCallId, assessment) {
+      const job = this.getImplementation(id);
+      if (!job || !['proposed', 'reviewed'].includes(job.status) || !job.result ||
+          !job.result.checks.length || !job.result.checks.every((check) => check.ok)) throw new Error('implementation_not_reviewable');
+      const prior = db.prepare('SELECT * FROM review_attestations WHERE review_id = ?').get(id);
+      if (prior && (prior.source_call_id !== sourceCallId || prior.assessment !== assessment ||
+          prior.proposal_revision !== job.result.proposalRevision || prior.diff_hash !== job.result.diffHash))
+        throw new Error('implementation_review_conflict');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare("INSERT OR IGNORE INTO reviews VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
+          .run(id, job.sourceSessionId, job.result.branch, job.baseRevision, job.result.diff,
+            JSON.stringify(job.result.checks), Date.now());
+        const review = db.prepare('SELECT * FROM reviews WHERE id = ?').get(id);
+        if (review.session_id !== job.sourceSessionId || review.base_revision !== job.baseRevision ||
+            review.diff !== job.result.diff || review.branch !== job.result.branch) throw new Error('implementation_review_conflict');
+        db.prepare('INSERT OR IGNORE INTO review_attestations VALUES (?, ?, ?, ?, ?)')
+          .run(id, job.result.proposalRevision, job.result.diffHash, assessment, sourceCallId);
+        db.prepare('UPDATE implementation_jobs SET state_json = ? WHERE id = ?')
+          .run(JSON.stringify({ ...job, status: 'reviewed', assessment }), id);
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      return this.getReview(id);
+    },
     saveReview({ id, sessionId, branch, baseRevision, diff, checks }) {
       const intent = db.prepare('SELECT * FROM review_intents WHERE id = ?').get(id);
       if (intent && (intent.session_id !== sessionId || intent.branch !== branch ||
@@ -234,7 +296,13 @@ export function openCatalog(path) {
       return db.prepare("SELECT document FROM visualizations WHERE session_id = ? AND revoked = 0 ORDER BY created_at DESC, id DESC LIMIT 10")
         .all(sessionId).map((row) => JSON.parse(row.document));
     },
-    getReview(id) { return review(db.prepare("SELECT * FROM reviews WHERE id = ?").get(id)); },
+    getReview(id) {
+      const saved = review(db.prepare("SELECT * FROM reviews WHERE id = ?").get(id));
+      if (!saved) return saved;
+      const attestation = db.prepare('SELECT * FROM review_attestations WHERE review_id = ?').get(id);
+      return attestation ? { ...saved, proposalRevision: attestation.proposal_revision,
+        diffHash: attestation.diff_hash, mainReview: attestation.assessment } : saved;
+    },
     listReviews(sessionId) { return db.prepare("SELECT id, session_id, branch, base_revision, checks, decision, created_at FROM reviews WHERE session_id = ? ORDER BY created_at DESC, id DESC LIMIT 64").all(sessionId).map(reviewSummary); },
     decideReview(id, decision) {
       const current = this.getReview(id);
