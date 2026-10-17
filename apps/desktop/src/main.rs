@@ -16,7 +16,7 @@ const ICON_PLUS: &[u8] = include_bytes!("assets/tabler/plus.svg");
 const ICON_SEND: &[u8] = include_bytes!("assets/tabler/arrow-up.svg");
 const ICON_MIC: &[u8] = include_bytes!("assets/tabler/microphone.svg");
 const ICON_FOLDER: &[u8] = include_bytes!("assets/tabler/folder.svg");
-const ICON_AGENT: &[u8] = include_bytes!("assets/tabler/robot.svg");
+const ICON_AGENT: &[u8] = include_bytes!("assets/tabler/mood-smile.svg");
 const ICON_GAUGE: &[u8] = include_bytes!("assets/tabler/gauge.svg");
 const ICON_SETTINGS: &[u8] = include_bytes!("assets/tabler/settings.svg");
 const ICON_PIN: &[u8] = include_bytes!("assets/tabler/pin.svg");
@@ -833,8 +833,8 @@ impl Chat {
                                         self.state.pinned_morons.contains(id) &&
                                         !self.state.repositories.iter().any(|repo| repo.moron_id == *id)).map(|(id, name)|
                                         moron_row(id, name, active == Some(id.as_str()), true, true, cx)))))))
-                        .when(self.nav_section != NavSection::Repositories, |d| d.child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons")
-                            .child(div().flex().items_center().justify_between()
+                        .when(self.nav_section != NavSection::Repositories, |d| d.child(div().id("morons-section").role(gpui::Role::Region).aria_label("Morons").w_full()
+                            .child(div().w_full().flex().items_center().justify_between()
                             .child(div().id("morons-heading").role(gpui::Role::Button).aria_label("Morons")
                                 .aria_expanded(self.show_morons).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
@@ -845,13 +845,13 @@ impl Chat {
                                         matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                         view.show_morons = !view.show_morons; cx.stop_propagation(); cx.notify();
                                     }
-                                }))
+                                })))
                             .child(div().id("new-moron").role(gpui::Role::Button).aria_label("Add Moron")
                                     .focusable().tab_stop(true).cursor_pointer()
-                                    .w(px(26.)).h(px(26.)).mr(px(5.)).rounded(px(6.))
+                                    .w(px(26.)).h(px(26.)).flex_shrink_0().mr(px(5.)).rounded(px(6.))
                                     .flex().items_center().justify_center()
                                     .hover(|d| d.bg(rgb(0xECEEF1)))
-                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
+                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)).flex_shrink_0().text_color(rgb(0x24262B)))
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.show_create_moron = !view.show_create_moron;
                                         view.show_morons = true; cx.stop_propagation(); cx.notify();
@@ -907,9 +907,9 @@ impl Chat {
                                                         view.open_moron_settings(&id, cx); cx.stop_propagation();
                                                     }
                                                 }))
-                                        })))))))))
-                        .when(self.nav_section == NavSection::Repositories, |d| d.child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories")
-                            .child(div().flex().items_center().justify_between()
+                                        }))))))))
+                        .when(self.nav_section == NavSection::Repositories, |d| d.child(div().id("repositories-section").role(gpui::Role::Region).aria_label("Repositories").w_full()
+                            .child(div().w_full().flex().items_center().justify_between()
                             .child(div().id("repositories-heading").role(gpui::Role::Button).aria_label("Repositories")
                                 .aria_expanded(self.show_repositories).focusable().tab_stop(true)
                                 .px_2().py_2().cursor_pointer().text_size(px(12.))
@@ -926,13 +926,13 @@ impl Chat {
                                         view.show_repositories = !view.show_repositories;
                                         cx.stop_propagation(); cx.notify();
                                     }
-                                }))
+                                })))
                             .child(div().id("add-repository").role(gpui::Role::Button).aria_label("Add repository")
                                 .focusable().tab_stop(true).cursor_pointer()
-                                .w(px(26.)).h(px(26.)).mr(px(5.)).rounded(px(6.))
+                                .w(px(26.)).h(px(26.)).flex_shrink_0().mr(px(5.)).rounded(px(6.))
                                 .flex().items_center().justify_center()
                                 .hover(|d| d.bg(rgb(0xECEEF1)))
-                                .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
+                                .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)).flex_shrink_0().text_color(rgb(0x24262B)))
                                 .on_click(cx.listener(|view, _, _, cx| view.add_repository(cx)))
                                 .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
                                     if activation_key(event) { view.add_repository(cx); cx.stop_propagation(); }
@@ -950,10 +950,10 @@ impl Chat {
                                                     .text_color(rgb(0x626772)).child("Threads"))
                                                 .child(div().id("new-repo-thread").role(gpui::Role::Button)
                                                     .aria_label("New thread").focusable().tab_stop(true).cursor_pointer()
-                                                    .w(px(26.)).h(px(26.)).rounded(px(6.))
+                                                    .w(px(26.)).h(px(26.)).flex_shrink_0().rounded(px(6.))
                                                     .flex().items_center().justify_center()
                                                     .hover(|d| d.bg(rgb(0xECEEF1)))
-                                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)))
+                                                    .child(svg().data(ICON_PLUS).w(px(16.)).h(px(16.)).flex_shrink_0().text_color(rgb(0x24262B)))
                                                     .on_click(cx.listener({ let moron_id = repo.moron_id.clone();
                                                         move |view, _, _, cx| view.command(Command::CreateSession { moron_id: moron_id.clone() }, cx)
                                                     }))
@@ -967,7 +967,7 @@ impl Chat {
                                                     }))))
                                             .children(self.state.sessions.iter().map(|(id, title)|
                                                 session_row(&repo.moron_id, id, title,
-                                                    self.state.selected_session.as_deref() == Some(id.as_str()), cx))))))))))
+                                                    self.state.selected_session.as_deref() == Some(id.as_str()), cx)))))))))
                         .when(self.nav_section == NavSection::Repositories && self.state.repositories.iter().any(|repo| repo.archived), |d| d.child(
                             div().id("archived-section").role(gpui::Role::Region).aria_label("Archived repositories")
                                 .child(div().id("archived-heading").role(gpui::Role::Button)
@@ -1970,17 +1970,17 @@ impl Render for Chat {
                                                             window.focus(&view.input.focus_handle(cx), cx);
                                                             cx.stop_propagation();
                                                         })))
-                                                    .when(selected, |d| d.child(div().text_color(rgb(0x626772)).child("✓")))
                                                     .child(div().id(SharedString::from(format!("model-star-{}-{}", option.provider, option.id)))
                                                         .role(gpui::Role::Button)
                                                         .aria_label(if favorite { "Remove from favorites" } else { "Add to favorites" })
-                                                        .aria_selected(favorite).focusable().tab_stop(true)
-                                                        .flex_shrink_0().w(px(32.)).h(px(32.)).rounded(px(6.))
-                                                        .bg(if favorite { rgb(0xFFF0B8) } else { rgb(0xF7F3E8) })
-                                                        .hover(|d| d.bg(rgb(0xFFE49A)))
+                                                        .aria_toggled(if favorite { Toggled::True } else { Toggled::False })
+                                                        .focusable().tab_stop(true)
+                                                        .flex_shrink_0().w(px(28.)).h(px(28.))
+                                                        .hover(|d| d.opacity(0.7))
                                                         .flex().items_center().justify_center().cursor_pointer()
                                                         .child(svg().data(if favorite { ICON_STAR_FILLED } else { ICON_STAR })
-                                                            .w(px(20.)).h(px(20.)).text_color(rgb(0x9A6200)))
+                                                            .w(px(16.)).h(px(16.))
+                                                            .text_color(if favorite { rgb(0xEAB308) } else { rgb(0x80858D) }))
                                                         .on_click(cx.listener(move |view, _, _, cx| {
                                                             view.toggle_favorite(star_provider.clone(), star_id.clone(), !favorite, cx);
                                                             cx.stop_propagation();
@@ -2080,7 +2080,7 @@ fn main() {
         window
             .update(cx, |view, window, cx| {
                 window.focus(&if login_initial { view.login_name.focus_handle(cx) } else { view.input.focus_handle(cx) }, cx);
-                cx.activate(true);
+                if !preview { cx.activate(true); }
             })
             .expect("focus composer");
         cx.on_window_closed(|cx, _| {
