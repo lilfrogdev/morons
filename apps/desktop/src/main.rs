@@ -6,6 +6,8 @@ compile_error!("Morons desktop currently targets macOS Apple Silicon and Windows
 
 mod input;
 mod drafts;
+mod image_ui;
+mod permission_ui;
 use gpui::{prelude::*, *};
 use morons_desktop::{
     model::{Role, TaskStatus},
@@ -75,11 +77,13 @@ struct Chat {
     state: State,
 
     _updates: Task<()>,
+    expanded_image: Option<String>,
     local_error: Option<&'static str>,
     last_ack: Option<String>,
     scroll: ScrollHandle,
     show_model: bool,
     show_effort: bool,
+    show_permissions: bool,
     model_section: String,
     model_cursor: usize,
     auth_signup: bool,
@@ -149,6 +153,7 @@ impl Chat {
                             view.drafts.clear();
                             view.show_model = false;
                             view.show_effort = false;
+                            view.show_permissions = false;
                             view.show_workspaces = false;
                             view.show_create_moron = false;
                             view.show_profile = false;
@@ -172,6 +177,7 @@ impl Chat {
                             view.last_ack = None;
                             view.show_model = false;
                             view.show_effort = false;
+                            view.show_permissions = false;
                             view.model_search.update(cx, |field, cx| { field.reset(); cx.notify(); });
                         }
                         if view.state.selected_workspace != state.selected_workspace {
@@ -218,11 +224,13 @@ impl Chat {
             worker,
             state: State::default(),
             _updates: task,
+            expanded_image: None,
             local_error: None,
             last_ack: None,
             scroll: ScrollHandle::new(),
             show_model: false,
             show_effort: false,
+            show_permissions: false,
             model_section: String::new(),
             model_cursor: 0,
             auth_signup: false,
@@ -326,6 +334,27 @@ impl Chat {
                 preferences: self.settings_preferences.read(cx).text().to_owned() }, cx);
         }
     }
+    fn save_generated_image(&mut self, image: morons_desktop::generated_images::GeneratedImage, cx: &mut Context<Self>) {
+        let Some(bytes) = image.bytes else { self.local_error = Some("Image is still loading"); cx.notify(); return; };
+        let directory = std::env::var_os("HOME").map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let name = format!("{}.png", image.id);
+        let selected = cx.prompt_for_new_path(&directory, Some(&name));
+        let account = image.account_id;
+        let session = image.session_id;
+        cx.spawn(async move |view, cx| {
+            if let Ok(Ok(Some(path))) = selected.await {
+                let still_authorized = view.update(cx, |view, _| view.state.generated_images.iter()
+                    .any(|image| image.account_id == account && image.session_id == session && image.bytes.is_some()))
+                    .unwrap_or(false);
+                if !still_authorized { return; }
+                let result = cx.background_executor().spawn(async move { image_ui::save_png(&path, &bytes) }).await;
+                let _ = view.update(cx, |view, cx| {
+                    view.local_error = result.err(); cx.notify();
+                });
+            }
+        }).detach();
+    }
     fn add_repository(&mut self, cx: &mut Context<Self>) {
         let selected = cx.prompt_for_paths(PathPromptOptions {
             files: false, directories: true, multiple: false,
@@ -343,6 +372,7 @@ impl Chat {
     fn open_model_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_model = !self.show_model;
         self.show_effort = false;
+        self.show_permissions = false;
         if self.show_model {
             self.model_section = self.state.selected_model.as_ref()
                 .filter(|(provider, _)| self.state.models.iter().any(|model| &model.provider == provider))
@@ -589,9 +619,9 @@ impl Chat {
                     .child(div().font_weight(FontWeight::BOLD).child("Over time"))
                     .children(report.periods.iter().map(|item| usage_row(item.start.clone(), &item.metrics)))
                     .child(div().text_xs().text_color(rgb(0x626772)).child(format!(
-                        "Calls by path: {} main · {} handoff · {} memory · subagents {}",
+                        "Calls by path: {} main · {} handoff · {} memory · {} image · subagents {}",
                         report.coverage.kinds.main, report.coverage.kinds.handoff,
-                        report.coverage.kinds.memory,
+                        report.coverage.kinds.memory, report.coverage.kinds.image,
                         if report.coverage.subagents == "included_as_handoff" { "included as handoffs" }
                         else { "not instrumented" })))
                     .child(div().text_xs().text_color(rgb(0x626772)).child(report.coverage.note))
@@ -602,6 +632,15 @@ impl Chat {
             .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
             .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
                 .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
+                .when_some(self.state.image_provider.clone(), |d, status| d.child(
+                    div().flex().flex_col().gap_2().p_4().rounded(px(10.))
+                        .border_1().border_color(rgb(0xE3E5E8))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("Image generation"))
+                        .child(div().text_sm().child(if status.configured { "API key configured" } else { "API key required" }))
+                        .child(div().text_sm().child(status.message))
+                        .child(div().text_xs().child(format!("Model: {}", status.model)))
+                        .child(div().text_xs().child("Your server operator configures image access for your account. Image usage is billed separately by OpenAI."))
+                ))
                 .when_some(self.settings_moron_id.clone(), |d, id| {
                     let archived = self.state.moron_details.iter().find(|item| item.id() == id).is_some_and(|item| item.archived);
                     let deletable = !self.state.repositories.iter().any(|repo| repo.moron_id == id);
@@ -1457,9 +1496,10 @@ impl Render for Chat {
             .on_action(cx.listener(|_, _: &FocusNext, window, cx| window.focus_next(cx)))
             .on_action(cx.listener(|_, _: &FocusPrevious, window, cx| window.focus_prev(cx)))
             .on_click(cx.listener(|view, _, _, cx| {
-                if view.show_model || view.show_effort || view.show_profile || view.show_workspaces || view.usage_menu.is_some() {
+                if view.show_model || view.show_effort || view.show_permissions || view.show_profile || view.show_workspaces || view.usage_menu.is_some() {
                     view.show_model = false;
                     view.show_effort = false;
+                            view.show_permissions = false;
                     view.show_profile = false;
                     view.show_workspaces = false;
                     view.usage_menu = None;
@@ -1467,9 +1507,10 @@ impl Render for Chat {
                 }
             }))
             .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if (view.show_model || view.show_effort || view.show_profile || view.show_workspaces || view.usage_menu.is_some()) && event.keystroke.key == "escape" {
+                if (view.show_model || view.show_effort || view.show_permissions || view.show_profile || view.show_workspaces || view.usage_menu.is_some()) && event.keystroke.key == "escape" {
                     view.show_model = false;
                     view.show_effort = false;
+                            view.show_permissions = false;
                     view.show_profile = false;
                     view.show_workspaces = false;
                     view.usage_menu = None;
@@ -1632,7 +1673,54 @@ impl Render for Chat {
                                 )
                             })
                             .children(messages)
+                            .children(self.state.generated_images.iter().map(|image| {
+                                let image = image.clone();
+                                let expanded = self.expanded_image.as_deref() == Some(image.id.as_str());
+                                let open_id = image.id.clone();
+                                let open_key_id = open_id.clone();
+                                let save = image.clone();
+                                let save_key = image.clone();
+                                let load_id = image.id.clone();
+                                let load_key_id = load_id.clone();
+                                let cancel_id = image.id.clone();
+                                let cancel_key_id = cancel_id.clone();
+                                div().id(SharedString::from(format!("image-card-{}", image.id)))
+                                    .role(gpui::Role::Region).aria_label(SharedString::from(format!("Generated image: {}", image.title)))
+                                    .p_4().rounded(px(10.)).border_1().border_color(rgb(0xE3E5E8))
+                                    .flex().flex_col().gap_3()
+                                    .child(image_ui::render_image(&image, expanded))
+                                    .when(image.bytes.is_some(), |d| d.child(div().flex().gap_2()
+                                        .child(button("open-image", if expanded { "Close preview" } else { "Open" })
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.expanded_image = if expanded { None } else { Some(open_id.clone()) }; cx.notify();
+                                            }))
+                                            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                                if activation_key(event) { view.expanded_image = if expanded { None } else { Some(open_key_id.clone()) }; cx.stop_propagation(); cx.notify(); }
+                                            })))
+                                        .child(button("save-image", "Save PNG")
+                                            .on_click(cx.listener(move |view, _, _, cx| view.save_generated_image(save.clone(), cx)))
+                                            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                                if activation_key(event) { view.save_generated_image(save_key.clone(), cx); cx.stop_propagation(); }
+                                            })))
+                                    ))
+                                    .when(image.status == "completed" && image.bytes.is_none(), |d| d.child(button("load-image", "Load preview")
+                                        .on_click(cx.listener(move |view, _, _, cx| view.command(Command::LoadImage(load_id.clone()), cx)))
+                                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                            if activation_key(event) { view.command(Command::LoadImage(load_key_id.clone()), cx); cx.stop_propagation(); }
+                                        }))))
+                                    .when(image.status == "generating", |d| d.child(button("cancel-image", "Cancel image")
+                                        .on_click(cx.listener(move |view, _, _, cx| view.command(Command::CancelImage(cancel_id.clone()), cx)))
+                                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                            if activation_key(event) { view.command(Command::CancelImage(cancel_key_id.clone()), cx); cx.stop_propagation(); }
+                                        }))))
+                            }))
+            .child(permission_ui::pending(self, cx))
             .when_some(review, |d, review| {
+                let apply = review.can_apply();
+                let apply_review = review.clone();
+                let apply_key_review = review.clone();
+                let apply_session = self.state.selected_session.clone().unwrap_or_default();
+                let apply_key_session = apply_session.clone();
                 let approve_id = review.id.clone();
                 let reject_id = review.id.clone();
                 let check = if review.checks.iter().all(|item| item.ok) {
@@ -1647,6 +1735,27 @@ impl Render for Chat {
                         .child(div().font_weight(FontWeight::BOLD).child("Review proposed change"))
                         .child(div().text_xs().child(format!("{} · {} · base {}", review.branch, check, &review.base_revision[..8])))
                         .child(div().text_xs().child(format!("Decision: {}", review.decision)))
+                        .when_some(review.main_review.clone(), |d, assessment| d.child(
+                            div().id("main-agent-review").max_h(px(100.)).overflow_y_scroll().text_sm()
+                                .child(format!("Main agent review: {assessment}"))))
+                        .when_some(review.application.clone(), |d, application| d.child(
+                            div().text_xs().child(if application.status == "completed" {
+                                "Reviewed changes staged in source; no commit created.".to_owned()
+                            } else { format!("Source application: {}{}", application.status,
+                                application.error.map(|error| format!(" · {error}")).unwrap_or_default()) })))
+                        .when(apply, |d| d.child(button("apply-reviewed-changes", "Apply reviewed changes")
+                            .on_click(cx.listener(move |view, _, _, cx| view.command(Command::ApplyReview {
+                                session_id: apply_session.clone(), id: apply_review.id.clone(),
+                                proposal_revision: apply_review.proposal_revision.clone().unwrap_or_default(),
+                                diff_hash: apply_review.diff_hash.clone().unwrap_or_default(),
+                            }, cx)))
+                            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                                if activation_key(event) { view.command(Command::ApplyReview {
+                                    session_id: apply_key_session.clone(), id: apply_key_review.id.clone(),
+                                    proposal_revision: apply_key_review.proposal_revision.clone().unwrap_or_default(),
+                                    diff_hash: apply_key_review.diff_hash.clone().unwrap_or_default(),
+                                }, cx); cx.stop_propagation(); }
+                            }))))
                         .child(div().id("review-diff").role(gpui::Role::Document)
                             .aria_label("Proposed diff")
                             .max_h(px(180.)).overflow_y_scroll().p_2()
@@ -1702,10 +1811,10 @@ impl Render for Chat {
                         .child(self.input.clone())
                         .child(div().flex_1().min_h(px(10.)))
                         .child(div().flex().items_center().gap(px(8.))
-                            .child(div().id("attach-unavailable")
+                            .when(!compact_model_menu, |d| d.child(div().id("attach-unavailable")
                                 .aria_label("Attachments unavailable for this connection")
                                 .w(px(32.)).h(px(32.)).flex().items_center().justify_center()
-                                .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B))))
+                                .child(svg().data(ICON_PLUS).w(px(20.)).h(px(20.)).text_color(rgb(0x24262B)))))
                             .child(div().flex().items_center().gap(px(2.))
                             .when(self.state.fast_available, |d| d.child(
                                 div().id("fast-mode").role(gpui::Role::Button)
@@ -1734,7 +1843,7 @@ impl Render for Chat {
                                 .aria_label("Choose a model")
                                 .aria_expanded(self.show_model)
                                 .focusable().tab_stop(true)
-                                .min_w_0().max_w(px(230.)).h(px(28.)).px(px(5.))
+                                .min_w_0().max_w(px(if compact_model_menu { 70. } else { 230. })).h(px(28.)).px(px(5.))
                                 .rounded(px(6.)).flex().items_center().gap_1()
                                 .hover(|d| d.bg(rgb(0xECEEF1))).cursor_pointer()
                                 .text_size(px(12.))
@@ -1765,6 +1874,7 @@ impl Render for Chat {
                                     .on_click(cx.listener(|view, _, _, cx| {
                                         view.show_effort = !view.show_effort;
                                         view.show_model = false;
+                                        view.show_permissions = false;
                                         cx.stop_propagation(); cx.notify();
                                     }))
                                     .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| {
@@ -1772,20 +1882,22 @@ impl Render for Chat {
                                             matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                             view.show_effort = !view.show_effort;
                                             view.show_model = false;
+                                            view.show_permissions = false;
                                             cx.stop_propagation(); cx.notify();
                                         }
                                     }))))
                             )
+                            .when_some(self.state.permissions.clone(), |d, permissions| d.child(permission_ui::trigger(self, permissions, compact_model_menu, cx)))
                             .child(div().flex_1())
                             .when(self.state.pending, |d| d.child(button("retry", "Retry")
                                 .on_click(cx.listener(|view, _, _, cx| view.command(Command::Retry, cx)))))
-                            .when_some(if self.state.selected_moron.is_none() { active.clone() } else { None }, |d, id| d.child(button("stop", "Stop")
+                            .when_some(active.clone(), |d, id| d.child(button("stop", "Stop")
                                 .on_click(cx.listener(move |view, _, _, cx| view.command(Command::Stop(id.clone()), cx)))))
-                            .child(div().id("mic-unavailable")
+                            .when(!compact_model_menu, |d| d.child(div().id("mic-unavailable")
                                 .aria_label("Dictation unavailable")
                                 .w(px(32.)).h(px(32.)).rounded(px(16.))
                                 .flex().items_center().justify_center()
-                                .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0xB9BDC4))))
+                                .child(svg().data(ICON_MIC).w(px(20.)).h(px(20.)).text_color(rgb(0xB9BDC4)))))
                             .when(self.state.ready && !self.state.pending, |d| d.child(
                                 div().id("send").aria_label(if draft_ready { "Send message" } else { "Write a message to enable send" })
                                     .w(px(28.)).h(px(28.)).rounded(px(14.))
@@ -1996,6 +2108,7 @@ impl Render for Chat {
                                     ),
                             )
                         })
+                        .when(self.show_permissions, |d| d.child(permission_ui::menu(self, window.bounds().size.width < px(820.), cx)))
                         .when(self.show_effort && !selected_efforts.is_empty(), |d| d.child(
                             div().id("effort-menu").role(gpui::Role::Dialog)
                                 .aria_label("Reasoning effort")
@@ -2026,6 +2139,7 @@ impl Render for Chat {
                                         .on_click(cx.listener(move |view, _, _, cx| {
                                             view.command(Command::SelectEffort(chosen.clone()), cx);
                                             view.show_effort = false;
+                            view.show_permissions = false;
                                             cx.stop_propagation(); cx.notify();
                                         }))
                                         .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
@@ -2033,6 +2147,7 @@ impl Render for Chat {
                                                 matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                 view.command(Command::SelectEffort(keyboard_choice.clone()), cx);
                                                 view.show_effort = false;
+                            view.show_permissions = false;
                                                 cx.stop_propagation(); cx.notify();
                                             }
                                         }))

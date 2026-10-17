@@ -157,6 +157,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         return workspace ? send(response, 200, { workspace }) : send(response, 404, { error: 'workspace_not_found' });
       }
       if (path === '/v1/session/logout' && request.method === 'POST') {
+        if (runtimes.has(account.id)) await (await runtimes.get(account.id)).server.revokeOperations();
         accounts.revoke(token); return send(response, 200, { signedOut: true });
       }
       if (path === '/v1/accounts' && request.method === 'POST') {
@@ -177,8 +178,10 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         }
         if (path === '/v1/provider/openai/cancel' && request.method === 'POST')
           return send(response, 200, { provider: target.provider.cancel() });
-        if (path === '/v1/provider/openai/logout' && request.method === 'POST')
+        if (path === '/v1/provider/openai/logout' && request.method === 'POST') {
+          await target.server.revokeOperations();
           return send(response, 200, { provider: await target.provider.logout() });
+        }
         return send(response, 404, { error: 'not_found' });
       }
       if (!path.startsWith('/v1/')) return send(response, 404, { error: 'not_found' });
@@ -207,8 +210,12 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
         body, redirect: 'manual' });
       const output = Buffer.from(await upstream.arrayBuffer());
       if (accounts.session(token)?.id !== account.id) return send(response, 401, { error: 'unauthorized' });
-      if (output.length > 512 * 1024) return send(response, 502, { error: 'upstream_too_large' });
-      response.writeHead(upstream.status, { 'Content-Type': 'application/json; charset=utf-8',
+      const imageContent = request.method === 'GET' &&
+        /^\/v1\/sessions\/[^/]+\/images\/img-[a-f0-9]{32}\/content$/.test(path) &&
+        upstream.status === 200 && upstream.headers.get('content-type') === 'image/png';
+      if (output.length > (imageContent ? 16 * 1024 * 1024 : 512 * 1024))
+        return send(response, 502, { error: 'upstream_too_large' });
+      response.writeHead(upstream.status, { 'Content-Type': imageContent ? 'image/png' : 'application/json; charset=utf-8',
         'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
       response.end(output);
     } catch (error) {

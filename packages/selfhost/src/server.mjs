@@ -22,6 +22,10 @@ import { runReviewOperation } from "./review.mjs";
 import { sealDocument, canReadDocument } from '@morons/visualization';
 import { installFastModels, fastModelId, isFastModelId, baseModelId } from './fast-models.mjs';
 import { collectUsage, usageFilters } from './usage.mjs';
+import { createImplementationRuntime } from './implementation-runtime.mjs';
+import { openPermissionPolicy, PERMISSION_MODES, PERMISSION_REFERENCE } from './permission-policy.mjs';
+import { imageProviderFromEnvironment, openImageGeneration } from './image-generation.mjs';
+import { openSourceApplications } from './source-application.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
 const execFileAsync = promisify(execFile);
@@ -162,7 +166,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch }) {
   const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
@@ -180,10 +184,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
   let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
+  let permissions, implementationRuntime, images, applications;
+  const permissionSessionIds = new Set();
   try {
     catalog = openCatalog(`${databasePath}.catalog.sqlite`);
     optchat = openNodeOptChat(`${databasePath}.memory.sqlite`);
     handoffStore = openHandoffStore(`${databasePath}.model-handoffs.sqlite`);
+    permissions = openPermissionPolicy(`${databasePath}.permissions.sqlite`);
     const registry = createRegistry();
     if (runnerImage) {
       await verifyContainerRunner(runnerImage);
@@ -194,8 +201,21 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       await assertRunnerPathSeparation(repositoryPlan.repository, repositoryPlan.reviewRoot);
     }
     repoExtension = (providerModelId && !runnerImage) || (!runnerImage && !repositoryPlan)
-      ? null : repoTools(catalog, repositoryPlanForSession);
+      ? null : repoTools(catalog, repositoryPlanForSession, { admitOperation: admitRepositoryOperation });
     if (repoExtension) registry.install(repoExtension);
+    implementationRuntime = createImplementationRuntime({ catalog, planForSession: repositoryPlanForSession,
+      getHarness: () => harness, context: BACKGROUND_CONTEXT, admitOperation: admitRepositoryOperation });
+    registry.install(implementationRuntime.coordinatorExtension);
+    registry.install(implementationRuntime.workerExtension);
+    images = await openImageGeneration({ filePath: `${databasePath}.images.sqlite`, accountId, catalog,
+      provider: imageProvider, fetchImpl: imageFetch,
+      isHandoffTarget: (session) => isHandoffTarget(session),
+      recordUsage: (item) => catalog.saveExternalUsage(item),
+      authorizeGeneration: (action, signal) => permissionGrant(catalog.getSession(action.sessionId),
+        'external-request', action, { signal }) });
+    registry.install(images.extension);
+    applications = await openSourceApplications({ filePath: `${databasePath}.applications.sqlite`, catalog,
+      permissions, planForSession: repositoryPlanForSession });
     models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
@@ -203,6 +223,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       isMemorySession: (session) => {
         const moron = catalog.getMoron(session.moronId);
         return Boolean(moron) && moron.role !== 'implementation' &&
+          !implementationRuntime.isImplementationSession(session.id) &&
           !catalog.isHandoffTarget(session.id) && !handoffStore.isTargetSession(session.id);
       },
       isSharedMoron: (moronId) => Boolean(catalog.repositoryForMoron(moronId)),
@@ -267,6 +288,9 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       catalog.ensureLegacyRepository(await realpath(repositoryPlan.repository).catch(() => resolve(repositoryPlan.repository)), repositoryName);
     }
   } catch (error) {
+    await applications?.close().catch(() => {});
+    await images?.close().catch(() => {});
+    permissions?.close();
     await harness?.close(BACKGROUND_CONTEXT).catch(() => {});
     catalog?.close();
     optchat?.database.close();
@@ -275,28 +299,72 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     throw error;
   }
   harness.resume();
-  for (const intent of catalog.pendingReviews()) {
-      try {
-        const session = catalog.getSession(intent.session_id);
-        const plan = session && await repositoryPlanForSession(session, intent.base_revision);
-        if (!plan) continue;
-        const result = await runReviewOperation(plan, { operation: 'review',
-          branch: intent.branch, patch: intent.patch, baseRevision: intent.base_revision ?? null });
-        catalog.saveReview({ id: intent.id, sessionId: intent.session_id, branch: intent.branch,
-          baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
-      } catch {
-
-      }
-  }
+  const reviewRecoveries = new Set();
   let shuttingDown = false;
   const inFlight = new Map();
   const handoffFlight = new Map();
   const sessionTail = new Map();
   const settlementTail = new Map();
   const modelChanges = new Set();
+  const sessionEpochs = new Map();
   const handoffConfigured = new Set();
   function isHandoffTarget(session) {
     return catalog.isHandoffTarget(session.id) || handoffStore.isTargetSession(session.id);
+  }
+  function permissionSession(session, existing = true) {
+    const moron = session && catalog.getMoron(session.moronId);
+    const repository = moron && catalog.repositoryForMoron(moron.id);
+    if (!session || !moron || moron.archived || implementationRuntime.isImplementationSession(session.id))
+      throw new Error('permission_session_forbidden');
+    if (repository && repository.workspaceId !== moron.workspaceId) throw new Error('permission_scope_mismatch');
+    permissionSessionIds.add(session.id);
+    return permissions.ensureSession({ sessionId: session.id, workspaceId: moron.workspaceId,
+      repositoryId: repository?.id ?? null, existing });
+  }
+  async function permissionGrant(session, kind, action, { signal, proposalId, baseRevision } = {}) {
+    const scope = permissionSession(session);
+    const descriptor = { sessionId: session.id, workspaceId: scope.workspaceId,
+      repositoryId: scope.repositoryId, kind, action,
+      ...(proposalId ? { proposalId } : {}), ...(baseRevision ? { baseRevision } : {}) };
+    const lease = permissions.admit(descriptor);
+    const abort = () => permissions.revokeSession(session.id, 'operation_cancelled');
+    signal?.addEventListener('abort', abort, { once: true });
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener('abort', abort);
+      permissions.finish(lease);
+    };
+    try {
+      if (signal?.aborted) abort();
+      await permissions.wait(lease);
+      permissions.start(lease, descriptor);
+      return { signal: lease.signal, finish, reassert: () => {
+        permissionSession(session);
+        permissions.assert(lease, descriptor);
+      } };
+    } catch (error) { finish(); throw error; }
+  }
+  function admitRepositoryOperation({ source, job, operation, signal, ...details }) {
+    const action = Object.fromEntries(Object.entries({ operation, ...details }).filter(([, value]) => value !== undefined));
+    const kind = operation === 'write' ? 'edit' : ['check', 'finalize', 'review'].includes(operation) ? 'command' : 'read';
+    return permissionGrant(source, kind, action, { signal, proposalId: job?.id,
+      baseRevision: job?.baseRevision ?? details.baseRevision });
+  }
+  function permissionView(session) {
+    return { ...permissionSession(session), modes: PERMISSION_MODES, reference: PERMISSION_REFERENCE,
+      pending: permissions.listPending(session.id) };
+  }
+  async function stopSession(session, reason = 'session_stopped') {
+    sessionEpochs.set(session.id, (sessionEpochs.get(session.id) ?? 0) + 1);
+    for (const reply of catalog.pendingReplies().filter((reply) => reply.session_id === session.id))
+      catalog.failReply(session.id, reply.request_id);
+    permissionSession(session);
+    permissions.revokeSession(session.id, reason);
+    await implementationRuntime.cancelForSession(session.id);
+    const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
+    await conversation.abort(BACKGROUND_CONTEXT);
   }
   async function repositoryPlanForSession(session, baseRevision = null) {
     const repository = catalog.repositoryForMoron(session.moronId);
@@ -328,11 +396,15 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const repository = catalog.repositoryForMoron(session.moronId);
     return repository && repoExtension && (runnerImage ||
       (repository.id === 'configured' && repositoryPlan && model?.provider === 'morons-fixture'))
-      ? [repoExtension] : [];
+      ? [repoExtension, ...(runnerImage ? [implementationRuntime.coordinatorExtension] : [])] : [];
   }
   function extensionsFor(session, model) {
+    const worker = implementationRuntime.workerExtensionsFor(session);
+    if (worker) return worker;
     if (isHandoffTarget(session)) return [];
-    return [handoffExtension, ...sourceToolsFor(session, model)];
+    const moron = catalog.getMoron(session.moronId);
+    return [handoffExtension, ...sourceToolsFor(session, model),
+      ...(!catalog.repositoryForMoron(session.moronId) && moron?.role !== 'implementation' ? [images.extension] : [])];
   }
   async function ensureHandoffTool(conversation, session) {
     if (handoffConfigured.has(session.id)) return;
@@ -378,9 +450,15 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       selectedEffort: agent.thinkingLevel, models: known, favorites: catalog.listModelFavorites() };
   }
   async function chat(conversation, session, body, displayText = body?.text, waitForAnswer = true) {
+    const sessionId = session.id;
+    const epoch = sessionEpochs.get(sessionId) ?? 0;
+    permissionSession(session);
+    const assertAdmission = () => {
+      if (shuttingDown || epoch !== (sessionEpochs.get(sessionId) ?? 0)) throw new Error('chat_admission_cancelled');
+    };
     if (!fixtureEnabled && (await conversation.agent(BACKGROUND_CONTEXT)).model?.provider === 'morons-fixture')
       return { status: 409, body: { error: 'provider_setup_required' } };
-    const sessionId = session.id;
+    assertAdmission();
     if (typeof body?.text !== "string" || !body.text.trim() || Buffer.byteLength(body.text) > 8192)
       return { status: 400, body: { error: "invalid_text" } };
     if (typeof body.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(body.requestId))
@@ -392,7 +470,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       return waitForAnswer ? active.completion : active.admission.then((value) => value.accepted);
     }
     const admit = async () => {
+      assertAdmission();
+      permissionSession(session);
       await ensureHandoffTool(conversation, session);
+      assertAdmission();
       const previous = catalog.getReply(sessionId, body.requestId);
       if (previous && previous.display_text !== displayText) return { accepted: { status: 409, body: { error: "request_id_conflict" } } };
       if (previous?.answer !== null && previous?.answer !== undefined)
@@ -401,18 +482,29 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
 
       const modelRef = previous ? null : (await conversation.agent(BACKGROUND_CONTEXT)).model;
       const prepared = previous ? null : await memoryRuntime.prepareTurn(conversation, session, body.requestId, modelRef);
+      assertAdmission();
       const submitted = previous ? previous.text : body.text + prepared.text;
       if (!previous) catalog.reserveReply(sessionId, body.requestId, submitted, displayText);
+      if (!previous) await implementationRuntime.steerForSession(session.id, body.text, body.requestId);
+      assertAdmission();
       const reserved = catalog.getReply(sessionId, body.requestId);
       if (reserved.display_text !== displayText) return { accepted: { status: 409, body: { error: "request_id_conflict" } } };
       const submission = await conversation.submit({ type: "input", content: submitted,
         requestId: body.requestId, whenBusy: 'steer' }, BACKGROUND_CONTEXT);
+      if (epoch !== (sessionEpochs.get(sessionId) ?? 0) || shuttingDown) {
+        await conversation.abort(BACKGROUND_CONTEXT);
+        catalog.failReply(sessionId, body.requestId);
+        return { accepted: { status: 409, body: { error: 'chat_admission_cancelled' } } };
+      }
       const status = await submission.status(BACKGROUND_CONTEXT);
       return { submission, accepted: { status: 202,
         body: { requestId: body.requestId, state: status.status === 'queued' ? 'queued' : 'delivered' } } };
     };
     const previousTail = sessionTail.get(sessionId) ?? Promise.resolve();
-    const admission = previousTail.catch(() => {}).then(admit);
+    const admission = previousTail.catch(() => {}).then(admit).catch((error) => {
+      catalog.failReply(sessionId, body.requestId);
+      throw error;
+    });
     sessionTail.set(sessionId, admission);
     admission.finally(() => {
       if (sessionTail.get(sessionId) === admission) sessionTail.delete(sessionId);
@@ -509,10 +601,13 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const conversation = await harness.createConversation({
       ownership: { kind: "ownerless" },
       agent: { model, instructions,
-        extensions: handoff ? [] : [handoffExtension, ...sourceToolsFor({ moronId: moron.id }, model)] },
+        extensions: handoff ? [] : [handoffExtension, ...sourceToolsFor({ moronId: moron.id }, model),
+          ...(!repository && moron.role !== 'implementation' ? [images.extension] : [])] },
     }, BACKGROUND_CONTEXT);
     handoffConfigured.add(id);
-    return catalog.createSession(id, moron.id, conversation.id, title);
+    const session = catalog.createSession(id, moron.id, conversation.id, title);
+    permissionSession(session, false);
+    return session;
   }
   async function executeDelegatedChat(source, body) {
     const parsed = /^@([a-z][a-z0-9-]{1,39})\s+([\s\S]+)$/.exec(body.text);
@@ -569,6 +664,9 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     const requestUrl = new URL(request.url ?? "/", `http://${host}`);
     const path = requestUrl.pathname;
     try {
+      const privateSession = /^\/v1\/sessions\/([^/]+)/.exec(path);
+      if (privateSession && implementationRuntime.isImplementationSession(decodeURIComponent(privateSession[1])))
+        return send(response, 404, { error: 'session_not_found' });
       if (fixtureEnabled && request.method === "GET" && path === "/v1/fixture/status")
         return send(response, 200, { ready: true, model: "fixture", durable: true });
       if (request.method === "GET" && path === "/v1/models")
@@ -588,6 +686,60 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         try { filters = usageFilters(requestUrl.searchParams); }
         catch { return send(response, 400, { error: 'invalid_usage_filter' }); }
         return send(response, 200, await collectUsage({ catalog, harness, models, filters }));
+      }
+      if (request.method === 'GET' && path === '/v1/image-generation/status')
+        return send(response, 200, images.status());
+      const imageList = /^\/v1\/sessions\/([^/]+)\/images$/.exec(path);
+      if (imageList && request.method === 'GET')
+        return send(response, 200, { images: images.list(decodeURIComponent(imageList[1])) });
+      const imageAction = /^\/v1\/sessions\/([^/]+)\/images\/(img-[a-f0-9]{32})\/(content|cancel)$/.exec(path);
+      if (imageAction) {
+        const sessionId = decodeURIComponent(imageAction[1]);
+        if (imageAction[3] === 'cancel' && request.method === 'POST')
+          return send(response, 200, { cancelled: images.cancel(sessionId, imageAction[2]) });
+        if (imageAction[3] === 'content' && request.method === 'GET') {
+          const image = images.read(sessionId, imageAction[2]);
+          if (!image) return send(response, 404, { error: 'image_not_found' });
+          response.writeHead(200, { 'Content-Type': image.mimeType, 'Content-Length': image.bytes.length,
+            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+          return response.end(image.bytes);
+        }
+      }
+      const permissionPath = /^\/v1\/sessions\/([^/]+)\/permissions$/.exec(path);
+      const permissionDecision = /^\/v1\/sessions\/([^/]+)\/permissions\/([a-f0-9-]{36})\/decision$/.exec(path);
+      if (permissionPath || permissionDecision) {
+        const session = catalog.getSession(decodeURIComponent((permissionPath ?? permissionDecision)[1]));
+        if (!session || isHandoffTarget(session)) return send(response, 404, { error: 'session_not_found' });
+        const current = permissionSession(session);
+        if (permissionPath && request.method === 'GET') return send(response, 200, permissionView(session));
+        if (permissionPath && request.method === 'POST') {
+          const body = await readBody(request);
+          if (!Number.isSafeInteger(body?.expectedRevision)) return send(response, 400, { error: 'invalid_permission_revision' });
+          const next = permissions.set(session.id, body.mode, { expectedRevision: body.expectedRevision });
+          const strength = { 'approval-required': 0, auto: 0, 'auto-accept-edits': 1, 'full-access': 2 };
+          if (strength[next.mode] < strength[current.mode]) await stopSession(session, 'permission_mode_changed');
+          return send(response, 200, permissionView(session));
+        }
+        if (permissionDecision && request.method === 'POST') {
+          const body = await readBody(request);
+          permissions.decide({ id: permissionDecision[2], sessionId: session.id,
+            workspaceId: current.workspaceId, repositoryId: current.repositoryId,
+            fingerprint: body?.fingerprint, decision: body?.decision });
+          return send(response, 200, permissionView(session));
+        }
+      }
+      const stopPath = /^\/v1\/sessions\/([^/]+)\/stop$/.exec(path);
+      if (stopPath && request.method === 'POST') {
+        const session = catalog.getSession(decodeURIComponent(stopPath[1]));
+        if (!session || isHandoffTarget(session)) return send(response, 404, { error: 'session_not_found' });
+        await stopSession(session);
+        return send(response, 200, { stopped: true });
+      }
+      const implementationPath = /^\/v1\/sessions\/([^/]+)\/implementations$/.exec(path);
+      if (implementationPath && request.method === 'GET') {
+        const session = catalog.getSession(decodeURIComponent(implementationPath[1]));
+        if (!session) return send(response, 404, { error: 'session_not_found' });
+        return send(response, 200, { implementations: implementationRuntime.list(session.id) });
       }
       if (request.method === "GET" && path === "/v1/morons")
         return send(response, 200, { morons: catalog.listMorons(requestUrl.searchParams.get('workspaceId') ?? 'personal') });
@@ -679,7 +831,16 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       const reviewDetail = /^\/v1\/reviews\/([a-f0-9]{16})$/.exec(path);
       if (reviewDetail && request.method === 'GET') {
         const review = catalog.getReview(reviewDetail[1]);
-        return review ? send(response, 200, { review }) : send(response, 404, { error: 'review_not_found' });
+        return review ? send(response, 200, { review: { ...review, application: applications.get(review.id) } }) : send(response, 404, { error: 'review_not_found' });
+      }
+      const reviewApply = /^\/v1\/reviews\/([a-f0-9]{16})\/apply$/.exec(path);
+      if (reviewApply && request.method === 'POST') {
+        const body = await readBody(request);
+        const review = catalog.getReview(reviewApply[1]);
+        if (!review) return send(response, 404, { error: 'review_not_found' });
+        permissionSession(catalog.getSession(review.sessionId));
+        return send(response, 202, { application: await applications.request(review.id,
+          { proposalRevision: body?.proposalRevision, diffHash: body?.diffHash }) });
       }
       const reviewDecision = /^\/v1\/reviews\/([a-f0-9]{16})\/decision$/.exec(path);
       if (reviewDecision && request.method === 'POST') {
@@ -716,7 +877,8 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
         const moronId = decodeURIComponent(moronSessions[1]);
         const moron = catalog.getMoron(moronId);
         if (!moron) return send(response, 404, { error: "moron_not_found" });
-        if (request.method === "GET") return send(response, 200, { sessions: catalog.listSessions(moronId) });
+        if (request.method === "GET") return send(response, 200, { sessions: catalog.listSessions(moronId)
+          .filter((session) => !implementationRuntime.isImplementationSession(session.id)) });
         if (request.method === "POST") {
           if (moron.archived) return send(response, 409, { error: 'moron_archived' });
           const body = await readBody(request);
@@ -866,31 +1028,71 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       if (error?.message === 'invalid_repository' || error?.code === 'SQLITE_CONSTRAINT_UNIQUE')
         return send(response, 409, { error: 'repository_limit_or_conflict' });
       if (error?.message === "memory_source_conflict") return send(response, 409, { error: "memory_conflict" });
+      if (error?.message?.startsWith('permission_') || error?.message === 'invalid_permission_mode' ||
+          error?.message === 'invalid_permission_decision' || ['session_stopped', 'operation_cancelled',
+            'account_session_revoked', 'server_shutdown', 'chat_admission_cancelled'].includes(error?.message))
+        return send(response, 409, { error: error.message });
+      if (error?.message?.startsWith('image_')) return send(response, 403, { error: error.message });
+      if (error?.message?.startsWith('application_') || error?.message === 'reviewed_proposal_required')
+        return send(response, 409, { error: error.message });
       return send(response, 500, { error: "internal" });
     }
   });
   try {
     await new Promise((resolve, reject) => server.once("error", reject).listen(port, host, resolve));
   } catch (error) {
+    await applications.close().catch(() => {});
+    await images.close().catch(() => {});
     await harness.close(BACKGROUND_CONTEXT);
     for (const plan of runnerPlans.values()) await stopContainerWorkspace(plan).catch(() => {});
     catalog.close();
     optchat.database.close();
     handoffStore.close();
+    permissions.close();
     await ownerLock.close();
     throw error;
   }
+  for (const intent of catalog.pendingReviews()) {
+    const recovery = (async () => {
+      let grant;
+      try {
+        const session = catalog.getSession(intent.session_id);
+        const plan = session && await repositoryPlanForSession(session, intent.base_revision);
+        if (!plan) return;
+        grant = await permissionGrant(session, 'command', { operation: 'recover-review',
+          patch: intent.patch, patchHash: createHash('sha256').update(intent.patch).digest('hex'),
+          branch: intent.branch }, { proposalId: intent.id, baseRevision: intent.base_revision });
+        grant.reassert();
+        const result = await runReviewOperation(plan, { operation: 'review', branch: intent.branch,
+          patch: intent.patch, baseRevision: intent.base_revision ?? null }, { signal: grant.signal });
+        grant.reassert();
+        catalog.saveReview({ id: intent.id, sessionId: session.id, branch: intent.branch,
+          baseRevision: result.baseRevision, diff: result.diff, checks: result.checks });
+      } catch {} finally { grant?.finish(); }
+    })();
+    reviewRecoveries.add(recovery);
+    recovery.finally(() => reviewRecoveries.delete(recovery));
+  }
   return {
     url: `http://${host}:${server.address().port}`,
+    async revokeOperations() {
+      for (const sessionId of permissionSessionIds) {
+        const session = catalog.getSession(sessionId);
+        if (session) await stopSession(session, 'account_session_revoked').catch(() => {});
+      }
+    },
     async close() {
       shuttingDown = true;
       const failures = [];
+      for (const sessionId of permissionSessionIds) permissions.revokeSession(sessionId, 'server_shutdown');
       for (const cleanup of [
         () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+        () => applications.close(), () => images.close(),
+        () => Promise.allSettled([...reviewRecoveries]),
         () => harness.close(BACKGROUND_CONTEXT),
         ...[...runnerPlans.values()].map((plan) => () => stopContainerWorkspace(plan)),
         () => catalog.close(), () => optchat.database.close(),
-        () => handoffStore.close(), () => ownerLock.close(),
+        () => handoffStore.close(), () => permissions.close(), () => ownerLock.close(),
       ]) {
         try { await cleanup(); } catch (error) { failures.push(error); }
       }

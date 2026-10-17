@@ -1,5 +1,10 @@
 # Morons local MVP status
 
+Repository delegation, exact source application, T3-compatible permission
+modes, and API-backed image generation are described in
+[`delegation-permissions-images.md`](delegation-permissions-images.md),
+including the remaining live-provider setup and validation limits.
+
 This branch builds on the newer Pi-based `lilfrogdev/morons` repository. The
 older `morons.dev` Rust CLI is excluded from reuse. Installed GPUI Mac and
 Windows apps are the desktop direction, followed by a separate native iPhone
@@ -30,7 +35,7 @@ separate runner workspaces and review areas per repository and workspace. The
 runner derives a bounded committed-code allowlist from each selected repository
 and runs a fixed diff check on proposals; it does not execute repository scripts.
 Other accounts can register repositories but do not receive source tools.
-The updated desktop bundle has not yet replaced the app in the user's active test.
+The local QA bundle is refreshed only after disposable app verification.
 Packaged Mac launches use backend resources inside the app bundle, avoiding a
 runtime read of the development checkout in Documents. New local accounts use
 `~/Library/Application Support/Morons`; accounts already created at the prior
@@ -40,8 +45,11 @@ The offline fixture model can call `/source PATH` for one exact allowlisted
 committed file and `/review` followed by a unified diff. The latter commits a
 proposal on an isolated branch, checks approved paths and `git diff --check`,
 then presents the diff and Approve/Reject record controls in GPUI. Review
-intents reconcile after restart. The source checkout and its uncommitted work
-stay intact. Decisions do not merge, apply, push, deploy, or update Morons.
+intent recovery reacquires operation approval after restart. Real-model coding
+uses a dedicated Pi implementation conversation with isolated Docker tools,
+sealed proposals, and main-agent review. An approved main-reviewed proposal
+can be applied and staged only after a separate exact-action approval and
+source-base/clean-worktree checks. Nothing pushes, deploys, or updates Morons.
 
 A bounded data-only visualization from `/viz` is sealed to the server's
 account, session, assistant message, and revision. Authorized reads issue a
@@ -77,8 +85,8 @@ context across roles. Repository coordinating Morons also retain their shared
 OptChat scope. Existing ordinary named Morons retain session-scoped OptChat.
 Morons created with the implementation role and temporary handoff sessions use
 Pi compaction without reading or writing OptChat. Repository coordinating sessions
-currently own the source and proposal tools; separate implementation tool sessions
-are not yet exposed.
+own source reads and delegate implementation to hidden tool sessions with
+Pi compaction. Implementation sessions cannot access OptChat.
 Automatic compaction with a real provider has not been exercised without a human
 provider sign-in and model call.
 
@@ -115,8 +123,9 @@ the private runtime stages avoid those mounts. Two specialized,
 dependency-free check profiles now run the candidate's `review-runner` or
 `optchat` syntax check as well as `git diff --check`; model edits are confined
 to the selected package's source paths. The self-host backend and GPUI need
-separate dependency images and build policies. An explicit reviewed apply
-workflow remains to be added before any self-update claim.
+separate dependency images and build policies. The reviewed apply workflow
+stages an exact approved patch in its registered source; it does not rebuild
+or update a running application.
 The container runner rejects source/data directory overlap and linked Git
 worktrees. Review intents pin the original base SHA for restart recovery.
 

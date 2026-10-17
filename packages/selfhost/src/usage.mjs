@@ -71,8 +71,8 @@ export function usageFilters(searchParams) {
 export async function collectUsage({ catalog, harness, models, filters, now = Date.now() }) {
   const morons = catalog.listMorons(filters.workspaceId);
   const sessions = morons.flatMap((moron) => catalog.listSessions(moron.id)
-    .map((session) => ({ ...session, kind: session.id.startsWith('handoff-') ||
-      catalog.isHandoffTarget(session.id) ? 'handoff' : 'main' })));
+    .map((session) => ({ ...session, kind: catalog.implementationForChild(session.id) ? 'implementation' :
+      session.id.startsWith('handoff-') || catalog.isHandoffTarget(session.id) ? 'handoff' : 'main' })));
   const sessionIds = sessions.map((session) => session.id);
   const cutoff = windows.get(filters.window) === null ? -Infinity : now - windows.get(filters.window);
   const totals = empty();
@@ -81,7 +81,7 @@ export async function collectUsage({ catalog, harness, models, filters, now = Da
   const observedProviders = new Set();
   const observedModels = new Set();
   const periods = new Map();
-  const kinds = { main: 0, handoff: 0, memory: 0 };
+  const kinds = { main: 0, handoff: 0, memory: 0, implementation: 0, image: 0 };
   const hourly = filters.window === '24h';
   const include = ({ provider, modelId, timestamp, usage, kind }) => {
     if (!Number.isFinite(timestamp) || timestamp < cutoff || timestamp > now) return;
@@ -102,7 +102,7 @@ export async function collectUsage({ catalog, harness, models, filters, now = Da
     const start = period(timestamp, hourly);
     if (!periods.has(start)) periods.set(start, empty());
     increment(periods.get(start), usage, cost);
-    kinds[kind]++;
+    if (Object.hasOwn(kinds, kind)) kinds[kind]++;
   };
   for (const session of sessions) {
     const conversation = await harness.conversation(session.conversationId, BACKGROUND_CONTEXT);
@@ -141,8 +141,8 @@ export async function collectUsage({ catalog, harness, models, filters, now = Da
       .sort((a, b) => b.totalTokens - a.totalTokens || a.provider.localeCompare(b.provider)),
     periods: [...periods].map(([start, value]) => ({ start, ...value }))
       .sort((a, b) => a.start.localeCompare(b.start)),
-    coverage: { kinds, actualTokens: totals.unknownUsageCalls === 0, actualSpend: false,
-      subagents: 'included_as_handoff',
-      note: 'Completed conversation, delegated Moron, and memory calls are included. Token totals are partial when unknown usage calls are nonzero. Cost is an estimate from model prices, not a bill; subscription charges and calls without reliable prices have unknown cost.' },
+    coverage: { kinds, actualTokens: false, actualSpend: false,
+      subagents: 'included_by_kind',
+      note: 'Persisted assistant, delegated implementation, Moron handoff, memory, and image calls are included. Compaction summaries and provider attempts without assistant entries are not yet attributed to time filters, so totals are partial. Cost is an estimate from model prices, not a bill; subscription charges and calls without reliable prices have unknown cost.' },
   };
 }

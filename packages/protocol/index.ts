@@ -83,3 +83,67 @@ export interface Handoff {
 export function terminal(status: TaskStatus): boolean {
   return status === "completed" || status === "failed" || status === "stopped";
 }
+
+
+export interface GeneratedImage {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  moronId: string;
+  title: string;
+  status: "generating" | "completed" | "failed" | "uncertain";
+  model: string;
+  createdAt: number;
+  width: number | null;
+  height: number | null;
+  byteLength: number;
+  mimeType: "image/png";
+  error: string | null;
+  usage: unknown;
+  costKnown: false;
+}
+
+export interface ImageProviderStatus {
+  configured: boolean;
+  provider: "openai-images";
+  model: string;
+  authentication: "separate_server_api_key";
+  subscriptionSupported: false;
+  message: string;
+}
+
+export type PermissionMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+export interface PermissionAction {
+  id: string;
+  sessionId: string;
+  workspaceId: string;
+  repositoryId: string | null;
+  kind: "read" | "edit" | "command" | "source-apply" | "external-request";
+  action: Record<string, unknown>;
+  proposalId: string | null;
+  baseRevision: string | null;
+  fingerprint: string;
+  mode: PermissionMode;
+  revision: number;
+  status: "pending" | "ready" | "active" | "complete" | "rejected" | "revoked";
+  reason: string | null;
+  createdAt: number;
+  expiresAt: number;
+}
+export interface SessionPermissions {
+  sessionId: string;
+  workspaceId: string;
+  repositoryId: string | null;
+  mode: PermissionMode;
+  effectiveMode: PermissionMode;
+  revision: number;
+  autoReviewSupported: false;
+  pending: PermissionAction[];
+}
+export interface ReviewApplication {
+  reviewId: string;
+  status: string;
+  error: string | null;
+  updatedAt: number;
+}

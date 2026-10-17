@@ -1,5 +1,15 @@
 # Self-hosted Morons, local Mac tryout
 
+The current repository delegation, permission, reviewed apply, and generated
+image flows are documented in
+[`docs/delegation-permissions-images.md`](../../docs/delegation-permissions-images.md).
+Repository implementation uses a separate Pi conversation and Docker proposal;
+source application requires the main agent's exact review and a human action.
+New threads use T3 Code's Full access default inside the configured runner.
+Images require a separate account-bound Images API key; ChatGPT OAuth does
+not supply that capability. Development used synthetic providers and mocked
+image responses only.
+
 The local Mac app uses Pi Durable 1.2, OptChat, and a deterministic offline
 model. It makes no provider login or inference calls by itself. Build from this
 checkout, then open the desktop app without backend environment variables:

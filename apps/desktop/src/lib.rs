@@ -4,3 +4,5 @@ pub mod named;
 pub mod sse;
 pub mod transport;
 pub mod visualization;
+pub mod generated_images;
+pub mod permissions;

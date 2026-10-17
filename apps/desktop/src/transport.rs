@@ -2,6 +2,8 @@ use crate::{
     local::LocalBackend,
     model::{Message, Role, Snapshot, Status, Task, TaskStatus},
     named::NamedHistory,
+    generated_images::{GeneratedImage, GeneratedImages, ImageProviderStatus, MAX_IMAGE_BYTES},
+    permissions::{PermissionState, valid_mode},
     sse::Decoder,
     visualization::{VisualizationDocument, VisualizationLease},
 };
@@ -40,6 +42,7 @@ pub struct State {
     pub selected_workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub review: Option<NamedReview>,
+    pub permissions: Option<PermissionState>,
     pub error: Option<&'static str>,
     pub ready: bool,
     pub pending: bool,
@@ -52,6 +55,8 @@ pub struct State {
     pub provider_available: bool,
     pub provider_state: Option<String>,
     pub provider_url: Option<String>,
+    pub generated_images: Vec<GeneratedImage>,
+    pub image_provider: Option<ImageProviderStatus>,
     pub visualizations: Vec<VisualizationDocument>,
     pub visualization_expires_at: Option<Instant>,
 }
@@ -85,6 +90,7 @@ impl Default for State {
             selected_workspace: None,
             workspace_name: None,
             review: None,
+            permissions: None,
             error: None,
             ready: false,
             pending: false,
@@ -97,6 +103,8 @@ impl Default for State {
             provider_available: false,
             provider_state: None,
             provider_url: None,
+            generated_images: Vec::new(),
+            image_provider: None,
             visualizations: Vec::new(),
             visualization_expires_at: None,
         }
@@ -124,6 +132,9 @@ pub enum Command {
     SelectModel { provider: String, id: String },
     SelectEffort(String),
     SelectFast(bool),
+    SelectPermission { session_id: String, mode: String, revision: u64 },
+    PermissionDecision { session_id: String, id: String, fingerprint: String, approve: bool },
+    ApplyReview { session_id: String, id: String, proposal_revision: String, diff_hash: String },
     ToggleModelFavorite { provider: String, id: String, favorite: bool },
     ReviewDecision {
         id: String,
@@ -134,6 +145,8 @@ pub enum Command {
     AccountLogout,
     CheckPiVersion,
     LoadUsage { window: String, provider: Option<String>, model: Option<String> },
+    CancelImage(String),
+    LoadImage(String),
     ProviderUnlock,
     ProviderStart,
     ProviderCallback(String),
@@ -211,7 +224,7 @@ pub struct UsageCoverage {
     pub note: String,
 }
 #[derive(Clone, serde::Deserialize)]
-pub struct UsageKinds { pub main: u64, pub handoff: u64, pub memory: u64 }
+pub struct UsageKinds { pub main: u64, pub handoff: u64, pub memory: u64, #[serde(default)] pub image: u64 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageScope { pub workspace_id: String }
@@ -235,6 +248,32 @@ pub struct NamedReview {
     pub diff: String,
     pub checks: Vec<NamedCheck>,
     pub decision: String,
+    #[serde(default)]
+    pub proposal_revision: Option<String>,
+    #[serde(default)]
+    pub diff_hash: Option<String>,
+    #[serde(default)]
+    pub main_review: Option<String>,
+    #[serde(default)]
+    pub application: Option<ReviewApplication>,
+}
+impl NamedReview {
+    pub fn can_apply(&self) -> bool {
+        self.decision == "approve" && self.checks.iter().all(|check| check.ok) &&
+            self.main_review.as_ref().is_some_and(|review| !review.trim().is_empty()) &&
+            self.proposal_revision.as_ref().is_some_and(|value| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())) &&
+            self.diff_hash.as_ref().is_some_and(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())) &&
+            self.application.as_ref().is_none_or(|application|
+                matches!(application.status.as_str(), "failed" | "interrupted"))
+    }
+}
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewApplication {
+    pub review_id: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub updated_at: u64,
 }
 #[derive(Clone, serde::Deserialize)]
 pub struct NamedCheck {
@@ -684,7 +723,9 @@ async fn handle(
         Command::SelectModel { .. } |
         Command::SelectEffort(_) | Command::SelectFast(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
-        Command::ReviewDecision { .. } => Err("Reviews require the self-hosted backend"),
+        Command::CancelImage(_) | Command::LoadImage(_) => Err("Images require the self-hosted backend"),
+        Command::ReviewDecision { .. } | Command::ApplyReview { .. } => Err("Reviews require the self-hosted backend"),
+        Command::SelectPermission { .. } | Command::PermissionDecision { .. } => Err("Permissions require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
         Command::CheckPiVersion |
         Command::LoadUsage { .. } |
@@ -812,6 +853,18 @@ impl NamedApi {
         serde_json::from_slice(&bounded_body(response).await?)
             .map_err(|_| "Invalid named backend response")
     }
+    async fn image_bytes(&self, session: &str, image: &GeneratedImage) -> Result<Vec<u8>, &'static str> {
+        let response = self.request(reqwest::Method::GET,
+            &format!("v1/sessions/{session}/images/{}/content", image.id)).send().await
+            .map_err(|_| "Cannot load generated image")?;
+        if !response.status().is_success() || response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()) != Some("image/png") {
+            return Err("Generated image is unavailable");
+        }
+        let bytes = bounded_body_with_limit(response, MAX_IMAGE_BYTES).await?;
+        if !image.accepts_bytes(&bytes) { return Err("Invalid generated image"); }
+        Ok(bytes)
+    }
     async fn post(&self, route: &str, body: serde_json::Value) -> Result<(), &'static str> {
         let response = self
             .request(reqwest::Method::POST, route)
@@ -829,6 +882,8 @@ impl NamedApi {
             Err("Effort is unavailable for this model")
         } else if route.ends_with("/effort") && response.status().as_u16() == 409 {
             Err("Wait for the current task before changing effort")
+        } else if route.contains("/permissions") && response.status().as_u16() == 409 {
+            Err("Permission request changed or expired; refresh this thread")
         } else if response.status().as_u16() == 409 {
             Err("Named request conflicts with existing state")
         } else {
@@ -1145,6 +1200,8 @@ async fn named_http(
             let selected_model = model.map(|item| item.label.clone())
                 .unwrap_or_else(|| "Set up provider".into());
             let model_available = model.is_some_and(|item| item.available);
+            let permissions: PermissionState = api.get(&format!("v1/sessions/{session}/permissions")).await?;
+            if !permissions.valid_for(&session, &selected_workspace) { return Err("Invalid permission state"); }
             let history: NamedHistory = api.get(&format!("v1/sessions/{session}/history")).await?;
             if history.session_id != session || history.moron_id != selected {
                 return Err("Named session identity mismatch");
@@ -1160,7 +1217,10 @@ async fn named_http(
                 .or_else(|| reviews.reviews.first());
             let review = if let Some(summary) = selected_review {
                 let detail: NamedReviewDetail = api.get(&format!("v1/reviews/{}", summary.id)).await?;
-                if detail.review.id != summary.id || detail.review.diff.len() > 256 * 1024 {
+                if detail.review.id != summary.id || detail.review.diff.len() > 256 * 1024 ||
+                    detail.review.main_review.as_ref().is_some_and(|value| value.len() > 32768) ||
+                    detail.review.application.as_ref().is_some_and(|value| value.review_id != summary.id ||
+                        value.status.len() > 80 || value.error.as_ref().is_some_and(|error| error.len() > 512)) {
                     return Err("Invalid named review detail");
                 }
                 Some(detail.review)
@@ -1174,12 +1234,35 @@ async fn named_http(
             let documents = lease.as_ref().and_then(|lease| lease.documents(&me.account.id, &session, epoch, now))
                 .map(|docs| docs.to_vec()).unwrap_or_default();
             let provider: Option<ProviderResponse> = api.get("v1/provider/openai/status").await.ok();
+            let image_provider = api.get::<ImageProviderStatus>("v1/image-generation/status").await.ok()
+                .filter(|status| status.message.len() <= 512 && status.model.len() <= 128 &&
+                    status.authentication == "separate_server_api_key" && !status.subscription_supported);
+            let mut images = api.get::<GeneratedImages>(&format!("v1/sessions/{session}/images"))
+                .await.map(|value| value.images).unwrap_or_default();
+            if images.len() > 20 || images.iter().any(|image| !image.valid_for(
+                &me.account.id, &selected_workspace, &session, &selected)) {
+                return Err("Invalid generated image scope");
+            }
+            for image in images.iter_mut().filter(|image| image.status == "completed") {
+                image.bytes = state.generated_images.iter().find(|cached| cached.id == image.id &&
+                    cached.account_id == image.account_id && cached.workspace_id == image.workspace_id &&
+                    cached.session_id == image.session_id && cached.moron_id == image.moron_id)
+                    .and_then(|cached| cached.bytes.clone());
+            }
+            for image in images.iter_mut().filter(|image| image.status == "completed").take(2) {
+                if image.bytes.is_none() {
+                    image.bytes = api.image_bytes(&session, image).await.ok().map(std::sync::Arc::new);
+                }
+            }
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, sessions, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name)))
+            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, sessions, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name, images, image_provider, permissions)))
         }
         .await;
         let session = match refreshed {
             Ok(None) => {
+                state.permissions = None;
+                state.generated_images.clear();
+                state.image_provider = api.get("v1/image-generation/status").await.ok();
                 let workspaces: NamedWorkspaces = match api.get("v1/workspaces").await {
                     Ok(workspaces) => workspaces,
                     Err(_) => { state.error = Some("Cannot load workspaces"); publisher.publish(&state); continue; }
@@ -1256,7 +1339,7 @@ async fn named_http(
                 publisher.publish(&state);
                 continue;
             }
-            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, sessions, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name))) => {
+            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, sessions, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name, images, image_provider, permissions))) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
@@ -1282,6 +1365,9 @@ async fn named_http(
                 state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = Some(workspace_name);
                 state.review = review;
+                state.permissions = Some(permissions);
+                state.generated_images = images;
+                state.image_provider = image_provider;
                 state.visualizations = documents;
                 state.visualization_expires_at = expires_at;
                 state.provider_available = provider.as_ref().is_some_and(|p| p.available);
@@ -1301,6 +1387,9 @@ async fn named_http(
                 state.ready = false;
                 state.status = "Disconnected";
                 state.error = Some(error);
+                state.permissions = None;
+                state.generated_images.clear();
+                state.image_provider = None;
                 state.visualizations.clear();
                 state.visualization_expires_at = None;
                 publisher.publish(&state);
@@ -1484,6 +1573,28 @@ async fn named_http(
                                 serde_json::json!({"provider": provider, "id": id, "favorite": favorite})).await.err();
                         }
                     }
+                    Command::SelectPermission { session_id, mode, revision } => {
+                        if session_id == session && valid_mode(&mode) && state.permissions.as_ref()
+                            .is_some_and(|value| value.session_id == session && value.revision == revision) {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/permissions"),
+                                serde_json::json!({"mode":mode,"expectedRevision":revision})).await.err();
+                        } else { state.request_error = Some("Permissions changed; refresh this thread"); }
+                    }
+                    Command::PermissionDecision { session_id, id, fingerprint, approve } => {
+                        if session_id == session && state.permissions.as_ref().is_some_and(|permissions|
+                            permissions.pending.iter().any(|request| request.id == id && request.fingerprint == fingerprint)) {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/permissions/{id}/decision"),
+                                serde_json::json!({"fingerprint":fingerprint,"decision":if approve {"approve"} else {"reject"}})).await.err();
+                        } else { state.request_error = Some("Approval expired or changed; refresh this thread"); }
+                    }
+                    Command::ApplyReview { session_id, id, proposal_revision, diff_hash } => {
+                        if session_id == session && state.review.as_ref().is_some_and(|review|
+                            review.id == id && review.can_apply() && review.proposal_revision.as_ref() == Some(&proposal_revision) &&
+                            review.diff_hash.as_ref() == Some(&diff_hash)) {
+                            state.request_error = api.post(&format!("v1/reviews/{id}/apply"),
+                                serde_json::json!({"proposalRevision":proposal_revision,"diffHash":diff_hash})).await.err();
+                        } else { state.request_error = Some("Reviewed proposal changed; refresh this thread"); }
+                    }
                     Command::ReviewDecision { id, decision } => {
                         if state.review.as_ref().is_some_and(|r| r.id == id && r.decision == "pending") {
                             let verb = match decision { ReviewDecision::Approve => "approve", ReviewDecision::Reject => "reject" };
@@ -1491,7 +1602,30 @@ async fn named_http(
                                 serde_json::json!({"decision":verb})).await.err();
                         } else { state.request_error = Some("Review is no longer pending"); }
                     }
-                    Command::Stop(_) => { state.request_error = Some("Named task stop is not available yet"); }
+                    Command::LoadImage(id) => {
+                        if let Some(image) = state.generated_images.iter().find(|image|
+                            image.id == id && image.status == "completed").cloned() {
+                            match api.image_bytes(&session, &image).await {
+                                Ok(bytes) => {
+                                    for cached in &mut state.generated_images { cached.bytes = None; }
+                                    if let Some(image) = state.generated_images.iter_mut().find(|image| image.id == id) {
+                                        image.bytes = Some(std::sync::Arc::new(bytes));
+                                    }
+                                    state.request_error = None;
+                                }
+                                Err(error) => state.request_error = Some(error),
+                            }
+                        }
+                    }
+                    Command::CancelImage(id) => {
+                        if state.generated_images.iter().any(|image| image.id == id && image.status == "generating") {
+                            state.request_error = api.post(&format!("v1/sessions/{session}/images/{id}/cancel"),
+                                serde_json::json!({})).await.err();
+                        }
+                    }
+                    Command::Stop(_) => {
+                        state.request_error = api.post(&format!("v1/sessions/{session}/stop"), serde_json::json!({})).await.err();
+                    }
                     Command::AccountLogout => {
                         let _ = api.post("v1/session/logout", serde_json::json!({})).await;
                         state.snapshot = Snapshot::empty();
@@ -1516,7 +1650,10 @@ async fn named_http(
                         state.account_login = true;
                         state.provider_url = None;
                         state.provider_state = None;
-                        state.visualizations.clear();
+                        state.permissions = None;
+                state.generated_images.clear();
+                state.image_provider = None;
+                state.visualizations.clear();
                         state.visualization_expires_at = None;
                         publisher.publish(&state);
                         return NamedExit::SignedOut;
