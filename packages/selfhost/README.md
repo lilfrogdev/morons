@@ -209,3 +209,7 @@ before use from other devices. The native Windows and iPhone clients remain
 later platform milestones. `node --experimental-strip-types scripts/demo-server.mjs`
 starts a disposable offline account, review, and chart for local visual QA;
 it prints only the URL and temporary directory, and removes them on Ctrl-C.
+
+On Mac, the normal installed app is `~/Applications/Morons.app`, displayed as
+Morons in Finder and the Dock. Updating its resources preserves the installed
+bundle identifier and existing account data locations.

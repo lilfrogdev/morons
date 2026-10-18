@@ -35,7 +35,10 @@ separate runner workspaces and review areas per repository and workspace. The
 runner derives a bounded committed-code allowlist from each selected repository
 and runs a fixed diff check on proposals; it does not execute repository scripts.
 Other accounts can register repositories but do not receive source tools.
-The local QA bundle is refreshed only after disposable app verification.
+On Mac, open `~/Applications/Morons.app`. Finder, Dock, and the window use the
+name Morons. Updates preserve the installed bundle identifier and executable
+identity, and retain a recoverable prior bundle. The canonical app is refreshed
+only after disposable app verification.
 Packaged Mac launches use backend resources inside the app bundle, avoiding a
 runtime read of the development checkout in Documents. New local accounts use
 `~/Library/Application Support/Morons`; accounts already created at the prior
