@@ -52,7 +52,8 @@ intent recovery reacquires operation approval after restart. Real-model coding
 uses a dedicated Pi implementation conversation with isolated Docker tools,
 sealed proposals, and main-agent review. An approved main-reviewed proposal
 can be applied and staged only after a separate exact-action approval and
-source-base/clean-worktree checks. Nothing pushes, deploys, or updates Morons.
+source-base/clean-worktree checks. Applying to source creates no commit or
+remote change. The separate GitHub publisher below requires its own approval.
 
 A bounded data-only visualization from `/viz` is sealed to the server's
 account, session, assistant message, and revision. Authorized reads issue a
@@ -154,3 +155,38 @@ OptChat v0.7.2 and Pitcrew adaptation revision/license details are in
 `docs/optchat.md` and `packages/optchat/NOTICE`. The native visualization
 adaptation attribution is in `docs/visualizations.md` and
 `packages/visualization/NOTICE`.
+
+
+## GitHub publication
+
+Repository Settings can bind an existing host GitHub CLI sign-in to the local
+administrator's account, selected repository, numeric GitHub identity, and base
+branch. No login runs automatically. Other Morons accounts cannot use that host
+connection. Disconnecting or signing out cancels pending publication approvals.
+
+An approved implementation review can prepare an exact commit and draft PR.
+Preparation fetches the frozen base into private bare Git storage and applies
+only the reviewed allowlisted regular files through a private index. It does
+not run candidate hooks, configuration, scripts, filters, or checkout commands.
+The registered source checkout is unchanged. Host credentials stay outside the
+Docker runner and desktop protocol; each publication operation pins the chosen
+existing GitHub identity in host memory.
+
+The native review shows the exact repository, account, base, task branch,
+commit, author, message, patch hash, and PR content. Publication always asks for
+an additional one-time approval, including in Full access. That approval covers
+object uploads, creation of a fresh `morons/<artifact>` branch and draft PR,
+and any GitHub Actions they trigger. The publisher verifies every object hash,
+uses atomic ref creation without overwriting an existing ref, and stops if the
+review, account, repository identity, allowlist, or base changes. Partial receipts
+survive restart and identical reconnection; resuming asks for fresh approval.
+
+The PR link and manual CI refresh are bound to the frozen head commit. There is
+no merge, force push, fork creation, deployment, or automatic CI rerun control.
+Controlled adapters verified preparation, mandatory approval, identity changes,
+reconnection, lost responses, ruleset rejection, exact retries, and head-specific
+status. Native Mac review/approval/settings and narrow layouts were inspected.
+No live product PR, provider inference, new authentication, or Docker mutation
+was used for this verification. Live GitHub commit serialization and repository
+rules remain a first human publication check; a hash mismatch stops before a
+branch is created. Windows compilation and interaction remain unverified here.

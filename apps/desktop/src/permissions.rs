@@ -49,7 +49,7 @@ pub struct PermissionRequest {
 impl PermissionRequest {
     fn valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.id).is_ok() && hex(&self.fingerprint, 64) && self.status == "pending" &&
-            matches!(self.kind.as_str(), "read" | "edit" | "command" | "source-apply" | "external-request") &&
+            matches!(self.kind.as_str(), "read" | "edit" | "command" | "source-apply" | "external-request" | "github-publish") &&
             self.action.is_object() && serde_json::to_vec(&self.action).is_ok_and(|bytes| bytes.len() <= 524288) &&
             self.proposal_id.as_ref().is_none_or(|value| value.len() <= 160) &&
             self.base_revision.as_ref().is_none_or(|value| value.len() <= 160)

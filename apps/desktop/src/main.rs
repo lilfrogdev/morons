@@ -9,6 +9,7 @@ mod drafts;
 mod image_ui;
 mod permission_ui;
 mod runner_ui;
+mod github_ui;
 use gpui::{prelude::*, *};
 use morons_desktop::{
     model::{Role, TaskStatus},
@@ -69,6 +70,8 @@ struct Chat {
     login_password: Entity<input::TextInput>,
     workspace_input: Entity<input::TextInput>,
     moron_input: Entity<input::TextInput>,
+    github_repository: Entity<input::TextInput>,
+    github_base: Entity<input::TextInput>,
     settings_name: Entity<input::TextInput>,
     settings_rules: Entity<input::TextInput>,
     settings_preferences: Entity<input::TextInput>,
@@ -117,6 +120,8 @@ impl Chat {
         let login_password = cx.new(|cx| { let mut field = input::TextInput::new_secret(cx); field.set_id("account-password"); field });
         let workspace_input = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("workspace-name"); field.set_placeholder("Workspace name"); field });
         let moron_input = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("new-moron-name"); field.set_placeholder("Moron name"); field });
+        let github_repository = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("github-repository"); field.set_placeholder("owner/repository"); field });
+        let github_base = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("github-base"); field.set_placeholder("Base branch (repository default if empty)"); field });
         let settings_name = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-name"); field.set_placeholder("Moron name"); field });
         let settings_rules = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-rules"); field.set_placeholder("Shared instructions for new threads"); field });
         let settings_preferences = cx.new(|cx| { let mut field = input::TextInput::new(cx); field.set_id("settings-moron-preferences"); field.set_placeholder("Preferences for new threads"); field });
@@ -140,6 +145,12 @@ impl Chat {
                             });
                         }
                         let follow = view.scroll.max_offset().y + view.scroll.offset().y < px(60.);
+                        if view.state.selected_moron != state.selected_moron || view.state.selected_workspace != state.selected_workspace {
+                            for field in [&view.github_repository, &view.github_base] {
+                                field.update(cx, |field, cx| { field.reset(); cx.notify(); });
+                            }
+                        }
+
                         if view.state.account_login && !state.account_login {
                             view.auth_signup = false;
                             view.login_password.update(cx, |field, cx| { field.reset(); cx.notify(); });
@@ -147,7 +158,7 @@ impl Chat {
                         }
                         if !view.state.account_login && state.account_login {
                             for field in [&view.input, &view.login_name, &view.login_password,
-                                &view.bootstrap_token, &view.provider_callback] {
+                                &view.bootstrap_token, &view.provider_callback, &view.github_repository, &view.github_base] {
                                 field.update(cx, |field, cx| { field.reset(); cx.notify(); });
                             }
                             view.last_ack = None;
@@ -222,6 +233,8 @@ impl Chat {
             login_password,
             workspace_input,
             moron_input,
+            github_repository,
+            github_base,
             settings_name,
             settings_rules,
             settings_preferences,
@@ -639,6 +652,7 @@ impl Chat {
             .flex_1().min_h_0().overflow_y_scroll().px_6().py_5()
             .child(div().w_full().max_w(px(680.)).mx_auto().flex().flex_col().gap_5()
                 .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
+                .child(github_ui::settings(self, cx))
                 .when_some(self.state.runner_status.clone(), |d, runner| d.child(runner_ui::card(self, runner, cx)))
                 .when_some(self.state.image_provider.clone(), |d, status| d.child(
                     div().flex().flex_col().gap_2().p_4().rounded(px(10.))
@@ -1729,7 +1743,6 @@ impl Render for Chat {
                                             if activation_key(event) { view.command(Command::CancelImage(cancel_key_id.clone()), cx); cx.stop_propagation(); }
                                         }))))
                             }))
-            .child(permission_ui::pending(self, cx))
             .when_some(review, |d, review| {
                 let apply = review.can_apply();
                 let apply_review = review.clone();
@@ -1787,6 +1800,8 @@ impl Render for Chat {
                         )),
                 )
             })
+            .child(github_ui::publication(self, cx))
+            .child(permission_ui::pending(self, cx))
             .when(!visualizations.is_empty(), |d| d.child(
                 div().id("visualizations").role(gpui::Role::Region)
                     .aria_label("Structured visualizations")

@@ -213,3 +213,28 @@ it prints only the URL and temporary directory, and removes them on Ctrl-C.
 On Mac, the normal installed app is `~/Applications/Morons.app`, displayed as
 Morons in Finder and the Dock. Updating its resources preserves the installed
 bundle identifier and existing account data locations.
+
+
+### GitHub task branches and draft PRs
+
+In a repository's Settings, connect `owner/repository` and an optional existing
+base branch using the host's already signed-in GitHub CLI. Only the local Morons
+administrator can use this connection. If the CLI or sign-in is missing, a human
+must finish that setup. Morons never starts GitHub login itself.
+
+After an implementation review is approved, choose Prepare draft PR. Inspect the
+exact commit and PR content, then request publication approval. Approve once
+uploads the frozen objects, creates a new task branch, and opens a draft PR;
+GitHub may run CI. This approval is required in every permission mode. Existing
+source application remains a separate action that stages the reviewed patch.
+
+The host publisher uses private bare storage and never executes candidate code
+with GitHub credentials. It checks the base, review hashes, path allowlist,
+selected GitHub identity, and numeric repository identity before each write.
+Conflicting refs and remote object mismatches stop publication. Saved receipts
+reconcile partial outcomes; reconnecting the same identity preserves the exact
+artifact and requires fresh approval. Refresh CI reads checks for that head SHA.
+
+The desktop and runner receive no GitHub token. The existing host CLI credential
+is pinned in memory per publication operation. This MVP supports github.com;
+a GitHub App with selected-repository permissions is a later multi-host option.

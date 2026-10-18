@@ -6,3 +6,4 @@ pub mod transport;
 pub mod visualization;
 pub mod generated_images;
 pub mod permissions;
+pub mod github;

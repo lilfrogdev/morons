@@ -76,6 +76,7 @@ pub(super) fn pending(chat: &Chat, cx: &mut Context<Chat>) -> Div {
         let title = match request.kind.as_str() {
             "source-apply" => "Approve applying reviewed changes to source",
             "external-request" => "Approve separately billed API request",
+            "github-publish" => "Approve GitHub branch and draft PR",
             "edit" => "Approve file change", _ => "Approve command",
         };
         div().id(SharedString::from(format!("permission-request-{}", request.id)))
@@ -85,6 +86,8 @@ pub(super) fn pending(chat: &Chat, cx: &mut Context<Chat>) -> Div {
             .child(div().font_weight(FontWeight::BOLD).child(title))
             .when(request.kind == "source-apply", |d| d.child(div().text_xs()
                 .child("Applies and stages this reviewed patch in source. No commit is created.")))
+            .when(request.kind == "github-publish", |d| d.child(div().text_xs()
+                .child("Uploads this exact patch, creates its task branch and draft PR, and may trigger GitHub Actions.")))
             .child(div().id("permission-exact-action").max_h(px(180.)).overflow_y_scroll()
                 .p_2().bg(rgb(0xF3F6F8)).font_family("Menlo").text_size(px(11.)).child(request.preview()))
             .child(div().text_size(px(10.)).font_family("Menlo").child(format!("SHA-256: {}", request.fingerprint)))

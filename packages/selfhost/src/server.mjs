@@ -27,6 +27,7 @@ import { createImplementationRuntime } from './implementation-runtime.mjs';
 import { openPermissionPolicy, PERMISSION_MODES, PERMISSION_REFERENCE } from './permission-policy.mjs';
 import { imageProviderFromEnvironment, openImageGeneration } from './image-generation.mjs';
 import { openSourceApplications } from './source-application.mjs';
+import { openGitHubRuntime } from './github-runtime.mjs';
 
 const VIZ_PREFIX = 'morons.visualization.v1\n';
 const execFileAsync = promisify(execFile);
@@ -167,7 +168,7 @@ function entryText(entry) {
   }).join("") ?? "";
 }
 
-export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, runnerUnavailableReason = 'not_configured', privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch, runnerInspect = inspectRunner, runnerDownload = downloadContainerRunner }) {
+export async function openFixtureServer({ databasePath, ownerToken, host = "127.0.0.1", port = 0, afterPiSettled = () => {}, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, runnerUnavailableReason = 'not_configured', privateDataRoot = null, providerModels = null, providerModelId = null, accountId = 'local-owner', fixtureEnabled = true, imageProvider = imageProviderFromEnvironment(process.env, accountId), imageFetch = fetch, runnerInspect = inspectRunner, runnerDownload = downloadContainerRunner, githubAdapter = null }) {
   const repositoryName = repositoryPlan ? basename(repositoryPlan.repository).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 80) || 'Repository' : null;
   if (!databasePath || typeof databasePath !== "string") throw new Error("databasePath is required");
   if (typeof ownerToken !== "string" || ownerToken.length < 32 || ownerToken.length > 256)
@@ -185,7 +186,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   const lockPath = `${databasePath}.owner.lock`;
   const ownerLock = await acquireOwnerLock(lockPath, "database_already_owned_or_stale_lock");
   let catalog, harness, root, optchat, memoryRuntime, handoffStore, handoffExtension, repoExtension, selectedModel, models;
-  let permissions, implementationRuntime, images, applications;
+  let permissions, implementationRuntime, images, applications, github;
   let runnerStatus, runnerOperation, runnerController;
   let runnerBusy = false;
   const configuredRunnerImage = runnerImage;
@@ -222,6 +223,10 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
     registry.install(images.extension);
     applications = await openSourceApplications({ filePath: `${databasePath}.applications.sqlite`, catalog,
       permissions, planForSession: repositoryPlanForSession });
+    github = await openGitHubRuntime({ filePath: `${databasePath}.github.sqlite`,
+      rootPath: `${databasePath}.github-publications`, accountId, catalog, permissions,
+      planForSession: publicationPlanForSession, ensureSession: permissionSession,
+      enabled: runnerUnavailableReason !== 'administrator_required', adapter: githubAdapter });
     models = providerModels ?? fixtureModels();
     if (providerModels) models.setProvider(fixtureModels().getProvider('morons-fixture'));
     installFastModels(models);
@@ -294,6 +299,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       catalog.ensureLegacyRepository(await realpath(repositoryPlan.repository).catch(() => resolve(repositoryPlan.repository)), repositoryName);
     }
   } catch (error) {
+    await github?.close().catch(() => {});
     await applications?.close().catch(() => {});
     await images?.close().catch(() => {});
     permissions?.close();
@@ -441,6 +447,17 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       checkProfile: 'source-code', reviewRoot, workspaceRoot };
     runnerPlans.set(repository.id, plan);
     return plan;
+  }
+  async function publicationPlanForSession(session, baseRevision) {
+    if (runnerUnavailableReason === 'administrator_required') return null;
+    const repository = catalog.repositoryForMoron(session.moronId);
+    const moron = catalog.getMoron(session.moronId);
+    if (!repository || !moron || moron.archived || repository.workspaceId !== moron.workspaceId) return null;
+    const source = await selectedRepositoryPath(repository.path, protectedRoots);
+    if (source !== repository.path) throw new Error('github_repository_path_changed');
+    const allowedPaths = repository.id === 'configured' && configuredRepositoryPlan ?
+      configuredRepositoryPlan.allowedPaths : await committedSourcePaths(source, baseRevision);
+    return { allowedPaths };
   }
   function sourceToolsFor(session, model) {
     const repository = catalog.repositoryForMoron(session.moronId);
@@ -890,6 +907,35 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
           accessEpoch: createHash('sha256').update(`${accountId}:${session.id}`).digest('hex'),
           leaseMs: 5000, documents });
       }
+      const githubRepository = /^\/v1\/repositories\/([^/]+)\/github(?:\/(connect|disconnect))?$/.exec(path);
+      if (githubRepository) {
+        const id = decodeURIComponent(githubRepository[1]);
+        const item = catalog.getRepository(id);
+        if (!item || item.workspaceId !== (requestUrl.searchParams.get('workspaceId') ?? 'personal'))
+          return send(response, 404, { error: 'repository_not_found' });
+        const reviewId = requestUrl.searchParams.get('reviewId');
+        if (!githubRepository[2] && request.method === 'GET') return send(response, 200, github.view(id, reviewId));
+        if (request.method === 'POST' && githubRepository[2] === 'connect')
+          return send(response, 200, await github.connect(id, await readBody(request)));
+        if (request.method === 'POST' && githubRepository[2] === 'disconnect') {
+          await readBody(request);
+          return send(response, 200, github.disconnect(id));
+        }
+      }
+      const githubReview = /^\/v1\/reviews\/([a-f0-9]{16})\/github\/(prepare|publish|refresh)$/.exec(path);
+      if (githubReview && request.method === 'POST') {
+        const review = catalog.getReview(githubReview[1]);
+        const session = review && catalog.getSession(review.sessionId);
+        if (!session) return send(response, 404, { error: 'review_not_found' });
+        permissionSession(session);
+        const body = await readBody(request);
+        if (githubReview[2] === 'prepare') return send(response, 202, github.prepare(review.id));
+        if (typeof body?.publicationId !== 'string' || body.publicationId.length > 160)
+          return send(response, 400, { error: 'github_publication_required' });
+        return send(response, githubReview[2] === 'publish' ? 202 : 200,
+          githubReview[2] === 'publish' ? github.publish(review.id, body.publicationId) :
+            await github.refresh(review.id, body.publicationId));
+      }
       const reviewList = /^\/v1\/sessions\/([^/]+)\/reviews$/.exec(path);
       if (reviewList && request.method === 'GET') {
         const session = catalog.getSession(decodeURIComponent(reviewList[1]));
@@ -1101,6 +1147,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
             'account_session_revoked', 'server_shutdown', 'chat_admission_cancelled'].includes(error?.message))
         return send(response, 409, { error: error.message });
       if (error?.message?.startsWith('image_')) return send(response, 403, { error: error.message });
+      if (error?.message?.startsWith('github_')) return send(response, 409, { error: error.message });
       if (error?.message?.startsWith('application_') || error?.message === 'reviewed_proposal_required')
         return send(response, 409, { error: error.message });
       return send(response, 500, { error: "internal" });
@@ -1109,6 +1156,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   try {
     await new Promise((resolve, reject) => server.once("error", reject).listen(port, host, resolve));
   } catch (error) {
+    await github.close().catch(() => {});
     await applications.close().catch(() => {});
     await images.close().catch(() => {});
     await harness.close(BACKGROUND_CONTEXT);
@@ -1144,6 +1192,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
   return {
     url: `http://${host}:${server.address().port}`,
     async revokeOperations() {
+      await github.cancel();
       runnerController?.abort();
       await runnerOperation;
       for (const sessionId of permissionSessionIds) {
@@ -1159,7 +1208,7 @@ export async function openFixtureServer({ databasePath, ownerToken, host = "127.
       for (const sessionId of permissionSessionIds) permissions.revokeSession(sessionId, 'server_shutdown');
       for (const cleanup of [
         () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
-        () => applications.close(), () => images.close(),
+        () => github.close(), () => applications.close(), () => images.close(),
         () => Promise.allSettled([...reviewRecoveries]),
         () => harness.close(BACKGROUND_CONTEXT),
         ...[...runnerPlans.values()].map((plan) => () => stopContainerWorkspace(plan)),

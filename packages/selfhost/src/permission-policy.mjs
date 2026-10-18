@@ -19,7 +19,7 @@ export const PERMISSION_REFERENCE = Object.freeze({
 });
 
 const modes = new Set(PERMISSION_MODES.map(({ id }) => id));
-const kinds = new Set(['read', 'edit', 'command', 'source-apply', 'external-request']);
+const kinds = new Set(['read', 'edit', 'command', 'source-apply', 'external-request', 'github-publish']);
 const liveStates = ['pending', 'ready', 'active'];
 const strengths = { 'approval-required': 0, auto: 0, 'auto-accept-edits': 1, 'full-access': 2 };
 function failure(code) { return Object.assign(new Error(code), { code }); }
@@ -56,6 +56,16 @@ export function permissionActionDescriptor(input) {
       !/^[0-9a-f]{64}$/.test(descriptor.action.patchHash ?? '') ||
       !/^[0-9a-f]{64}$/.test(descriptor.action.mainAgentReviewHash ?? '')))
     throw failure('source_apply_review_required');
+  if (descriptor.kind === 'github-publish' && (!descriptor.repositoryId || !descriptor.proposalId ||
+      !/^[0-9a-f]{40}$/.test(descriptor.baseRevision ?? '') ||
+      !/^[0-9a-f]{40}$/.test(descriptor.action.commit ?? '') ||
+      !/^[0-9a-f]{40}$/.test(descriptor.action.tree ?? '') ||
+      !/^[0-9a-f]{64}$/.test(descriptor.action.patchHash ?? '') ||
+      !/^[0-9a-f]{64}$/.test(descriptor.action.mainReviewHash ?? '') ||
+      !descriptor.action.connectionId || !descriptor.action.accountId || descriptor.action.host !== 'github.com' ||
+      !Number.isSafeInteger(descriptor.action.githubRepositoryId) || !Number.isSafeInteger(descriptor.action.userId) ||
+      !/^morons\/[a-zA-Z0-9-]+$/.test(descriptor.action.branch ?? '') || descriptor.action.draft !== true))
+    throw failure('github_publish_review_required');
   const serialized = canonical(descriptor);
   if (Buffer.byteLength(serialized) > 524288) throw failure('permission_action_too_large');
   return immutable(JSON.parse(serialized));
@@ -67,7 +77,7 @@ export function permissionRequiresApproval(mode, kind) {
   checkMode(mode);
   if (!kinds.has(kind)) throw failure('invalid_permission_action');
   if (kind === 'read') return false;
-  if (kind === 'source-apply' || kind === 'external-request') return true;
+  if (kind === 'source-apply' || kind === 'external-request' || kind === 'github-publish') return true;
   if (mode === 'full-access') return false;
   return !(mode === 'auto-accept-edits' && kind === 'edit');
 }

@@ -1,5 +1,6 @@
 use crate::{
     local::LocalBackend,
+    github::GitHubState,
     model::{Message, Role, Snapshot, Status, Task, TaskStatus},
     named::NamedHistory,
     generated_images::{GeneratedImage, GeneratedImages, ImageProviderStatus, MAX_IMAGE_BYTES},
@@ -42,6 +43,7 @@ pub struct State {
     pub selected_workspace: Option<String>,
     pub workspace_name: Option<String>,
     pub review: Option<NamedReview>,
+    pub github: Option<GitHubState>,
     pub permissions: Option<PermissionState>,
     pub error: Option<&'static str>,
     pub ready: bool,
@@ -91,6 +93,7 @@ impl Default for State {
             selected_workspace: None,
             workspace_name: None,
             review: None,
+            github: None,
             permissions: None,
             error: None,
             ready: false,
@@ -138,6 +141,11 @@ pub enum Command {
     PermissionDecision { session_id: String, id: String, fingerprint: String, approve: bool },
     ApplyReview { session_id: String, id: String, proposal_revision: String, diff_hash: String },
     ToggleModelFavorite { provider: String, id: String, favorite: bool },
+    ConnectGitHub { repository_id: String, repository: String, base_ref: String },
+    DisconnectGitHub { repository_id: String },
+    PrepareGitHubPublication { review_id: String },
+    PublishGitHubPublication { review_id: String, publication_id: String },
+    RefreshGitHubPublication { review_id: String, publication_id: String },
     ReviewDecision {
         id: String,
         decision: ReviewDecision,
@@ -729,6 +737,8 @@ async fn handle(
         Command::SelectEffort(_) | Command::SelectFast(_) | Command::ToggleModelFavorite { .. } =>
             Err("Workspace, model, and moron selection require the self-hosted backend"),
         Command::CancelImage(_) | Command::LoadImage(_) => Err("Images require the self-hosted backend"),
+        Command::ConnectGitHub { .. } | Command::DisconnectGitHub { .. } | Command::PrepareGitHubPublication { .. } |
+        Command::PublishGitHubPublication { .. } | Command::RefreshGitHubPublication { .. } |
         Command::ReviewDecision { .. } | Command::ApplyReview { .. } => Err("Reviews require the self-hosted backend"),
         Command::SelectPermission { .. } | Command::PermissionDecision { .. } => Err("Permissions require the self-hosted backend"),
         Command::AccountLogin { .. } | Command::AccountCreate { .. } | Command::AccountLogout |
@@ -916,6 +926,20 @@ impl NamedApi {
             Err("An administrator account is required for repository setup")
         } else if route.contains("/permissions") && response.status().as_u16() == 409 {
             Err("Permission request changed or expired; refresh this thread")
+        } else if route.contains("/github") {
+            let body = bounded_body(response).await?;
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            match value.get("error").and_then(|value| value.as_str()).unwrap_or("") {
+                "github_cli_unavailable" => Err("Install the host GitHub CLI and sign in, then connect this repository"),
+                "github_authentication_required" | "github_remote_request_failed" => Err("Sign in to the host GitHub CLI, then reconnect this repository"),
+                "github_invalid_repository" => Err("Enter a GitHub repository as owner/repository"),
+                "github_invalid_branch" => Err("Enter an existing base branch or leave it empty for the repository default"),
+                "github_permission_denied" | "github_repository_unavailable" => Err("The connected GitHub account needs repository write access"),
+                "github_base_changed" | "github_fetched_base_changed" => Err("The base branch changed; request a fresh implementation and review"),
+                "github_identity_changed" | "github_connection_changed" => Err("The GitHub account changed; reconnect and review the exact destination"),
+                "github_administrator_required" => Err("GitHub publishing requires the local administrator account"),
+                _ => Err("GitHub operation stopped; refresh the exact publication before retrying"),
+            }
         } else if response.status().as_u16() == 409 {
             Err("Named request conflicts with existing state")
         } else {
@@ -1259,6 +1283,16 @@ async fn named_http(
                 Some(detail.review)
             } else { None };
             let me: AccountMe = api.get("v1/session/me").await?;
+            let github = if let Some(repository) = state.repositories.iter().find(|item| item.moron_id == selected && !item.archived) {
+                let path = format!("v1/repositories/{}/github?workspaceId={}&reviewId={}", repository.id,
+                    selected_workspace, review.as_ref().map(|value| value.id.as_str()).unwrap_or(""));
+                let value = api.get::<GitHubState>(&path).await?;
+                if !value.valid_for(&repository.id, &me.account.id, review.as_ref().map(|value| value.id.as_str())) {
+                    return Err("Invalid GitHub publication scope");
+                }
+                Some(value)
+            } else { None };
+
             let visual: serde_json::Value = api.get(&format!("v1/sessions/{session}/visualizations")).await?;
             let now = Instant::now();
             let epoch = visual.get("accessEpoch").and_then(|v| v.as_str()).unwrap_or("");
@@ -1288,11 +1322,13 @@ async fn named_http(
                 }
             }
             let favorites = models.favorites.into_iter().map(|value| (value.provider, value.id)).collect::<Vec<_>>();
-            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, sessions, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name, images, image_provider, permissions)))
+            Ok::<_, &'static str>(Some((selected_model, model_available, model_selection, models.selected_effort, models.fast_mode, models.fast_available, models.models, favorites, history.into_snapshot()?, session, sessions, catalog, review, provider, documents, lease.map(|lease| lease.expires_at()), workspace_name, workspaces, me.account.name, images, image_provider, permissions, github)))
         }
         .await;
         let session = match refreshed {
             Ok(None) => {
+                state.github = None;
+                state.review = None;
                 state.permissions = None;
                 state.generated_images.clear();
                 state.image_provider = api.get("v1/image-generation/status").await.ok();
@@ -1372,7 +1408,7 @@ async fn named_http(
                 publisher.publish(&state);
                 continue;
             }
-            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, sessions, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name, images, image_provider, permissions))) => {
+            Ok(Some((model, model_available, selected_model, selected_effort, fast_mode, fast_available, models, favorites, snapshot, session, sessions, catalog, review, provider, documents, expires_at, workspace_name, workspaces, account_name, images, image_provider, permissions, github))) => {
                 state.model = Some(model);
                 state.models = models;
                 state.selected_model = Some(selected_model);
@@ -1398,6 +1434,7 @@ async fn named_http(
                 state.selected_workspace = Some(selected_workspace.clone());
                 state.workspace_name = Some(workspace_name);
                 state.review = review;
+                state.github = github;
                 state.permissions = Some(permissions);
                 state.generated_images = images;
                 state.image_provider = image_provider;
@@ -1426,6 +1463,7 @@ async fn named_http(
                 state.runner_status = None;
                 state.visualizations.clear();
                 state.visualization_expires_at = None;
+                state.github = None;
                 publisher.publish(&state);
                 tokio::select! {
                     command = commands.recv() => {
@@ -1634,6 +1672,38 @@ async fn named_http(
                                 serde_json::json!({"fingerprint":fingerprint,"decision":if approve {"approve"} else {"reject"}})).await.err();
                         } else { state.request_error = Some("Approval expired or changed; refresh this thread"); }
                     }
+                    Command::ConnectGitHub { repository_id, repository, base_ref } => {
+                        if state.github.as_ref().is_some_and(|value| value.repository_id == repository_id && value.available) {
+                            state.request_error = api.post(&format!("v1/repositories/{repository_id}/github/connect?workspaceId={selected_workspace}"),
+                                serde_json::json!({"repository":repository,"baseRef":base_ref})).await.err();
+                        }
+                    }
+                    Command::DisconnectGitHub { repository_id } => {
+                        if state.github.as_ref().is_some_and(|value| value.repository_id == repository_id) {
+                            state.request_error = api.post(&format!("v1/repositories/{repository_id}/github/disconnect?workspaceId={selected_workspace}"),
+                                serde_json::json!({})).await.err();
+                            state.github = None;
+                        }
+                    }
+                    Command::PrepareGitHubPublication { review_id } => {
+                        if state.review.as_ref().is_some_and(|value| value.id == review_id && value.decision == "approve") {
+                            state.request_error = api.post(&format!("v1/reviews/{review_id}/github/prepare"), serde_json::json!({})).await.err();
+                        }
+                    }
+                    Command::PublishGitHubPublication { review_id, publication_id } => {
+                        if state.github.as_ref().and_then(|value| value.publication.as_ref()).is_some_and(|value|
+                            value.review_id == review_id && value.id == publication_id) {
+                            state.request_error = api.post(&format!("v1/reviews/{review_id}/github/publish"),
+                                serde_json::json!({"publicationId":publication_id})).await.err();
+                        }
+                    }
+                    Command::RefreshGitHubPublication { review_id, publication_id } => {
+                        if state.github.as_ref().and_then(|value| value.publication.as_ref()).is_some_and(|value|
+                            value.review_id == review_id && value.id == publication_id) {
+                            state.request_error = api.post(&format!("v1/reviews/{review_id}/github/refresh"),
+                                serde_json::json!({"publicationId":publication_id})).await.err();
+                        }
+                    }
                     Command::ApplyReview { session_id, id, proposal_revision, diff_hash } => {
                         if session_id == session && state.review.as_ref().is_some_and(|review|
                             review.id == id && review.can_apply() && review.proposal_revision.as_ref() == Some(&proposal_revision) &&
@@ -1677,6 +1747,7 @@ async fn named_http(
                         let _ = api.post("v1/session/logout", serde_json::json!({})).await;
                         state.snapshot = Snapshot::empty();
                         state.review = None;
+                        state.github = None;
                         state.named_morons.clear();
                         state.selected_moron = None;
                         state.runner_status = None;
@@ -1703,6 +1774,7 @@ async fn named_http(
                 state.image_provider = None;
                 state.visualizations.clear();
                         state.visualization_expires_at = None;
+                state.github = None;
                         publisher.publish(&state);
                         return NamedExit::SignedOut;
                     }

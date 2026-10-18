@@ -47,7 +47,7 @@ async function privateFile(path) {
 }
 
 
-export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0, runnerInspect, runnerDownload }) {
+export async function openAccountServer({ dataDir, bootstrapToken, repositoryPlan = null, runnerImage = repositoryPlan?.runnerImage ?? null, providerFactory = null, providerKey = null, providerModelId = null, host = '127.0.0.1', port = 0, runnerInspect, runnerDownload, githubAdapter = null }) {
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('tls_ingress_required');
   if (typeof bootstrapToken !== 'string' || bootstrapToken.length < 32 || bootstrapToken.length > 256)
     throw new Error('bootstrap_token_required');
@@ -101,7 +101,7 @@ export async function openAccountServer({ dataDir, bootstrapToken, repositoryPla
           runnerImage: account.administrator ? runnerImage : null, privateDataRoot: dataDir, accountId: account.id,
           runnerUnavailableReason: account.administrator ? 'not_configured' : 'administrator_required',
           ...(runnerInspect ? { runnerInspect } : {}), ...(runnerDownload ? { runnerDownload } : {}),
-          providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false });
+          providerModels: providerRuntime?.models ?? null, providerModelId, fixtureEnabled: false, githubAdapter });
         return { server, internalToken, provider: createProviderFlow(providerRuntime?.auth ?? providerRuntime),
           providerRuntime, accountPlan };
       } catch (error) { await server?.close(); await providerRuntime?.close?.(); throw error; }
